@@ -1,13 +1,13 @@
 # M2 — GPU processing operators + full pipeline
 
-Status: **all processing operators built — resize, unpack/pack, and FRC (motion-compensated
-interpolation on the OFA). The `st2110_rx → unpack → resize → pack → st2110_tx` pipeline runs on the
-NIC (1080p→2160p in flight, zero loss). FRC is validated standalone; wiring it into the live pipeline
-is the remaining integration step (2026-06-15).**
+Status: **COMPLETE — the full `st2110_rx → unpack → resize → frc → pack → st2110_tx` pipeline runs
+end-to-end on the NIC (1080p→2160p NPP upscale + OFA motion-compensated interpolation in flight),
+zero loss, `future_err=0` (2026-06-15). Remaining work is perf tuning + production hardening, not
+functionality.**
 
 ```
 st2110_rx → [unpack] → [resize] → [frc] → [pack] → st2110_tx
-   ✓          ✓ CUDA     ✓ NPP    ✓ OFA     ✓ CUDA     ✓
+   ✓          ✓ CUDA     ✓ NPP    ✓ OFA     ✓ CUDA     ✓     ← all wired + running on hardware
 ```
 
 ## Intermediate format: GpuFrame
@@ -30,8 +30,9 @@ is the GPU working format for the whole processing chain.
   phase t from prev/cur along the flow. `FrcOp` holds prev and emits an interpolated frame per input
   (1:1; 2× rate-conversion is a follow-on). Validated (`frc_smoke`, pure GPU): synthetic 16px
   translation → flow `(16.00, 0.22)`, interpolation MAE 0.05 vs naive-blend 5.22 (~100× better — the
-  flow is actually used, no ghosting). Live-pipeline wiring + per-worker-thread context hardening
-  (`cuCtxSetCurrent` in compute) is the remaining step.
+  flow is actually used, no ghosting). Wired into the live pipeline; `NvofFlow` captures the primary
+  context at init and `cuCtxSetCurrent`s it in `compute()` so the NVOF driver calls work on any
+  Holoscan worker thread (no context errors in the live graph).
 
 ## Build note (GB10)
 Enabling the CUDA language sets `CMAKE_CUDA_ARCHITECTURES` to a conservative default (sm_75 here),
@@ -40,32 +41,36 @@ CMake forces `CMAKE_CUDA_ARCHITECTURES=121`.
 
 ## End-to-end pipeline (`apps/st2110_pipeline.cpp`)
 One process, shared EAL, MultiThreadScheduler:
-`st2110_rx → unpack → resize → pack → st2110_tx`. Validated with a generator feeding the RX port
-(generator 1080p → pipeline → 2160p out, 300 frames):
+`st2110_rx → unpack → resize → frc → pack → st2110_tx` (`SPARK_FRC=0` bypasses frc). Validated with a
+generator feeding the RX port (1080p → pipeline → 2160p out, 300 frames):
 
-| stage | result |
-|---|---|
-| RX (1080p in) | 1,113,300 pkts, **lost=0 bad=0 hw_missed=0**, ingest ~2.8 µs |
-| resize | 1080p→2160p cubic ~0.28 ms/frame |
-| TX (2160p out) | 4,448,100 pkts (14827/frame), **future_err=0**, jitter 24 ns |
+| stage | with FRC | without FRC |
+|---|---|---|
+| RX (1080p in) | 1,113,300 pkts, **lost=0 bad=0 q_dropped=0 hw_missed=0** | same, lost=0 |
+| resize | 1080p→2160p cubic ~0.28 ms | ~0.28 ms |
+| frc | interpolated 299/300 (3840×2160) | — |
+| TX (2160p out) | 4,448,100 pkts, **future_err=0**, jitter 18 ns | future_err=0, jitter 24 ns |
+| ingest latency avg | ~15.6 µs | ~2.8 µs |
+| TX past_err | 54,919 (~1.2%, slightly-late, not loss) | ~425 |
 
-Packet count quadruples 1.1M→4.4M exactly as 2160p packetization requires — real upscale in flight,
-zero loss, clean pacing.
+Zero loss / zero dropped frames either way — real NPP upscale **and** OFA motion-compensated
+interpolation in flight. FRC raises pacing jitter + latency under the heavier load (a tuning item,
+below); RX stays clean.
 
 Reproduce (2 processes; pipeline first, then generator after its "st2110_rx started" line):
 ```bash
-sudo -n SPARK_PROFILE=1080p SPARK_OUT_W=3840 SPARK_OUT_H=2160 SPARK_RX_PCI=0000:01:00.1 \
+sudo -n SPARK_PROFILE=1080p SPARK_OUT_W=3840 SPARK_OUT_H=2160 SPARK_FRC=1 SPARK_RX_PCI=0000:01:00.1 \
         SPARK_TX_PCI=0002:01:00.0 SPARK_DST_MAC=00:00:5e:00:53:30 ./engine/build/st2110_pipeline &
-sudo -n SPARK_PROFILE=1080p SPARK_WARMUP_MS=800 SPARK_TX_PCI=0000:01:00.0 \
+sudo -n SPARK_PROFILE=1080p SPARK_WARMUP_MS=1200 SPARK_TX_PCI=0000:01:00.0 \
         SPARK_DST_MAC=00:00:5e:00:53:2c ./engine/build/st2110_tx_smoke
 ```
 Resize-only benchmark (pure GPU, no NIC/root): `./engine/build/resize_smoke`.
 
 ## Next
-1. **Wire `frc` into the live pipeline** — `rx → unpack → resize → frc → pack → tx`; harden the NVOF
-   driver context across Holoscan worker threads (`cuCtxSetCurrent` in `compute`), and decide the rate
-   model (1:1 motion-comp vs 2× rate-conversion + TX pacing change).
-2. **PTP discipline** (`ptp4l`/`phc2sys`, grandmaster) for production timing.
-3. **`deploy/` provisioning** — `REAL_TIME_CLOCK_ENABLE=1` + hugepages (M1 open item #5).
-4. **Perf**: per-operator CUDA streams (currently default-stream serialized); GPUDirect to avoid the
-   host packed staging copies in unpack/pack.
+1. **Perf tuning** — FRC raised TX `past_err`→1.2% + ingest latency→~15.6 µs under load. Per-operator
+   CUDA streams (currently default-stream serialized + per-frame syncs in resize/frc), fewer syncs,
+   and GPUDirect to drop the host packed staging copies in unpack/pack.
+2. **FRC rate model** — currently 1:1 motion-comp retiming; true 2× rate-conversion (emit prev + mid)
+   needs the TX pacer to handle the doubled output rate.
+3. **PTP discipline** (`ptp4l`/`phc2sys`, grandmaster) for production timing.
+4. **`deploy/` provisioning** — `REAL_TIME_CLOCK_ENABLE=1` + hugepages (M1 open item #5).
