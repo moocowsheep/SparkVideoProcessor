@@ -1,0 +1,48 @@
+# Vendored SDKs / envs (not committed)
+third_party/
+spike/third_party/
+.venv/
+
+# Build
+build/
+out/
+*.o
+*.obj
+*.so
+*.a
+compile_commands.json
+.cache/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Web
+node_modules/
+web/dist/
+*.tsbuildinfo
+.env
+.env.local
+
+# Generated protobuf/gRPC
+*.pb.cc
+*.pb.h
+*_pb2.py
+*_grpc.pb.*
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Secrets / licenses (never commit Rivermax license keys)
+*.lic
+rivermax.lic
+secrets/
+
+# Logs / captures
+*.log
+*.pcap
+captures/
