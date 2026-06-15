@@ -30,15 +30,14 @@ Produces a self-contained `install-cu13-aarch64*/` we consume natively from `eng
 git clone --depth 1 --branch v4.3.0 \
   https://github.com/nvidia-holoscan/holoscan-sdk.git ~/holoscan-sdk
 cd ~/holoscan-sdk
-export CUDA_MAJOR=13 HOLOSCAN_BUILD_ARCH=aarch64
-./run build --gpu igpu          # GB10 is unified-memory; if it fails, retry: --gpu dgpu
-# result: ~/holoscan-sdk/install-cu13-aarch64-igpu  (point engine CMake here)
+./run build --gpu dgpu --cuda 13    # DGX Spark is sbsa/dgpu, NOT igpu (igpu has no CUDA-13 base)
+# result: ~/holoscan-sdk/install-cu13-aarch64-dgpu  (point engine CMake here)
 ```
 Then build the engine against it:
 ```bash
 cd /home/saturn/claude/MooVideoProcessor
 cmake -G Ninja -S engine -B engine/build \
-  -DCMAKE_PREFIX_PATH="$HOME/holoscan-sdk/install-cu13-aarch64-igpu"
+  -DCMAKE_PREFIX_PATH="$HOME/holoscan-sdk/install-cu13-aarch64-dgpu"
 cmake --build engine/build
 ./engine/build/moo_engine        # placeholder ping graph until M1 wires real operators
 ```
