@@ -1,9 +1,9 @@
 # Moo Video Processor — engine (C++/CUDA Holoscan pipeline).
-# Build (inside the `moo` conda env, which provides Holoscan + CUDA 13 + cmake/ninja):
-#   conda activate moo
-#   cmake -G Ninja -S engine -B engine/build -DCMAKE_PREFIX_PATH="$CONDA_PREFIX"
+# Build against the source-built Holoscan SDK install tree (see docs/SETUP.md step 3):
+#   T=~/holoscan-sdk/install-cu13-aarch64-dgpu
+#   cmake -G Ninja -S engine -B engine/build -DCMAKE_PREFIX_PATH="$T"
 #   cmake --build engine/build
-#   LD_LIBRARY_PATH="$CONDA_PREFIX/lib" ./engine/build/moo_engine
+#   LD_LIBRARY_PATH="$T/lib" ./engine/build/moo_engine   # placeholder ping graph (M1 skeleton)
 cmake_minimum_required(VERSION 3.20)
 project(moo_engine LANGUAGES CXX)
 

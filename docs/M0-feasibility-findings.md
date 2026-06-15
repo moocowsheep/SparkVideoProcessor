@@ -1,6 +1,6 @@
 # M0 — Feasibility Spike Findings
 
-Status: **IN PROGRESS — GPU gates CONFIRMED; networking gates blocked on ConnectX-7 cabling (user action).**
+Status: **IN PROGRESS — GPU gates + Holoscan C++ build/engine skeleton CONFIRMED; networking gates blocked on ConnectX-7 cabling (user action).**
 Host: DGX Spark `gx10-9d2a`, GB10 Grace Blackwell, aarch64, kernel 6.17, driver 580.159.03, CUDA 13.0.
 Date started: 2026-06-15.
 
@@ -41,8 +41,12 @@ Reproduce: `bash spike/build_probes.sh` (no sudo; uses on-system `libnvidia-opti
   breaks the rmm/CCCL headers. So `find_package(holoscan)` cannot be satisfied from conda-forge here.
 - pip `holoscan` = **`holoscan-cu12` 4.3.0** (CUDA-12, aarch64). Self-contained wheel (likely bundles
   the 3rdparty CMake configs), runs on the 580 driver via forward-compat, but is CUDA-12.
-- Engine skeleton written (`engine/`, mirrors the canonical Holoscan app) — **builds pending a working
-  C++ dev env** (container / source build / cu12 wheel). Docker 29.2.1 present (container viable).
+- Engine skeleton (`engine/`, mirrors the canonical Holoscan app) — **BUILDS + RUNS natively ✅**
+  (2026-06-15). The source-built SDK (`install-cu13-aarch64-dgpu/`) is consumed from the host via
+  `find_package(holoscan)`; the placeholder ping graph ran the GXF executor and printed Rx 1–10
+  (exit 0). Host gcc 13.3 matches the Ubuntu-24.04 build container, and the install tree **bundles
+  every dep that broke conda-forge** (rmm 26.02, nvtx3, rapids_logger, MATX, Eigen3 3.4, CCCL 3.2) —
+  so the "not actively tested" native-consumption path just works here.
 - **Net:** the Holoscan **C++ build environment** needs a path other than conda-forge. Decision below.
 
 ## Networking IO: Rivermax → open DPDK path (decision 2026-06-15)
@@ -134,12 +138,19 @@ or a loopback to a second QSFP port / second device) before gates 1, 2, and 4 ca
 ## Holoscan: chosen path = build from source (native, CUDA 13)
 - Decision: **build Holoscan SDK v4.3.0 from source** (rapids-cmake/CPM auto-fetches the nvtx3 / rmm /
   rapids_logger / MATX that conda-forge lacked). The official build runs inside a **Docker
-  build-container** (`./run build`) and emits a self-contained `install-cu13-aarch64[-igpu]/` tree we
+  build-container** (`./run build`) and emits a self-contained `install-cu13-aarch64-dgpu/` tree we
   then consume **natively** from the host (point `engine/` `find_package(holoscan)` at it). Best of
   both: reproducible build, native deployment, full CUDA-13.
-- Confirmed supported by the SDK: `CUDA_MAJOR=13`, `--arch aarch64`, `--gpu igpu|dgpu`. **GB10 is
-  unified-memory** so `igpu` is the likely correct type, but this is unverified — try `igpu` first,
-  fall back to `dgpu`. (The fully-local non-Docker CMake build is documented as "not actively tested".)
+- **GPU stack RESOLVED: `dgpu` + `cuda 13`** (not `igpu`, despite unified memory — the M0 guess was
+  wrong). In Holoscan's taxonomy `igpu` means the **L4T/Tegra** stack, which v4.3.0 only ships for
+  **CUDA 12** (`arm64-igpu_cu12_base`, from `l4t-cuda:12.6.11`); there is **no `igpu`+`cu13` base
+  image**, so `./run build --gpu igpu --cuda 13` fails instantly at `docker build` (tries to pull a
+  nonexistent `arm64-igpu_cu13_base`). The DGX Spark is **sbsa/server-arm, not Tegra** — evidence:
+  `nvidia-smi` has no `nvgpu` marker, CUDA libs live under `targets/sbsa-linux/`, and there is no
+  `/etc/nv_tegra_release`. Correct invocation: **`./run build --gpu dgpu --cuda 13`** (native arm64;
+  base `nvcr.io/nvidia/cuda:13.0.0-base-ubuntu24.04`). The `--arch` flag takes `arm64` (not `aarch64`)
+  but defaults to the host arch, so it can be omitted. (The fully-local non-Docker CMake build is
+  documented as "not actively tested".)
 - Prereqs present: Docker 29.2.1, buildx 0.31.1, NVIDIA Container Toolkit 1.19.1. Blocker: **docker
   group access** (above). See `docs/SETUP.md` for exact steps.
 - The CUDA-13 conda env `moo` (Holoscan **runtime** + Python) is kept as-is — useful for quick checks;
