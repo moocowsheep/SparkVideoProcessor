@@ -6,6 +6,11 @@ steps 1–3 are independent of the NIC and can run now.
 
 Run privileged commands from the Claude session with the `!` prefix, e.g. `! sudo apt ...`.
 
+> **IO-plane runtime is automated:** `deploy/provision.sh` (idempotent; `--check` for read-only)
+> installs `mft`/`dpdk`/`linuxptp`, sets `REAL_TIME_CLOCK_ENABLE=1` on the CX-7s (tx_pp prerequisite),
+> and configures hugepages. This checklist covers the *dev/build* setup (Holoscan, protobuf, web) that
+> `provision.sh` does not. See `deploy/README.md`.
+
 ---
 
 ## 1. Build tooling (one sudo apt)
