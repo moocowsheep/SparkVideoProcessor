@@ -1,4 +1,4 @@
-# Moo Video Processor
+# Spark Video Processor
 
 A modular, low-latency live video processing platform for the **NVIDIA DGX Spark** (GB10 Grace
 Blackwell). The first module ingests uncompressed **SMPTE ST 2110-20** video, changes resolution

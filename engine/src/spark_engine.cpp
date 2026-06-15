@@ -1,4 +1,4 @@
-// Moo Video Processor — engine entry point.
+// Spark Video Processor — engine entry point.
 //
 // Milestone status: M1 skeleton. This currently runs a PLACEHOLDER ping graph to validate the
 // Holoscan C++ runtime + our build chain on the DGX Spark (GB10 / CUDA 13). The real low-latency
@@ -12,9 +12,9 @@
 #include <holoscan/operators/ping_tx/ping_tx.hpp>
 #include <holoscan/operators/ping_rx/ping_rx.hpp>
 
-namespace moo {
+namespace spark {
 
-class MooEngine : public holoscan::Application {
+class SparkEngine : public holoscan::Application {
  public:
   void compose() override {
     using namespace holoscan;
@@ -36,11 +36,11 @@ class MooEngine : public holoscan::Application {
   }
 };
 
-}  // namespace moo
+}  // namespace spark
 
 int main() {
-  HOLOSCAN_LOG_INFO("Moo engine starting — placeholder ping graph (M1 skeleton).");
-  auto app = holoscan::make_application<moo::MooEngine>();
+  HOLOSCAN_LOG_INFO("Spark engine starting — placeholder ping graph (M1 skeleton).");
+  auto app = holoscan::make_application<spark::SparkEngine>();
   app->run();
   return 0;
 }

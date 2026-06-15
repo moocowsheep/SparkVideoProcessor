@@ -87,7 +87,7 @@ else
   echo "  probing: dpdk-testpmd -a ${CX7_PCI},tx_pp=${TX_PP_NS} -- -i  (init port, then quit)"
   # EAL args BEFORE '--'; testpmd app args AFTER '--'. '-i' makes it read 'quit' from stdin.
   log="$(printf 'quit\n' | timeout 40 dpdk-testpmd \
-          --file-prefix moo_txpp -a "${CX7_PCI},tx_pp=${TX_PP_NS}" \
+          --file-prefix spark_txpp -a "${CX7_PCI},tx_pp=${TX_PP_NS}" \
           -- -i --total-num-mbufs=4096 2>&1)" || true
   echo "${log}" | sed 's/^/        /'
   # FAIL first: a port that fails to probe still drops into the testpmd> prompt with no devices,

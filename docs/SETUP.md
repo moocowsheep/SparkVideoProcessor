@@ -35,11 +35,11 @@ cd ~/holoscan-sdk
 ```
 Then build the engine against it:
 ```bash
-cd /home/saturn/claude/MooVideoProcessor
+cd /home/saturn/claude/SparkVideoProcessor
 cmake -G Ninja -S engine -B engine/build \
   -DCMAKE_PREFIX_PATH="$HOME/holoscan-sdk/install-cu13-aarch64-dgpu"
 cmake --build engine/build
-./engine/build/moo_engine        # placeholder ping graph until M1 wires real operators
+./engine/build/spark_engine      # placeholder ping graph until M1 wires real operators
 ```
 
 ## 4. ST 2110 IO stack — DPDK via Holoscan `advanced_network` (for SMPTE 2110 — gate 2)
