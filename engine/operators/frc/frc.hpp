@@ -28,6 +28,7 @@ class FrcOp : public holoscan::Operator {
 
  private:
   void ensure(uint32_t width, uint32_t height);
+  void emit_live(bool force = false);  // periodic "spark_live frc_interpolated" line (1 Hz)
 
   holoscan::Parameter<double> phase_;        // interpolation t in [0,1] (0.5 = midpoint)
   holoscan::Parameter<uint32_t> grid_size_;  // NVOF output grid (1|2|4)
@@ -40,6 +41,7 @@ class FrcOp : public holoscan::Operator {
   std::vector<spark::gpu::GpuFramePtr> pool_;
   size_t idx_ = 0;
   uint64_t frames_ = 0;
+  double last_live_s_ = 0;
 };
 
 }  // namespace spark::ops

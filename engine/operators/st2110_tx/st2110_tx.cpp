@@ -63,6 +63,16 @@ void St2110TxOp::start() {
                     cfg.pacing);
 }
 
+void St2110TxOp::emit_live(bool force) {
+  const double t =
+      std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  if (!force && t - last_live_s_ < 1.0) return;
+  last_live_s_ = t;
+  const spark::net::TxStats s = backend_ ? backend_->stats() : spark::net::TxStats{};
+  HOLOSCAN_LOG_INFO("spark_live tx_frames={} tx_packets={} tx_future_err={} tx_past_err={}",
+                    frames_sent_, packets_sent_, s.future_errors, s.past_errors);
+}
+
 void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
   if (pktz_) return;
   pktz_ = std::make_unique<spark::st2110::Packetizer>(fmt, payload_size_.get(), /*pt=*/96,
@@ -86,6 +96,7 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
     return;
   }
   ensure_pacer(frame.format);
+  emit_live();  // 1 Hz live stats (throttled)
 
   if (!warmed_) {  // one-time: give a co-located/peer RX time to enter its poll loop before flooding
     warmed_ = true;
@@ -137,6 +148,7 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
 
 void St2110TxOp::stop() {
   if (!backend_) return;
+  emit_live(true);  // final live snapshot for the daemon
   const auto s = backend_->stats();
   HOLOSCAN_LOG_INFO(
       "st2110_tx stopped: frames={} packets={} | tx_pp jitter={}ns wander={}ns sync_lost={} "

@@ -1,5 +1,6 @@
 #include "frc.hpp"
 
+#include <chrono>
 #include <stdexcept>
 
 #include <cuda_runtime.h>
@@ -7,6 +8,14 @@
 #include "frc_kernels.hpp"
 
 namespace spark::ops {
+
+void FrcOp::emit_live(bool force) {
+  const double t =
+      std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  if (!force && t - last_live_s_ < 1.0) return;
+  last_live_s_ = t;
+  HOLOSCAN_LOG_INFO("spark_live frc_interpolated={}", frames_);
+}
 
 void FrcOp::setup(holoscan::OperatorSpec& spec) {
   spec.input<spark::gpu::GpuFramePtr>("in");
@@ -32,6 +41,7 @@ void FrcOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& o
   if (!in || !in.value()) return;
   auto cur = in.value();
   ensure(cur->width, cur->height);
+  emit_live();  // 1 Hz live stats (throttled)
 
   if (!prev_) {  // first frame: nothing to interpolate from -> pass it through
     prev_ = cur;
@@ -59,6 +69,7 @@ void FrcOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& o
 }
 
 void FrcOp::stop() {
+  emit_live(true);  // final live snapshot for the daemon
   HOLOSCAN_LOG_INFO("frc stopped: interpolated {} frames", frames_);
   if (prevY8_) {
     cudaFree(prevY8_);
