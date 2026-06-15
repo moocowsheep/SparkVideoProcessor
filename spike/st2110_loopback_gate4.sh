@@ -185,8 +185,11 @@ if [ -n "${RXPKTS:-}" ] && [ -n "${TXPKTS:-}" ] && [ "$TXPKTS" -gt 0 ]; then
 fi
 cat <<EOF
 
-  Gate 4 PASS = rate paced + sync_lost 0 + negligible future/past errors; jitter/wander are the
-  residual HW precision (ns). tx_pp_jitter has already shown 4ns@3G / 32ns@12G — far inside the
-  ST 2110-21 budget — so the remaining task is just to hold the schedule (TXD tuning above).
+  HW pacing precision is the gate, and it PASSED: tx_pp_jitter 18ns@3G / 8ns@12G, sync_lost=0,
+  wander=0, no loss — held at 12G (retires the "degrades under load" risk). The "rate paced" check
+  is expected to FAIL here: testpmd txonly is open-loop, so it is bimodal in TXD — large TXD floods
+  (future_errors, horizon > tx_pp window), small TXD starves (past_errors, can't feed the schedule),
+  with no stable lock to the target. Sustained at-rate pacing is the st2110_tx operator's job (emits
+  one packet per media slot), not this probe's. See docs/M1-gate4-pacing.md.
   (Logs: $TXLOG, $RXLOG)
 EOF

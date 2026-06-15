@@ -18,7 +18,7 @@ currently on the bus.
 | 2 | ST 2110-20 RX+TX binds CX-7 (Rivermax-free: DPDK mlx5 + `tx_pp` HW pacing) | ✅ **CONFIRMED (mechanism)** | DPDK 23.11.4 mlx5 PMD binds CX-7 + `testpmd -a 0000:01:00.0,tx_pp=500` configures Port 0 with **no** pacing error, after `REAL_TIME_CLOCK_ENABLE=1` + reboot. Pacing *precision at rate* = gate 4. See note below |
 | 3 | OFA / FRUC for motion-comp FRC on GB10 | ✅ **CONFIRMED** | `spike/nvof_probe` ran HW optical flow on GB10; accurate flow `(8.00, 0.00)px` for an 8px shift; driver **OF API 5.0** (full FRUC); dims up to 8192×8192 |
 | 3b | NPP resize path (M2) | ✅ **CONFIRMED** | `spike/npp_resize_test` 1080p→2160p 16u: LINEAR 0.09 / CUBIC 0.11 / LANCZOS 0.23 ms/frame |
-| 4 | Zero-copy ingest latency | ⏸ Pending CX-7 up + DPDK/GPUNetIO path | — |
+| 4 | Paced loopback at rate / zero-copy ingest latency | ✅ **Pacing precision CONFIRMED (M1, 2026-06-15)** — `tx_pp` jitter 18 ns@3G / 8 ns@12G, `sync_lost=0`, no loss; held at 12G (the M0 "degrades under load" risk is retired). Sustained at-rate throughput + zero-copy latency move to the `st2110_tx`/`st2110_rx` operators (testpmd `txonly` is open-loop). See [`docs/M1-gate4-pacing.md`](M1-gate4-pacing.md) | `spike/st2110_loopback_gate4.sh`, `spike/detect_loopback.py` |
 
 ### Validated probe results (2026-06-15)
 ```
