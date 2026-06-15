@@ -59,6 +59,7 @@ class St2110TxOp : public holoscan::Operator {
   uint64_t schedule_base_ns_ = 0;   // send time of the current frame's first packet
   uint64_t frames_sent_ = 0;
   uint64_t packets_sent_ = 0;
+  bool throttle_enabled_ = true;  // self-disables if the spin caps out (likely now_ns() unit issue)
 };
 
 }  // namespace spark::ops

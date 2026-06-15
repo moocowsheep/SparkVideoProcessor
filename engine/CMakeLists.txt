@@ -16,6 +16,11 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 find_package(holoscan REQUIRED CONFIG)
+# Bake the Holoscan lib dir into executable rpath so binaries run without LD_LIBRARY_PATH
+# (holoscan_DIR = <install>/lib/cmake/holoscan, so ../.. is the lib dir holding gxf/rmm/etc.).
+get_filename_component(HOLOSCAN_LIB_DIR "${holoscan_DIR}/../.." ABSOLUTE)
+list(APPEND CMAKE_BUILD_RPATH "${HOLOSCAN_LIB_DIR}")
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(DPDK REQUIRED IMPORTED_TARGET libdpdk)  # DPDK 23.11 mlx5 (tx_pp); PMDs dlopen'd by EAL
 
