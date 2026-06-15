@@ -29,3 +29,18 @@ it first — the card is hot-plug).
 
 After `--check` shows all `[ok]`, the engine pipeline runs:
 `./engine/build/st2110_pipeline` (+ a generator; see `docs/M2-processing.md`).
+
+## `ptp.sh` + `ptp4l.conf` — PTP discipline (production timing)
+Disciplines the shared CX-7 PHC (`ptp0`) with `ptp4l`/`phc2sys` so the engine's RTP timestamps and
+`tx_pp` pacing track a reference clock (ST 2110-10 / ST 2059). The engine reads the same PHC, so this
+needs no engine change. **Loopback on one box doesn't need it** (all ports share `ptp0`); it's for
+production interop with a facility grandmaster.
+
+```bash
+bash deploy/ptp.sh --check               # read-only: HW-timestamp caps, /dev/ptp*, tools (no root)
+sudo bash deploy/ptp.sh --test           # 15s master-mode self-test (validates the stack, no GM needed)
+sudo bash deploy/ptp.sh                   # SLAVE: discipline PHC to a network grandmaster (production)
+sudo bash deploy/ptp.sh --master          # this box AS the time source (small setup / no external GM)
+```
+`ptp4l.conf` is an ST 2059-2 media-profile starting point — **align its domain/intervals with your
+facility grandmaster**. `--check` here shows the CX-7 PTP-capable with `ptp0` present (M0 gate 1).
