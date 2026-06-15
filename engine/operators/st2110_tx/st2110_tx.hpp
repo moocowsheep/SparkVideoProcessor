@@ -36,6 +36,7 @@ class St2110TxOp : public holoscan::Operator {
 
  private:
   void ensure_pacer(const spark::st2110::VideoFormat& fmt);
+  void emit_live(bool force = false);  // periodic "spark_live tx_*" line (1 Hz) for the daemon
 
   // --- parameters ---
   holoscan::Parameter<std::string> pci_addr_;
@@ -63,6 +64,7 @@ class St2110TxOp : public holoscan::Operator {
   uint64_t packets_sent_ = 0;
   bool throttle_enabled_ = true;  // self-disables if the spin caps out (likely now_ns() unit issue)
   bool warmed_ = false;
+  double last_live_s_ = 0;
 };
 
 }  // namespace spark::ops

@@ -74,26 +74,24 @@ uint64_t grab(const std::string& s, const std::string& key, uint64_t def = 0) {
 }
 
 void parse_stats(PipelineStats& st) {
-  std::ifstream f(kLog);
+  std::ifstream f(kLog, std::ios::binary | std::ios::ate);
   if (!f) return;
+  const std::streamoff TAIL = 65536;  // only the tail: latest spark_live lines, O(1) per poll
+  const std::streamoff size = f.tellg();
+  f.seekg(size > TAIL ? size - TAIL : 0);
   std::stringstream ss;
   ss << f.rdbuf();
   const std::string log = ss.str();
-  st.set_rx_frames(grab(log, "st2110_rx stats: frames="));
-  st.set_rx_packets(grab(log, "matched_pkts="));
-  st.set_rx_lost(grab(log, "lost="));
-  st.set_tx_frames(grab(log, "st2110_tx stopped: frames="));
-  st.set_tx_packets(grab(log, "packets="));
-  st.set_tx_future_err(grab(log, "future_err="));
-  st.set_tx_past_err(grab(log, "past_err="));
-  st.set_frc_interpolated(grab(log, "interpolated "));
-  // ingest latency: "min/avg/max = a/b/c ns" — take the avg (second field)
-  size_t p = log.rfind("ingest latency min/avg/max = ");
-  if (p != std::string::npos) {
-    long a = 0, b = 0, c = 0;
-    if (std::sscanf(log.c_str() + p + 29, "%ld/%ld/%ld", &a, &b, &c) >= 2)
-      st.set_ingest_latency_us(b / 1000.0);
-  }
+  // Engine operators emit periodic "spark_live <op>_<field>=N" lines (unique tokens); latest-wins.
+  st.set_rx_frames(grab(log, "rx_frames="));
+  st.set_rx_packets(grab(log, "rx_packets="));
+  st.set_rx_lost(grab(log, "rx_lost="));
+  st.set_tx_frames(grab(log, "tx_frames="));
+  st.set_tx_packets(grab(log, "tx_packets="));
+  st.set_tx_future_err(grab(log, "tx_future_err="));
+  st.set_tx_past_err(grab(log, "tx_past_err="));
+  st.set_frc_interpolated(grab(log, "frc_interpolated="));
+  st.set_ingest_latency_us(static_cast<double>(grab(log, "rx_latency_us=")));
 }
 
 // Reap the child if it exited on its own; update state. Caller holds the lock.
@@ -176,6 +174,7 @@ bool stop_locked(State& s, std::string& msg) {
 
 PipelineStatus build_status_locked(State& s) {
   reap_locked(s);
+  if (s.state == RUNNING) parse_stats(s.stats);  // live refresh from the engine's periodic lines
   PipelineStatus out;
   out.set_state(s.state);
   out.set_pid(s.pid);

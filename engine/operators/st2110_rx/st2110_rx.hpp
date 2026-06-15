@@ -43,6 +43,7 @@ class St2110RxOp : public holoscan::Operator {
 
  private:
   void print_stats();
+  void emit_live(bool force = false);  // periodic machine-parseable "spark_live rx_*" line (1 Hz)
   void compute_sink();                                  // emit_frames=false: loop run_seconds
   void compute_emit_one(holoscan::OutputContext& out);  // emit_frames=true: pop one frame, emit
   void poll_loop();  // emit mode: dedicated thread, continuously drains the NIC into frames
@@ -85,6 +86,7 @@ class St2110RxOp : public holoscan::Operator {
   bool have_last_ = false;
   uint64_t lat_sum_ = 0, lat_cnt_ = 0, lat_min_ = UINT64_MAX, lat_max_ = 0;
   bool stats_printed_ = false;
+  double last_live_s_ = 0;
 };
 
 }  // namespace spark::ops

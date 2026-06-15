@@ -84,6 +84,7 @@ void St2110RxOp::compute_sink() {
 
   spark::net::RxPacket pkts[256];
   while (clock::now() < deadline) {
+    emit_live();  // 1 Hz live stats (throttled)
     const uint16_t n = backend_->receive(pkts, 256);
     if (n == 0) continue;
     const uint64_t now = backend_->now_ns();
@@ -152,6 +153,7 @@ void St2110RxOp::poll_loop() {
 
 // Source mode: pop one finished frame from the poll thread's queue and emit it.
 void St2110RxOp::compute_emit_one(holoscan::OutputContext& op_output) {
+  emit_live();  // 1 Hz live stats (throttled)
   std::unique_lock<std::mutex> lk(q_mu_);
   if (!q_cv_.wait_for(lk, std::chrono::seconds(2),
                       [&] { return !frame_q_.empty() || stop_poll_.load(); }))
@@ -161,6 +163,17 @@ void St2110RxOp::compute_emit_one(holoscan::OutputContext& op_output) {
   frame_q_.pop_front();
   lk.unlock();
   op_output.emit(f, "frame");
+}
+
+void St2110RxOp::emit_live(bool force) {
+  const double t =
+      std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  if (!force && t - last_live_s_ < 1.0) return;
+  last_live_s_ = t;
+  const uint64_t avg_us = lat_cnt_ ? (lat_sum_ / lat_cnt_) / 1000 : 0;  // ns -> us
+  // Unique tokens so the control daemon can grab each field unambiguously (latest-wins).
+  HOLOSCAN_LOG_INFO("spark_live rx_frames={} rx_packets={} rx_lost={} rx_latency_us={}", frames_,
+                    packets_, lost_, avg_us);
 }
 
 void St2110RxOp::print_stats() {
@@ -180,6 +193,7 @@ void St2110RxOp::stop() {
   stop_poll_.store(true);
   q_cv_.notify_all();
   if (poll_thread_.joinable()) poll_thread_.join();
+  emit_live(true);  // final live snapshot so the daemon captures end-of-run values
   print_stats();
   if (backend_) {
     backend_->shutdown();
