@@ -1,4 +1,9 @@
+#define _GNU_SOURCE
 #include "dpdk_eal.hpp"
+
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
 
 #include <cstdio>
 #include <stdexcept>
@@ -34,8 +39,21 @@ void DpdkEal::init(const std::string& core_list, const std::string& file_prefix)
   if (rte_eal_init(static_cast<int>(argv.size()), argv.data()) < 0)
     throw std::runtime_error("DpdkEal::init: rte_eal_init failed (root? hugepages? device args?)");
   inited_ = true;
-  std::printf("[dpdk_eal] EAL up: %zu device(s), cores=%s, prefix=%s\n", allow_.size(),
-              core_list.c_str(), file_prefix.c_str());
+
+  // rte_eal_init pins THIS (main) thread to the single main lcore. Threads created afterward
+  // (Holoscan's scheduler workers) inherit that one-core affinity mask, so every busy-spin operator
+  // serializes onto one core -> ~ms preemption when >1 spin (the one-process co-location symptom;
+  // standalone smokes have a single hot operator and were unaffected). Widen the mask back to all
+  // online CPUs so workers spread across cores.
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  const long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+  for (long i = 0; i < ncpu; ++i) CPU_SET(i, &set);
+  if (pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0)
+    std::printf("[dpdk_eal] WARNING: could not widen thread affinity post-EAL\n");
+
+  std::printf("[dpdk_eal] EAL up: %zu device(s), cores=%s, prefix=%s, affinity widened to %ld CPUs\n",
+              allow_.size(), core_list.c_str(), file_prefix.c_str(), ncpu);
 }
 
 }  // namespace spark::net

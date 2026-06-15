@@ -3,6 +3,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <thread>
 
 namespace spark::ops {
 namespace {
@@ -38,6 +39,8 @@ void St2110TxOp::setup(holoscan::OperatorSpec& spec) {
   spec.param(pacing_, "pacing", "Enable pacing", "tx_pp hardware send-scheduling", true);
   spec.param(manage_eal_, "manage_eal", "Manage EAL",
              "true: own rte_eal_init; false: shared DpdkEal already up", true);
+  spec.param(warmup_ms_, "warmup_ms", "Warmup ms",
+             "one-time delay before the first frame (let an RX peer start polling first)", 0u);
 }
 
 void St2110TxOp::start() {
@@ -83,6 +86,12 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
     return;
   }
   ensure_pacer(frame.format);
+
+  if (!warmed_) {  // one-time: give a co-located/peer RX time to enter its poll loop before flooding
+    warmed_ = true;
+    if (warmup_ms_.get() > 0)
+      std::this_thread::sleep_for(std::chrono::milliseconds(warmup_ms_.get()));
+  }
 
   pktz_->start_frame(spark::st2110::rtp_timestamp_90k(frame.capture_ts_ns));
 

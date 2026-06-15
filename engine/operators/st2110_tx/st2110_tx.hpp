@@ -50,7 +50,8 @@ class St2110TxOp : public holoscan::Operator {
   holoscan::Parameter<uint32_t> ssrc_;
   holoscan::Parameter<std::string> eal_cores_;
   holoscan::Parameter<bool> pacing_;
-  holoscan::Parameter<bool> manage_eal_;  // false in multi-backend processes (shared DpdkEal)
+  holoscan::Parameter<bool> manage_eal_;   // false in multi-backend processes (shared DpdkEal)
+  holoscan::Parameter<uint32_t> warmup_ms_;  // one-time delay before first send (let RX start first)
 
   // --- runtime state ---
   std::unique_ptr<spark::net::ISt2110TxBackend> backend_;
@@ -61,6 +62,7 @@ class St2110TxOp : public holoscan::Operator {
   uint64_t frames_sent_ = 0;
   uint64_t packets_sent_ = 0;
   bool throttle_enabled_ = true;  // self-disables if the spin caps out (likely now_ns() unit issue)
+  bool warmed_ = false;
 };
 
 }  // namespace spark::ops
