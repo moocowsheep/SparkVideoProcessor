@@ -68,6 +68,10 @@ target_link_libraries(st2110_rx_smoke PRIVATE spark_operators holoscan::core)
 add_executable(st2110_loopback apps/st2110_loopback.cpp)
 target_link_libraries(st2110_loopback PRIVATE spark_operators holoscan::core)
 
+# rx -> tx pass-through (shared EAL; frame forwarding) — the M1 first-deliverable graph
+add_executable(st2110_passthrough apps/st2110_passthrough.cpp)
+target_link_libraries(st2110_passthrough PRIVATE spark_operators holoscan::core)
+
 # --- tests (framing round-trip; pure CPU, runs without NIC/root) -----------------------------------
 enable_testing()
 add_executable(test_rtp_st2110 operators/st2110_tx/test/test_rtp_st2110.cpp)

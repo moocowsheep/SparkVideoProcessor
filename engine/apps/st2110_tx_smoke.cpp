@@ -20,19 +20,23 @@
 
 namespace spark {
 
-// Env overrides (passed through sudo via the SETENV allowlist): SPARK_PROFILE=1080p|2160p,
-// SPARK_FRAMES=<n>. Defaults: 1080p, 300 frames (~5 s at 59.94 fps).
+// Env overrides (via the SETENV allowlist): SPARK_PROFILE=1080p|2160p, SPARK_FRAMES=<n>,
+// SPARK_TX_PCI=<bdf>, SPARK_DST_MAC=<mac>, SPARK_WARMUP_MS=<ms>. Defaults target the gate-4 pair
+// (TX 0002:01:00.0 -> RX MAC 30:c5:99:3e:9d:30), 1080p, 300 frames.
 class St2110TxSmoke : public holoscan::Application {
  public:
   void compose() override {
     using namespace holoscan;
-    const char* prof = std::getenv("SPARK_PROFILE");
-    const char* fr = std::getenv("SPARK_FRAMES");
-    const std::string profile = prof ? prof : "1080p";
-    const int64_t frames = fr ? std::atoll(fr) : 300;
+    auto env = [](const char* k, const char* d) { const char* v = std::getenv(k); return std::string(v ? v : d); };
+    const std::string profile = env("SPARK_PROFILE", "1080p");
+    const int64_t frames = std::atoll(env("SPARK_FRAMES", "300").c_str());
+    const uint32_t warmup = static_cast<uint32_t>(std::atoll(env("SPARK_WARMUP_MS", "0").c_str()));
+
     auto src = make_operator<ops::TestPatternOp>("test_pattern", Arg("profile", profile),
                                                  make_condition<CountCondition>(frames));
-    auto tx = make_operator<ops::St2110TxOp>("st2110_tx");
+    auto tx = make_operator<ops::St2110TxOp>(
+        "st2110_tx", Arg("pci_addr", env("SPARK_TX_PCI", "0002:01:00.0")),
+        Arg("dst_mac", env("SPARK_DST_MAC", "30:c5:99:3e:9d:30")), Arg("warmup_ms", warmup));
     add_flow(src, tx);
   }
 };

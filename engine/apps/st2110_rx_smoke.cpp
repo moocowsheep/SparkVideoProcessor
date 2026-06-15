@@ -10,6 +10,7 @@
 
 #include <holoscan/holoscan.hpp>
 
+#include "operators/frame_sink/frame_sink.hpp"
 #include "operators/st2110_rx/st2110_rx.hpp"
 
 namespace spark {
@@ -20,10 +21,13 @@ class St2110RxSmoke : public holoscan::Application {
     using namespace holoscan;
     const char* prof = std::getenv("SPARK_PROFILE");
     const char* secs = std::getenv("SPARK_SECONDS");
+    const char* pci = std::getenv("SPARK_RX_PCI");
     auto rx = make_operator<ops::St2110RxOp>(
         "st2110_rx", Arg("profile", std::string(prof ? prof : "1080p")),
+        Arg("pci_addr", std::string(pci ? pci : "0002:01:00.1")),
         Arg("run_seconds", secs ? std::atof(secs) : 12.0), make_condition<CountCondition>(1));
-    add_operator(rx);
+    auto sink = make_operator<ops::FrameSinkOp>("frame_sink");  // sink-mode rx never emits; wire anyway
+    add_flow(rx, sink);
   }
 };
 

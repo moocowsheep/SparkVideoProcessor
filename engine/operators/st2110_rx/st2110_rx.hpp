@@ -6,12 +6,20 @@
 // zero-copy ingest latency (NIC HW rx timestamp -> operator processing time, same PHC base). Driven
 // by a CountCondition(1): compute() runs once and loops internally for the duration.
 //
-// Follow-on for the real pass-through: switch to one-frame-per-compute with an async/periodic
-// condition and emit a VideoFrame on a "frame" output (then st2110_rx -> ... -> st2110_tx).
+// Two drive modes:
+//   * emit_frames=false (default): terminal sink. CountCondition(1); compute() loops for run_seconds.
+//   * emit_frames=true: source. Each compute() assembles exactly one frame (poll until the RTP marker)
+//     and emits it on the "frame" output — this is the rx -> tx pass-through path.
+// Loss + ingest-latency tracking and the stop() summary work in both modes.
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include <holoscan/holoscan.hpp>
@@ -35,6 +43,12 @@ class St2110RxOp : public holoscan::Operator {
 
  private:
   void print_stats();
+  void compute_sink();                                  // emit_frames=false: loop run_seconds
+  void compute_emit_one(holoscan::OutputContext& out);  // emit_frames=true: pop one frame, emit
+  void poll_loop();  // emit mode: dedicated thread, continuously drains the NIC into frames
+  void account(const spark::st2110::RxPacketInfo& info, const spark::net::RxPacket& pkt,
+               uint64_t now_ns);  // loss + ingest-latency bookkeeping
+  std::shared_ptr<std::vector<uint8_t>> next_buffer();  // ring buffer for emitted frames
 
   holoscan::Parameter<std::string> pci_addr_;
   holoscan::Parameter<uint32_t> udp_port_;
@@ -42,12 +56,29 @@ class St2110RxOp : public holoscan::Operator {
   holoscan::Parameter<uint32_t> rxd_;
   holoscan::Parameter<std::string> eal_cores_;
   holoscan::Parameter<double> run_seconds_;
-  holoscan::Parameter<bool> manage_eal_;  // false in multi-backend processes (shared DpdkEal)
+  holoscan::Parameter<bool> manage_eal_;    // false in multi-backend processes (shared DpdkEal)
+  holoscan::Parameter<bool> emit_frames_;   // true: source mode (emit one VideoFrame per compute)
 
   std::unique_ptr<spark::net::ISt2110RxBackend> backend_;
   std::unique_ptr<spark::st2110::Depacketizer> depkt_;
-  std::vector<uint8_t> frame_buf_;  // reassembly target (size == fmt.octets_per_frame())
+  std::vector<uint8_t> frame_buf_;  // reassembly target for sink mode (size == octets_per_frame())
   spark::st2110::VideoFormat fmt_;
+
+  // emit-mode reassembly: a ring of frame buffers + the in-progress one (poll-thread local).
+  std::vector<std::shared_ptr<std::vector<uint8_t>>> buf_ring_;
+  size_t buf_idx_ = 0;
+  std::shared_ptr<std::vector<uint8_t>> cur_buf_;
+  bool cur_first_ = true;
+  uint32_t cur_ts_ = 0;
+
+  // emit-mode: dedicated NIC-drain thread feeding a bounded frame queue (decouples NIC polling from
+  // the emit cadence, so the ring never overflows while TX paces the previous frame).
+  std::thread poll_thread_;
+  std::atomic<bool> stop_poll_{false};
+  std::mutex q_mu_;
+  std::condition_variable q_cv_;
+  std::deque<spark::st2110::VideoFrame> frame_q_;
+  uint64_t q_dropped_ = 0;  // frames dropped at the queue when TX can't keep up (poll-thread only)
 
   uint64_t packets_ = 0, frames_ = 0, lost_ = 0, bad_ = 0;
   uint32_t last_seq_ = 0;
