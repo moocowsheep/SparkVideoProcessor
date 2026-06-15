@@ -11,6 +11,7 @@
 
 #include "operators/codec/codec_ops.hpp"
 #include "operators/common/dpdk_eal.hpp"
+#include "operators/frc/frc.hpp"
 #include "operators/resize/resize.hpp"
 #include "operators/st2110_rx/st2110_rx.hpp"
 #include "operators/st2110_tx/st2110_tx.hpp"
@@ -27,6 +28,7 @@ class St2110Pipeline : public holoscan::Application {
     };
     const std::string profile = env("SPARK_PROFILE", "1080p");  // input resolution
     const std::string interp = env("SPARK_INTERP", "cubic");
+    const bool with_frc = env("SPARK_FRC", "1") != "0";  // include motion-comp FRC stage
     const int64_t frames = std::atoll(env("SPARK_FRAMES", "300").c_str());
     const uint32_t ow = static_cast<uint32_t>(std::atoll(env("SPARK_OUT_W", "3840").c_str()));
     const uint32_t oh = static_cast<uint32_t>(std::atoll(env("SPARK_OUT_H", "2160").c_str()));
@@ -51,7 +53,13 @@ class St2110Pipeline : public holoscan::Application {
                                              Arg("dst_mac", dst_mac), Arg("manage_eal", false));
     add_flow(rx, unpack);
     add_flow(unpack, resize);
-    add_flow(resize, pack);
+    if (with_frc) {
+      auto frc = make_operator<ops::FrcOp>("frc");  // motion-compensated interpolation (OFA)
+      add_flow(resize, frc);
+      add_flow(frc, pack);
+    } else {
+      add_flow(resize, pack);
+    }
     add_flow(pack, tx);
   }
 };
