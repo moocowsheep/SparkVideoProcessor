@@ -108,10 +108,12 @@ it offline).
 2. ✅ **`st2110_rx`:** DONE — zero-loss receive + ~2–3 µs ingest latency at both rates (see Result 4).
    Follow-on: per-packet TX↔RX wire-latency correlation (embed/​match send time) and a single-process
    `st2110_rx → … → st2110_tx` pass-through (shared EAL across both ports).
-3. **PTP discipline:** `ptp4l`/`phc2sys` on the shared real-time PHC (`ptp0`). Loopback lock is
-   trivial (all ports share `ptp0`); a real grandmaster is the production validation — and note a GM
-   does **not** affect the results above (`sync_lost=0`, `wander=0` already; testpmd reads the same
-   PHC the scheduler uses, so external discipline changes nothing here).
+3. ✅ **PTP discipline:** config + launcher in `deploy/ptp.sh` + `deploy/ptp4l.conf` (ST 2059-2
+   profile; `--check`/`--test`/`--master`/slave). The engine reads the same PHC, so disciplining it
+   aligns RTP timestamps + pacing with no engine change. Loopback lock is trivial (all ports share
+   `ptp0`); slave-to-grandmaster is the production case (needs an actual GM) and does **not** affect
+   the pacing results above (`sync_lost=0`/`wander=0` already — the scheduler reads the same PHC).
+   `--check` confirms the CX-7 PTP-capable with `ptp0` present (M0 gate 1).
 
 ## Reproduce
 ```bash
