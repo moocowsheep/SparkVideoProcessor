@@ -23,6 +23,7 @@ list(APPEND CMAKE_BUILD_RPATH "${HOLOSCAN_LIB_DIR}")
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(DPDK REQUIRED IMPORTED_TARGET libdpdk)  # DPDK 23.11 mlx5 (tx_pp); PMDs dlopen'd by EAL
+find_package(CUDAToolkit REQUIRED)  # cudart + NPP (resize); NPP host API, no CUDA language needed
 
 # --- ST 2110-20 framing core (pure C++; no DPDK / Holoscan) ---------------------------------------
 add_library(spark_st2110_core STATIC
@@ -38,6 +39,14 @@ add_library(spark_st2110_net STATIC
 )
 target_include_directories(spark_st2110_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(spark_st2110_net PUBLIC PkgConfig::DPDK)
+
+# --- GPU processing: resize (NPP); host-callable, no .cu / CUDA language --------------------------
+add_library(spark_resize STATIC
+  operators/resize/gpu_frame.cpp
+  operators/resize/resize.cpp
+)
+target_include_directories(spark_resize PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(spark_resize PUBLIC holoscan::core CUDA::cudart CUDA::nppig CUDA::nppc)
 
 # --- Holoscan operators ---------------------------------------------------------------------------
 add_library(spark_operators STATIC
@@ -71,6 +80,10 @@ target_link_libraries(st2110_loopback PRIVATE spark_operators holoscan::core)
 # rx -> tx pass-through (shared EAL; frame forwarding) — the M1 first-deliverable graph
 add_executable(st2110_passthrough apps/st2110_passthrough.cpp)
 target_link_libraries(st2110_passthrough PRIVATE spark_operators holoscan::core)
+
+# resize benchmark/bring-up (NPP; pure GPU, no NIC/root)
+add_executable(resize_smoke apps/resize_smoke.cpp)
+target_link_libraries(resize_smoke PRIVATE spark_resize holoscan::core)
 
 # --- tests (framing round-trip; pure CPU, runs without NIC/root) -----------------------------------
 enable_testing()
