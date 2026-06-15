@@ -42,9 +42,15 @@ Daemon as a normal user with a mock pipeline: HTTP `status`/`config`/`start`/`st
 (`rxFrames=300 rxLost=0 txPackets=4448100 past_err=68813 ingest=15.6µs frc=299`); dashboard served.
 gRPC server starts on `:50051` (same state logic as the HTTP path).
 
+## Live stats (done)
+The engine operators emit a periodic (1 Hz) machine-parseable line with unique tokens —
+`spark_live rx_frames=N rx_packets=N rx_lost=N rx_latency_us=N`, the `tx_*` equivalents
+(`tx_future_err`/`tx_past_err`), and `frc_interpolated=N` — from `compute()` during the run plus a
+forced final snapshot at `stop()`. The daemon greps those tokens (latest-wins, log tail only) on
+every status poll while RUNNING, so the dashboard's 1 Hz poll shows live values. Validated: counters
+advance live while RUNNING; final values retained after stop.
+
 ## Follow-ons
-- **Live stats while running** — the engine currently logs stats only at stop; export periodic stats
-  (stats file / socket) for real-time dashboard updates.
 - **gRPC exercise** — add `grpc_cli`/a small client (or a unit test) to the suite.
 - **Auth / TLS** — the daemon is currently open (InsecureServerCredentials + open HTTP); add for
   anything beyond a trusted LAN.
