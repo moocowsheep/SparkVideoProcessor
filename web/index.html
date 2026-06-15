@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<!-- Spark Video Processor — control dashboard (M5). Vanilla; served by the control daemon
+     (control/daemon.cpp) over HTTP/JSON. No build step. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spark Video Processor</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>Spark Video Processor</h1>
+    <span id="state" class="badge">…</span>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Pipeline</h2>
+      <p class="sub">st2110_rx → unpack → resize → frc → pack → st2110_tx</p>
+      <div class="row">
+        <button id="start" class="btn go">Start</button>
+        <button id="stop" class="btn stop">Stop</button>
+        <span id="msg" class="msg"></span>
+      </div>
+      <p class="meta">pid <span id="pid">–</span> · uptime <span id="uptime">0</span>s</p>
+    </section>
+
+    <section class="card">
+      <h2>Configuration</h2>
+      <div class="grid">
+        <label>Input profile
+          <select id="profile"><option>1080p</option><option>2160p</option></select></label>
+        <label>Interpolation
+          <select id="interp"><option>cubic</option><option>linear</option><option>lanczos</option></select></label>
+        <label>Out width <input id="out_width" type="number"></label>
+        <label>Out height <input id="out_height" type="number"></label>
+        <label class="chk">FRC (motion-comp) <input id="frc" type="checkbox"></label>
+        <label>Frames (0 = continuous) <input id="frames" type="number"></label>
+        <label>RX PCI <input id="rx_pci" type="text"></label>
+        <label>TX PCI <input id="tx_pci" type="text"></label>
+        <label>Dest MAC <input id="dst_mac" type="text"></label>
+      </div>
+      <div class="row">
+        <button id="save" class="btn">Save config</button>
+        <span class="hint">config is locked while running</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Stats <span class="sub">(last run)</span></h2>
+      <div class="stats" id="stats"></div>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
