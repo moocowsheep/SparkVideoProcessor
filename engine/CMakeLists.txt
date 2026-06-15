@@ -30,9 +30,10 @@ add_library(spark_st2110_core STATIC
 )
 target_include_directories(spark_st2110_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-# --- ST 2110 transport backend (all rte_* confined here) ------------------------------------------
+# --- ST 2110 transport backends (all rte_* confined here) -----------------------------------------
 add_library(spark_st2110_net STATIC
   operators/st2110_tx/dpdk_tx_backend.cpp
+  operators/st2110_rx/dpdk_rx_backend.cpp
 )
 target_include_directories(spark_st2110_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(spark_st2110_net PUBLIC PkgConfig::DPDK)
@@ -40,6 +41,7 @@ target_link_libraries(spark_st2110_net PUBLIC PkgConfig::DPDK)
 # --- Holoscan operators ---------------------------------------------------------------------------
 add_library(spark_operators STATIC
   operators/st2110_tx/st2110_tx.cpp
+  operators/st2110_rx/st2110_rx.cpp
   operators/test_pattern/test_pattern.cpp
 )
 target_include_directories(spark_operators PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -54,9 +56,12 @@ target_link_libraries(spark_engine
     holoscan::ops::ping_rx
 )
 
-# --- ST 2110 TX bring-up app (gate-4 follow-on) ---------------------------------------------------
+# --- ST 2110 TX / RX bring-up apps (gate-4 follow-on; two-process loopback) ------------------------
 add_executable(st2110_tx_smoke apps/st2110_tx_smoke.cpp)
 target_link_libraries(st2110_tx_smoke PRIVATE spark_operators holoscan::core)
+
+add_executable(st2110_rx_smoke apps/st2110_rx_smoke.cpp)
+target_link_libraries(st2110_rx_smoke PRIVATE spark_operators holoscan::core)
 
 # --- tests (framing round-trip; pure CPU, runs without NIC/root) -----------------------------------
 enable_testing()
