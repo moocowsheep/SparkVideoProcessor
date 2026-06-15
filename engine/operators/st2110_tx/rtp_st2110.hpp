@@ -85,4 +85,33 @@ class Packetizer {
   bool active_ = false;
 };
 
+// --- Receive side: parse an ST 2110-20 / RFC 4175 UDP payload back into pixels ---------------------
+
+// Header fields parsed from one received media packet (the inverse of PacketPlan).
+struct RxPacketInfo {
+  uint32_t sequence = 0;       // reconstructed 32-bit (ESN << 16 | RTP low 16)
+  uint32_t rtp_timestamp = 0;
+  bool marker = false;
+  uint32_t data_offset = 0;    // byte offset within the payload where pixel octets begin
+  int nsrd = 0;
+  Srd srd[PacketPlan::kMaxSrd];
+};
+
+class Depacketizer {
+ public:
+  explicit Depacketizer(VideoFormat fmt) : fmt_(fmt) {}
+
+  // Parse one UDP payload (RTP + RFC 4175 headers) into `info`. Returns false if malformed or if it
+  // would read past `len` / outside the frame (defensive against the open wire).
+  bool parse(const uint8_t* payload, uint32_t len, RxPacketInfo& info) const;
+
+  // Copy a parsed packet's pixel octets into `frame_buffer` (size == fmt.octets_per_frame()).
+  void scatter(const RxPacketInfo& info, const uint8_t* payload, uint8_t* frame_buffer) const;
+
+  const VideoFormat& format() const { return fmt_; }
+
+ private:
+  VideoFormat fmt_;
+};
+
 }  // namespace spark::st2110

@@ -127,4 +127,54 @@ uint32_t Packetizer::packets_per_frame() const {
   return n;
 }
 
+bool Depacketizer::parse(const uint8_t* p, uint32_t len, RxPacketInfo& info) const {
+  if (len < 12 + 2 + 6) return false;     // RTP(12) + ESN(2) + >=1 SRD(6)
+  if ((p[0] & 0xC0) != 0x80) return false;  // RTP version 2
+
+  info.marker = (p[1] & 0x80) != 0;
+  const uint16_t seq_lo = static_cast<uint16_t>((p[2] << 8) | p[3]);
+  info.rtp_timestamp = (static_cast<uint32_t>(p[4]) << 24) | (static_cast<uint32_t>(p[5]) << 16) |
+                       (static_cast<uint32_t>(p[6]) << 8) | p[7];
+  const uint16_t esn = static_cast<uint16_t>((p[12] << 8) | p[13]);
+  info.sequence = (static_cast<uint32_t>(esn) << 16) | seq_lo;
+
+  uint32_t off = 14;
+  info.nsrd = 0;
+  for (;;) {
+    if (off + 6 > len) return false;
+    if (info.nsrd >= PacketPlan::kMaxSrd) return false;
+    const uint16_t length = static_cast<uint16_t>((p[off] << 8) | p[off + 1]);
+    const uint16_t line = static_cast<uint16_t>(((p[off + 2] << 8) | p[off + 3]) & 0x7fff);
+    const uint16_t f3 = static_cast<uint16_t>((p[off + 4] << 8) | p[off + 5]);
+    const bool cont = (f3 & 0x8000) != 0;
+    Srd& s = info.srd[info.nsrd++];
+    s.length = length;
+    s.line_no = line;
+    s.offset_pixels = static_cast<uint16_t>(f3 & 0x7fff);
+    off += 6;
+    if (!cont) break;
+  }
+  info.data_offset = off;
+
+  uint32_t data = 0;
+  for (int i = 0; i < info.nsrd; ++i) {
+    const Srd& s = info.srd[i];
+    if (s.length % VideoFormat::kOctetsPerPgroup != 0) return false;
+    if (s.line_no >= fmt_.height) return false;
+    if (fmt_.byte_offset(s.line_no, s.offset_pixels) + s.length > fmt_.octets_per_frame())
+      return false;
+    data += s.length;
+  }
+  return info.data_offset + data <= len;
+}
+
+void Depacketizer::scatter(const RxPacketInfo& info, const uint8_t* p, uint8_t* frame) const {
+  uint32_t off = info.data_offset;
+  for (int i = 0; i < info.nsrd; ++i) {
+    const Srd& s = info.srd[i];
+    std::memcpy(frame + fmt_.byte_offset(s.line_no, s.offset_pixels), p + off, s.length);
+    off += s.length;
+  }
+}
+
 }  // namespace spark::st2110
