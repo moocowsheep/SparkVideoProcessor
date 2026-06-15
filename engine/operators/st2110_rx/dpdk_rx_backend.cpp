@@ -47,6 +47,7 @@ class DpdkRxBackend final : public ISt2110RxBackend {
     rte_mbuf* bufs[kRxBurst];
     const uint16_t want = max < kRxBurst ? max : kRxBurst;
     const uint16_t n = rte_eth_rx_burst(port_, 0, bufs, want);
+    raw_received_ += n;
     uint16_t k = 0;
     for (uint16_t i = 0; i < n; ++i) {
       rte_mbuf* m = bufs[i];
@@ -81,6 +82,7 @@ class DpdkRxBackend final : public ISt2110RxBackend {
       s.rx_missed = es.imissed;
       s.rx_nombuf = es.rx_nombuf;
     }
+    s.raw_received = raw_received_;
     return s;
   }
 
@@ -188,6 +190,7 @@ class DpdkRxBackend final : public ISt2110RxBackend {
   int ts_field_off_ = -1;
   uint64_t rx_ts_flag_ = 0;
   bool have_ts_ = false;
+  uint64_t raw_received_ = 0;
 };
 
 }  // namespace

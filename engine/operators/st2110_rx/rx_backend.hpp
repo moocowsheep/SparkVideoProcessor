@@ -31,10 +31,11 @@ struct RxPacket {
 };
 
 struct RxStats {
-  uint64_t rx_packets = 0;
+  uint64_t rx_packets = 0;   // ipackets: frames the NIC RX port delivered (any kind)
   uint64_t rx_bytes = 0;
-  uint64_t rx_missed = 0;  // imissed: dropped by HW for lack of a descriptor
-  uint64_t rx_nombuf = 0;  // mbuf allocation failures
+  uint64_t rx_missed = 0;    // imissed: dropped by HW for lack of a descriptor
+  uint64_t rx_nombuf = 0;    // mbuf allocation failures
+  uint64_t raw_received = 0;  // mbufs returned by rx_burst before the UDP/dst-port filter
 };
 
 class ISt2110RxBackend {
