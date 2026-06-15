@@ -6,11 +6,16 @@
 #   ctest --test-dir engine/build                          # framing unit test (no NIC/root)
 #   LD_LIBRARY_PATH="$T/lib" ./engine/build/spark_engine    # placeholder ping graph
 #   sudo -E LD_LIBRARY_PATH="$T/lib" ./engine/build/st2110_tx_smoke   # gate-4 follow-on (needs CX-7)
-cmake_minimum_required(VERSION 3.20)
-project(spark_engine LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.24)  # CMAKE_CUDA_ARCHITECTURES native
+project(spark_engine LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_STANDARD 17)
+# GB10 (Grace Blackwell) is compute capability 12.1 = sm_121. Set explicitly: enabling the CUDA
+# language pre-defines CMAKE_CUDA_ARCHITECTURES to a conservative default (sm_75 here), whose PTX
+# won't run on Blackwell ("unsupported toolchain"). Override the cache var for the build.
+set(CMAKE_CUDA_ARCHITECTURES 121 CACHE STRING "CUDA archs (GB10 = 121)" FORCE)
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -47,6 +52,14 @@ add_library(spark_resize STATIC
 )
 target_include_directories(spark_resize PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(spark_resize PUBLIC holoscan::core CUDA::cudart CUDA::nppig CUDA::nppc)
+
+# --- RFC 4175 pixel codec (CUDA kernels) + unpack/pack operators ----------------------------------
+add_library(spark_codec STATIC
+  operators/codec/pixel_codec.cu
+  operators/codec/codec_ops.cpp
+)
+target_include_directories(spark_codec PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(spark_codec PUBLIC holoscan::core spark_resize CUDA::cudart)
 
 # --- Holoscan operators ---------------------------------------------------------------------------
 add_library(spark_operators STATIC
@@ -85,8 +98,16 @@ target_link_libraries(st2110_passthrough PRIVATE spark_operators holoscan::core)
 add_executable(resize_smoke apps/resize_smoke.cpp)
 target_link_libraries(resize_smoke PRIVATE spark_resize holoscan::core)
 
+# full processing pipeline: rx -> unpack -> resize -> pack -> tx (shared EAL)
+add_executable(st2110_pipeline apps/st2110_pipeline.cpp)
+target_link_libraries(st2110_pipeline PRIVATE spark_operators spark_codec spark_resize holoscan::core)
+
 # --- tests (framing round-trip; pure CPU, runs without NIC/root) -----------------------------------
 enable_testing()
 add_executable(test_rtp_st2110 operators/st2110_tx/test/test_rtp_st2110.cpp)
 target_link_libraries(test_rtp_st2110 PRIVATE spark_st2110_core)
 add_test(NAME rtp_st2110 COMMAND test_rtp_st2110)
+
+add_executable(test_pixel_codec operators/codec/test/test_pixel_codec.cpp)
+target_link_libraries(test_pixel_codec PRIVATE spark_codec)
+add_test(NAME pixel_codec COMMAND test_pixel_codec)
