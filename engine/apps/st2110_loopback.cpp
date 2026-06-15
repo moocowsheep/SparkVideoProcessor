@@ -15,6 +15,7 @@
 #include <holoscan/holoscan.hpp>
 
 #include "operators/common/dpdk_eal.hpp"
+#include "operators/frame_sink/frame_sink.hpp"
 #include "operators/st2110_rx/st2110_rx.hpp"
 #include "operators/st2110_tx/st2110_tx.hpp"
 #include "operators/test_pattern/test_pattern.hpp"
@@ -55,7 +56,8 @@ class St2110Loopback : public holoscan::Application {
     auto rx = make_operator<ops::St2110RxOp>(
         "st2110_rx", Arg("pci_addr", std::string("0002:01:00.1")), Arg("profile", profile),
         Arg("run_seconds", seconds), Arg("manage_eal", false), make_condition<CountCondition>(1));
-    add_operator(rx);
+    auto sink = make_operator<ops::FrameSinkOp>("frame_sink");  // sink-mode rx never emits; wire anyway
+    add_flow(rx, sink);
   }
 };
 
