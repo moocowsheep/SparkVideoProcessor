@@ -3,6 +3,10 @@ third_party/
 spike/third_party/
 .venv/
 
+# Python
+__pycache__/
+*.pyc
+
 # Build
 build/
 out/
