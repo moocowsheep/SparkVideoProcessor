@@ -1,0 +1,62 @@
+// Spark Video Processor — control plane API (M4).
+// The control daemon (control/daemon.cpp) implements this gRPC service and also mirrors it as
+// HTTP/JSON (protobuf JSON mapping) for the web dashboard. Messages are defined once here and reused
+// by both transports.
+syntax = "proto3";
+
+package spark.control;
+
+// Pipeline configuration — maps to the st2110_pipeline env vars (SPARK_*).
+message PipelineConfig {
+  string profile = 1;     // input resolution: "1080p" | "2160p"
+  uint32 out_width = 2;   // resize target width  (e.g. 3840)
+  uint32 out_height = 3;  // resize target height (e.g. 2160)
+  string interp = 4;      // "linear" | "cubic" | "lanczos"
+  bool frc = 5;           // motion-compensated frame interpolation on/off
+  string rx_pci = 6;      // CX-7 RX port BDF
+  string tx_pci = 7;      // CX-7 TX port BDF
+  string dst_mac = 8;     // egress destination MAC
+  uint32 frames = 9;      // 0 = run until stopped; >0 = bounded run
+}
+
+enum PipelineState {
+  STOPPED = 0;
+  RUNNING = 1;
+  ERRORED = 2;
+}
+
+// Last-known pipeline metrics (parsed from the engine's stat lines).
+message PipelineStats {
+  uint64 rx_frames = 1;
+  uint64 rx_packets = 2;
+  uint64 rx_lost = 3;
+  uint64 tx_frames = 4;
+  uint64 tx_packets = 5;
+  uint64 tx_future_err = 6;
+  uint64 tx_past_err = 7;
+  double ingest_latency_us = 8;
+  uint64 frc_interpolated = 9;
+}
+
+message PipelineStatus {
+  PipelineState state = 1;
+  int32 pid = 2;
+  PipelineConfig config = 3;
+  PipelineStats stats = 4;
+  string message = 5;   // last info / error
+  double uptime_s = 6;
+}
+
+message Empty {}
+message SetConfigRequest { PipelineConfig config = 1; }
+message Ack {
+  bool ok = 1;
+  string message = 2;
+}
+
+service SparkControl {
+  rpc GetStatus(Empty) returns (PipelineStatus);
+  rpc SetConfig(SetConfigRequest) returns (Ack);  // only while STOPPED
+  rpc Start(Empty) returns (Ack);
+  rpc Stop(Empty) returns (Ack);
+}
