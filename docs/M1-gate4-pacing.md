@@ -1,10 +1,11 @@
 # M1 — Gate 4: ST 2110-21 hardware pacing at rate (CX-7 loopback)
 
-Status: **✅ GATE 4 CLOSED for TX. HW pacing precision confirmed at 1080p and 2160p (the M0-deferred
-risk is retired), and — as of 2026-06-15 — the `st2110_tx` operator demonstrates *sustained on-rate*
-paced delivery at both rates with `future_err=0`/`past_err=0` (the at-rate proof testpmd's open-loop
-`txonly` structurally could not give; see "Result 3"). Remaining: `st2110_rx` zero-copy ingest
-latency, PTP discipline, provisioning.**
+Status: **✅ GATE 4 CLOSED (TX + RX). HW pacing precision confirmed at 1080p and 2160p (the M0-deferred
+risk retired); the `st2110_tx` operator delivers *sustained on-rate* paced TX with `future_err=0`
+(Result 3), and the `st2110_rx` operator receives the loopback with **zero loss** and ~2–3 µs
+zero-copy ingest latency at both rates (Result 4) — the at-rate + latency proofs testpmd's open-loop
+`txonly`/`rxonly` structurally could not give. Remaining (not gate-4): PTP grandmaster discipline,
+deploy provisioning, single-process rx→tx pass-through.**
 Host: DGX Spark, GB10 Grace Blackwell, aarch64, kernel 6.17, CUDA 13.0. NIC: 2× dual-port ConnectX-7
 (4× 100G). Date: 2026-06-15.
 
@@ -83,11 +84,30 @@ testpmd starve at small `TXD`). 2160p/12G — the real gate — is flawless. The
 failure. `rte_eth_read_clock` returned usable nanoseconds, so the `// BRINGUP` clock-unit concern did
 not materialize.
 
+## Result 4 — `st2110_rx` operator: zero-loss receive + ingest latency, CLEAN (2026-06-15)
+Built `st2110_rx` (engine/operators/st2110_rx/) as the loopback RX half: a Depacketizer (RFC 4175
+parse + scatter, shared framing TU) on a raw-DPDK/mlx5 backend with the RX-timestamp offload. Ran the
+two-process loopback (`st2110_rx_smoke` on `0002:01:00.1` ← switch ← `st2110_tx_smoke` on
+`0002:01:00.0`), 300 frames each:
+
+| profile | TX packets | RX matched | lost | bad | hw_missed | ingest latency min/avg/max |
+|---|---:|---:|---:|---:|---:|---|
+| 1080p | 1 113 300 | 1 113 300 | **0** | **0** | 0 | 1 349 / 2 760 / 103 315 ns |
+| 2160p (the gate) | 4 448 100 | 4 448 100 | **0** | **0** | 0 | 1 325 / 2 182 / 126 695 ns |
+
+Every transmitted packet was received and parsed (RX matched == TX sent, `lost=0` RTP-sequence gaps,
+`bad=0` parse failures), all 300 frames reassembled, at 12G with no HW drops. **Zero-copy ingest
+latency ~2–3 µs average** (NIC HW rx timestamp → operator processing, shared `ptp0` base); the ~100 µs
+max is a per-burst sampling outlier. This closes the gate-4 zero-copy-latency follow-on. The RTP/RFC
+4175 framing is now validated on real hardware in both directions (the unit test already round-trips
+it offline).
+
 ## What remains to fully close gate 4 (in the operators, not the probe)
 1. ✅ **`st2110_tx`:** DONE — paced TX at 1080p and 2160p with `future_err=0` and sustained
    pps == target (see Result 3). Minor follow-up: trim the 1080p frame-boundary `past_err`.
-2. **`st2110_rx`:** zero-copy ingest latency from correlated HW TX/RX timestamps (testpmd `rxonly`
-   only counts packets; it can't correlate per-packet TX/RX).
+2. ✅ **`st2110_rx`:** DONE — zero-loss receive + ~2–3 µs ingest latency at both rates (see Result 4).
+   Follow-on: per-packet TX↔RX wire-latency correlation (embed/​match send time) and a single-process
+   `st2110_rx → … → st2110_tx` pass-through (shared EAL across both ports).
 3. **PTP discipline:** `ptp4l`/`phc2sys` on the shared real-time PHC (`ptp0`). Loopback lock is
    trivial (all ports share `ptp0`); a real grandmaster is the production validation — and note a GM
    does **not** affect the results above (`sync_lost=0`, `wander=0` already; testpmd reads the same
@@ -110,6 +130,11 @@ The `st2110_tx` operator (Result 3) — a real media generator, not the probe:
 cmake -S engine -B engine/build -DCMAKE_PREFIX_PATH=~/holoscan-sdk/install-cu13-aarch64-dgpu
 cmake --build engine/build
 sudo -n SPARK_PROFILE=2160p ./engine/build/st2110_tx_smoke   # SPARK_PROFILE=1080p|2160p, SPARK_FRAMES=n
+```
+Full loopback (RX first, then TX — two processes, mirrors gate-4; RX prints loss + ingest latency):
+```bash
+sudo -n SPARK_PROFILE=2160p SPARK_SECONDS=10 ./engine/build/st2110_rx_smoke &   # 0002:01:00.1
+sudo -n SPARK_PROFILE=2160p SPARK_FRAMES=300 ./engine/build/st2110_tx_smoke      # 0002:01:00.0
 ```
 
 ## Provisioning note (M1 open item #5)

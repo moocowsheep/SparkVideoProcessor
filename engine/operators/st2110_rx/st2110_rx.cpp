@@ -76,9 +76,9 @@ void St2110RxOp::print_stats() {
   const auto rs = backend_ ? backend_->stats() : spark::net::RxStats{};
   const uint64_t avg = lat_cnt_ ? lat_sum_ / lat_cnt_ : 0;
   HOLOSCAN_LOG_INFO(
-      "st2110_rx stats: frames={} packets={} lost={} bad={} | hw_missed={} nombuf={} | "
-      "ingest latency min/avg/max = {}/{}/{} ns ({} samples)",
-      frames_, packets_, lost_, bad_, rs.rx_missed, rs.rx_nombuf,
+      "st2110_rx stats: frames={} matched_pkts={} lost={} bad={} | nic_ipackets={} raw_burst={} "
+      "hw_missed={} nombuf={} | ingest latency min/avg/max = {}/{}/{} ns ({} samples)",
+      frames_, packets_, lost_, bad_, rs.rx_packets, rs.raw_received, rs.rx_missed, rs.rx_nombuf,
       (lat_min_ == UINT64_MAX ? 0 : lat_min_), avg, lat_max_, lat_cnt_);
 }
 
