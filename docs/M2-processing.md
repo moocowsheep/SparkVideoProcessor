@@ -67,9 +67,15 @@ sudo -n SPARK_PROFILE=1080p SPARK_WARMUP_MS=1200 SPARK_TX_PCI=0000:01:00.0 \
 Resize-only benchmark (pure GPU, no NIC/root): `./engine/build/resize_smoke`.
 
 ## Next
-1. **Perf tuning** — FRC raised TX `past_err`→1.2% + ingest latency→~15.6 µs under load. Per-operator
-   CUDA streams (currently default-stream serialized + per-frame syncs in resize/frc), fewer syncs,
-   and GPUDirect to drop the host packed staging copies in unpack/pack.
+1. **Perf tuning (jitter)** — FRC raises TX `past_err`→~1.5% + ingest latency→~18 µs under load. The
+   HW pacing precision is fine (`tx_pp` jitter 24 ns); the residual is *host-side scheduling* jitter.
+   Removing the redundant per-frame syncs (resize benchmark sync, frc `cudaDeviceSynchronize`) was
+   **perf-neutral** — the real cause is the **legacy default stream serializing all GPU work
+   process-wide** + **NVOF's per-frame full-context barrier** (`cuCtxSynchronize`), which block
+   cross-frame pipelining. Real fix (larger, deferred): per-operator/per-thread CUDA streams with
+   event handoffs so frames pipeline across stages, NVOF stream integration to replace the context
+   barrier, and GPUDirect to drop the host packed staging copies in unpack/pack. Current pipeline is
+   correct + zero-loss, so this is optimization, not a blocker.
 2. **FRC rate model** — currently 1:1 motion-comp retiming; true 2× rate-conversion (emit prev + mid)
    needs the TX pacer to handle the doubled output rate.
 3. **PTP discipline** (`ptp4l`/`phc2sys`, grandmaster) for production timing.
