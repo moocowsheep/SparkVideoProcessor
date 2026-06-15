@@ -61,6 +61,20 @@ add_library(spark_codec STATIC
 target_include_directories(spark_codec PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(spark_codec PUBLIC holoscan::core spark_resize CUDA::cudart)
 
+# --- FRC: NVOF optical flow + motion-compensated interpolation (CUDA) -----------------------------
+# Raw NVOF (libnvidia-opticalflow, driver API) — NvOFFRUC isn't available on aarch64, so FRC is
+# hand-rolled on the flow field. SDK headers are vendored under spike/third_party (M0).
+find_library(NVOF_LIB nvidia-opticalflow PATHS /usr/lib/aarch64-linux-gnu /lib/aarch64-linux-gnu REQUIRED)
+add_library(spark_frc STATIC
+  operators/frc/nvof_flow.cpp
+  operators/frc/frc_kernels.cu
+  operators/frc/frc.cpp
+)
+target_include_directories(spark_frc
+  PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../spike/third_party/NVIDIAOpticalFlowSDK)
+target_link_libraries(spark_frc PUBLIC holoscan::core spark_resize CUDA::cudart CUDA::cuda_driver ${NVOF_LIB})
+
 # --- Holoscan operators ---------------------------------------------------------------------------
 add_library(spark_operators STATIC
   operators/st2110_tx/st2110_tx.cpp
@@ -97,6 +111,10 @@ target_link_libraries(st2110_passthrough PRIVATE spark_operators holoscan::core)
 # resize benchmark/bring-up (NPP; pure GPU, no NIC/root)
 add_executable(resize_smoke apps/resize_smoke.cpp)
 target_link_libraries(resize_smoke PRIVATE spark_resize holoscan::core)
+
+# FRC validation (NVOF flow + motion-comp interpolation; pure GPU, no NIC/root)
+add_executable(frc_smoke apps/frc_smoke.cpp)
+target_link_libraries(frc_smoke PRIVATE spark_frc)
 
 # full processing pipeline: rx -> unpack -> resize -> pack -> tx (shared EAL)
 add_executable(st2110_pipeline apps/st2110_pipeline.cpp)
