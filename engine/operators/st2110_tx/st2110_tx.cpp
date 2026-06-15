@@ -36,6 +36,8 @@ void St2110TxOp::setup(holoscan::OperatorSpec& spec) {
   spec.param(ssrc_, "ssrc", "RTP SSRC", "RTP synchronization source id", uint32_t(0x53504b31));
   spec.param(eal_cores_, "eal_cores", "EAL cores", "DPDK lcore list", std::string("0,1"));
   spec.param(pacing_, "pacing", "Enable pacing", "tx_pp hardware send-scheduling", true);
+  spec.param(manage_eal_, "manage_eal", "Manage EAL",
+             "true: own rte_eal_init; false: shared DpdkEal already up", true);
 }
 
 void St2110TxOp::start() {
@@ -51,6 +53,7 @@ void St2110TxOp::start() {
   cfg.txd = static_cast<uint16_t>(txd_.get());
   cfg.eal_core_list = eal_cores_.get();
   cfg.pacing = pacing_.get();
+  cfg.manage_eal = manage_eal_.get();
   backend_->init(cfg);
 
   HOLOSCAN_LOG_INFO("st2110_tx started: TX {} -> {} pacing={}", cfg.pci_addr, dst_mac_.get(),

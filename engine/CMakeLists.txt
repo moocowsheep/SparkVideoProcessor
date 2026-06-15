@@ -30,8 +30,9 @@ add_library(spark_st2110_core STATIC
 )
 target_include_directories(spark_st2110_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-# --- ST 2110 transport backends (all rte_* confined here) -----------------------------------------
+# --- ST 2110 transport backends + shared EAL (all rte_* confined here) ----------------------------
 add_library(spark_st2110_net STATIC
+  operators/common/dpdk_eal.cpp
   operators/st2110_tx/dpdk_tx_backend.cpp
   operators/st2110_rx/dpdk_rx_backend.cpp
 )
@@ -62,6 +63,10 @@ target_link_libraries(st2110_tx_smoke PRIVATE spark_operators holoscan::core)
 
 add_executable(st2110_rx_smoke apps/st2110_rx_smoke.cpp)
 target_link_libraries(st2110_rx_smoke PRIVATE spark_operators holoscan::core)
+
+# One-process loopback (shared EAL across both ports; multi-thread scheduler)
+add_executable(st2110_loopback apps/st2110_loopback.cpp)
+target_link_libraries(st2110_loopback PRIVATE spark_operators holoscan::core)
 
 # --- tests (framing round-trip; pure CPU, runs without NIC/root) -----------------------------------
 enable_testing()

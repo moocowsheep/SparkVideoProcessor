@@ -12,6 +12,8 @@ void St2110RxOp::setup(holoscan::OperatorSpec& spec) {
   spec.param(rxd_, "rxd", "RX descriptors", "RX ring depth", uint32_t(4096));
   spec.param(eal_cores_, "eal_cores", "EAL cores", "DPDK lcore list", std::string("2,3"));
   spec.param(run_seconds_, "run_seconds", "Run seconds", "poll duration", 12.0);
+  spec.param(manage_eal_, "manage_eal", "Manage EAL",
+             "true: own rte_eal_init; false: shared DpdkEal already up", true);
 }
 
 void St2110RxOp::start() {
@@ -26,6 +28,7 @@ void St2110RxOp::start() {
   cfg.udp_port = static_cast<uint16_t>(udp_port_.get());
   cfg.rxd = static_cast<uint16_t>(rxd_.get());
   cfg.eal_core_list = eal_cores_.get();
+  cfg.manage_eal = manage_eal_.get();
   backend_->init(cfg);
   HOLOSCAN_LOG_INFO("st2110_rx started: RX {} udp:{} profile={}", cfg.pci_addr, cfg.udp_port,
                     profile_.get());

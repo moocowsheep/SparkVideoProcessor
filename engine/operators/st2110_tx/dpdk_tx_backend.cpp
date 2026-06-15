@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include <rte_dev.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_ether.h>
@@ -25,10 +26,24 @@
 #include <rte_mbuf_dyn.h>
 #include <rte_udp.h>
 
+#include "../common/dpdk_eal.hpp"
 #include "tx_backend.hpp"
 
 namespace spark::net {
 namespace {
+
+// Find the DPDK port whose PCI BDF matches `pci` (rte_device::name is the BDF for PCI devices).
+// Needed once a process owns more than one port (shared EAL) — "first port" is no longer unique.
+uint16_t find_port_by_pci(const std::string& pci) {
+  uint16_t p;
+  RTE_ETH_FOREACH_DEV(p) {
+    rte_eth_dev_info di{};
+    if (rte_eth_dev_info_get(p, &di) != 0 || !di.device) continue;
+    const char* name = rte_dev_name(di.device);  // BDF for PCI devices (rte_device is opaque)
+    if (name && pci == name) return p;
+  }
+  return RTE_MAX_ETHPORTS;
+}
 
 constexpr uint32_t kL2L3L4Hdr = sizeof(rte_ether_hdr) + sizeof(rte_ipv4_hdr) + sizeof(rte_udp_hdr);
 constexpr uint16_t kBurst = 32;        // packets queued to the NIC per tx_burst
@@ -42,8 +57,13 @@ class DpdkTxBackend final : public ISt2110TxBackend {
  public:
   void init(const TxBackendConfig& cfg) override {
     cfg_ = cfg;
-    init_eal();
-    pick_port();
+    if (cfg_.manage_eal)
+      own_eal_init();  // standalone: this backend runs rte_eal_init for its single port
+    else if (!DpdkEal::instance().initialized())
+      die("manage_eal=false but shared EAL is not initialized (call DpdkEal::init first)");
+    create_pool_and_addrs();
+    port_ = find_port_by_pci(cfg_.pci_addr);
+    if (port_ == RTE_MAX_ETHPORTS) die("no DPDK port matches PCI " + cfg_.pci_addr);
     setup_port();
     lookup_timestamp_dynfield();
     if (rte_eth_dev_start(port_) < 0) die("rte_eth_dev_start failed");
@@ -154,7 +174,7 @@ class DpdkTxBackend final : public ISt2110TxBackend {
   ~DpdkTxBackend() override { shutdown(); }
 
  private:
-  void init_eal() {
+  void own_eal_init() {
     std::string allow = cfg_.pci_addr;
     if (cfg_.pacing) allow += ",tx_pp=" + std::to_string(cfg_.tx_pp_ns);
     std::vector<std::string> args = {"spark_tx",      "-l", cfg_.eal_core_list,
@@ -165,22 +185,15 @@ class DpdkTxBackend final : public ISt2110TxBackend {
     if (rte_eal_init(static_cast<int>(argv.size()), argv.data()) < 0)
       die("rte_eal_init failed (root? hugepages? PCI " + cfg_.pci_addr + "?)");
     eal_inited_ = true;
+  }
 
+  void create_pool_and_addrs() {
     pool_ = rte_pktmbuf_pool_create("spark_tx_pool", kMbufCount, 256, 0,
                                     RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
     if (!pool_) die("rte_pktmbuf_pool_create failed");
     if (inet_pton(AF_INET, cfg_.src_ip.c_str(), &src_ip_be_) != 1) die("bad src_ip");
     if (inet_pton(AF_INET, cfg_.dst_ip.c_str(), &dst_ip_be_) != 1) die("bad dst_ip");
     udp_port_be_ = rte_cpu_to_be_16(cfg_.udp_port);
-  }
-
-  void pick_port() {
-    uint16_t p;
-    RTE_ETH_FOREACH_DEV(p) {  // only our -a port is probed, so this is it
-      port_ = p;
-      return;
-    }
-    die("no DPDK eth port found (check -a " + cfg_.pci_addr + ")");
   }
 
   void setup_port() {

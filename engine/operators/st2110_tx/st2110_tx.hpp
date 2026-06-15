@@ -50,6 +50,7 @@ class St2110TxOp : public holoscan::Operator {
   holoscan::Parameter<uint32_t> ssrc_;
   holoscan::Parameter<std::string> eal_cores_;
   holoscan::Parameter<bool> pacing_;
+  holoscan::Parameter<bool> manage_eal_;  // false in multi-backend processes (shared DpdkEal)
 
   // --- runtime state ---
   std::unique_ptr<spark::net::ISt2110TxBackend> backend_;
