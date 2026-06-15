@@ -71,18 +71,32 @@ fi
 # --- 4. mlx5 hardware send-scheduling (tx_pp) — the ST 2110-21 go/no-go ------------------------
 hr "4. mlx5 tx_pp send-scheduling capability"
 if [ "${RUN_TESTPMD:-0}" != "1" ]; then
-  skip "set RUN_TESTPMD=1 (with sudo + hugepages) to probe; needs the CX-7 up — see step 2"
+  skip "set RUN_TESTPMD=1 (as root) to probe; needs the CX-7 up — see step 2"
 elif [ "${HAVE_TESTPMD}" != "1" ] || [ -z "${CX7_PCI:-}" ]; then
   skip "prerequisites unmet (need dpdk-testpmd AND an enumerated CX-7)"
+elif [ "$(id -u)" != "0" ]; then
+  skip "must be root for testpmd — re-run: RUN_TESTPMD=1 sudo -E bash $0"
 else
-  echo "  probing: dpdk-testpmd -a ${CX7_PCI},tx_pp=${TX_PP_NS} (init + quit)"
-  log="$(timeout 30 dpdk-testpmd -a "${CX7_PCI},tx_pp=${TX_PP_NS}" \
-          --no-mlockall -- --total-num-mbufs=4096 <<<"quit" 2>&1)" || true
+  # We are root: ensure hugepages exist + hugetlbfs mounted (harmless if already set).
+  if [ "$(awk '/HugePages_Total/{print $2}' /proc/meminfo)" -eq 0 ]; then
+    echo "  allocating 1024x2MB hugepages (none configured)"
+    echo 1024 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages 2>/dev/null || true
+  fi
+  mkdir -p /dev/hugepages 2>/dev/null
+  mountpoint -q /dev/hugepages || mount -t hugetlbfs none /dev/hugepages 2>/dev/null || true
+  echo "  probing: dpdk-testpmd -a ${CX7_PCI},tx_pp=${TX_PP_NS} -- -i  (init port, then quit)"
+  # EAL args BEFORE '--'; testpmd app args AFTER '--'. '-i' makes it read 'quit' from stdin.
+  log="$(printf 'quit\n' | timeout 40 dpdk-testpmd \
+          --file-prefix moo_txpp -a "${CX7_PCI},tx_pp=${TX_PP_NS}" \
+          -- -i --total-num-mbufs=4096 2>&1)" || true
   echo "${log}" | sed 's/^/        /'
-  if echo "${log}" | grep -qiE 'tx_pp|scheduling.*enabled|Tx scheduling'; then
-    pass "mlx5 accepted tx_pp — hardware send-scheduling (ST 2110-21 pacing) AVAILABLE"
-  elif echo "${log}" | grep -qiE 'unsupported|not supported|invalid.*tx_pp|cannot.*schedul'; then
-    fail "mlx5 rejected tx_pp — check firmware/REAL_TIME clock config (mlxconfig); pacing NOT available"
+  # FAIL first: a port that fails to probe still drops into the testpmd> prompt with no devices,
+  # so 'Done'/'testpmd>' alone is NOT success — require an actually-configured Port 0.
+  if echo "${log}" | grep -qiE 'packet pacing is not supported|probe of PCI device .* aborted|No probed ethernet devices|Bus \(pci\) probe failed|cannot be used|Failed to process device configure'; then
+    fail "mlx5 rejected tx_pp ('Packet pacing is not supported') — enable it in NIC firmware:"
+    echo "         mlxconfig -d ${CX7_PCI} set REAL_TIME_CLOCK_ENABLE=1   (needs MFT/MST), then cold-reboot and re-probe."
+  elif echo "${log}" | grep -qiE 'Configuring Port 0|Port 0: |Link up'; then
+    pass "mlx5 accepted tx_pp + port initialized — HW send-scheduling (ST 2110-21 pacing) AVAILABLE"
   else
     skip "inconclusive — inspect the testpmd log above"
   fi
