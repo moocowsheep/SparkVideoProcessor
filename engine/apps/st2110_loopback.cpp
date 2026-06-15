@@ -2,14 +2,13 @@
 // ONE EAL across both CX-7 ports. Self-contained (no second process): TX generates, the switched
 // fabric returns it to the RX port, RX measures loss + ingest latency.
 //
-// Purpose: prove the shared-EAL refactor (one rte_eal_init, both ports, backends attach by PCI with
-// manage_eal=false). That part WORKS. CAVEAT — line-rate co-location is not yet clean: in one process
-// the busy-spin TX throttle + busy-poll RX + Holoscan's polling scheduler threads oversubscribe, so
-// the RX poll thread is preempted for ~ms stretches → ingest latency ~ms and ~1% hw_missed/loss
-// (vs lost=0 / ~2 µs in the two-process runs where each had the box). Widening EAL cores did not fix
-// it. The real fix (next task) is CPU isolation: pin the RX poll to a dedicated lcore / dedicated
-// thread, and the TX pacer to another, so neither is preempted. That is the crux of the rx->tx
-// pass-through, surfaced early here exactly as intended.
+// Proves the shared-EAL refactor (one rte_eal_init, both ports, backends attach by PCI with
+// manage_eal=false) AND clean line-rate co-location of the TX pacer + RX poll in one process:
+// at 2160p/12G this gets lost=0, hw_missed=0, ~2 µs steady-state ingest latency — matching the
+// two-process runs. Two fixes got there: (1) DpdkEal widens thread affinity after rte_eal_init (else
+// Holoscan workers inherit the single main-lcore mask and every spin serializes on one core); (2) a
+// one-time TX warmup so RX enters its poll loop before TX floods (a startup race, not steady-state).
+// These are the prerequisites for the single-process rx->tx pass-through (frame forwarding next).
 //   sudo -n SPARK_PROFILE=2160p ./engine/build/st2110_loopback   # SPARK_PROFILE/SPARK_FRAMES/SPARK_SECONDS
 #include <cstdlib>
 
@@ -48,7 +47,8 @@ class St2110Loopback : public holoscan::Application {
                                                  make_condition<CountCondition>(frames));
     auto tx = make_operator<ops::St2110TxOp>(
         "st2110_tx", Arg("pci_addr", std::string("0002:01:00.0")),
-        Arg("dst_mac", std::string("00:00:5e:00:53:30")), Arg("manage_eal", false));
+        Arg("dst_mac", std::string("00:00:5e:00:53:30")), Arg("manage_eal", false),
+        Arg("warmup_ms", 500u));  // let st2110_rx enter its poll loop before we flood
     add_flow(src, tx);
 
     // RX branch: receive on .1, measure loss + zero-copy ingest latency.
