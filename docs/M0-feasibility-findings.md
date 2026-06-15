@@ -1,6 +1,8 @@
 # M0 — Feasibility Spike Findings
 
-Status: **IN PROGRESS — GPU gates + Holoscan C++ build/engine skeleton CONFIRMED; networking gates blocked on ConnectX-7 cabling (user action).**
+Status: **✅ COMPLETE (2026-06-15) — every feasibility gate answered favorably; platform is viable,
+Rivermax-free. Gate 4 (paced loopback at rate / zero-copy latency) is intentionally deferred to M1,
+which builds the `st2110` operators needed to measure it. See the M0→M1 handoff at the end.**
 Host: DGX Spark `gx10-9d2a`, GB10 Grace Blackwell, aarch64, kernel 6.17, driver 580.159.03, CUDA 13.0.
 Date started: 2026-06-15.
 
@@ -12,8 +14,8 @@ currently on the bus.
 
 | # | Gate | Status | Evidence |
 |---|------|--------|----------|
-| 1 | PTP hardware timestamping (ST 2110 timing) | ❌ **BLOCKED / not available on any active NIC** | CX-7 not enumerated; Realtek 10GbE has no HW PTP |
-| 2 | ST 2110-20 RX+TX binds CX-7 (Rivermax-free: DPDK mlx5 + `tx_pp` HW pacing) | ⏸ **BLOCKED** — CX-7 not enumerated; spike staged (`spike/dpdk_pacing_probe.sh`) | See "Networking IO" decision below |
+| 1 | PTP hardware timestamping (ST 2110 timing) | ✅ **CONFIRMED** | CX-7 cabled 2026-06-15: **4× 100G ports up**, HW TX+RX timestamping on all. After `REAL_TIME_CLOCK_ENABLE=1` the 4 free-running PHCs **consolidate to one shared real-time clock** (`ptp0`; all ports → index 0) — the correct ST 2110 topology. `ptp4l` discipline = M1 |
+| 2 | ST 2110-20 RX+TX binds CX-7 (Rivermax-free: DPDK mlx5 + `tx_pp` HW pacing) | ✅ **CONFIRMED (mechanism)** | DPDK 23.11.4 mlx5 PMD binds CX-7 + `testpmd -a 0000:01:00.0,tx_pp=500` configures Port 0 with **no** pacing error, after `REAL_TIME_CLOCK_ENABLE=1` + reboot. Pacing *precision at rate* = gate 4. See note below |
 | 3 | OFA / FRUC for motion-comp FRC on GB10 | ✅ **CONFIRMED** | `spike/nvof_probe` ran HW optical flow on GB10; accurate flow `(8.00, 0.00)px` for an 8px shift; driver **OF API 5.0** (full FRUC); dims up to 8192×8192 |
 | 3b | NPP resize path (M2) | ✅ **CONFIRMED** | `spike/npp_resize_test` 1080p→2160p 16u: LINEAR 0.09 / CUBIC 0.11 / LANCZOS 0.23 ms/frame |
 | 4 | Zero-copy ingest latency | ⏸ Pending CX-7 up + DPDK/GPUNetIO path | — |
@@ -82,6 +84,19 @@ DPDK backend is the only one NVIDIA documents as "actively tested").
 4. **Paced loopback at rate** — generate ST 2110-20-rate UDP/RTP out one QSFP port, receive on the
    other (loopback topology); confirm pacing holds at 1080p (~3 Gbps) then 2160p (~12 Gbps). This is
    the real gate-2/4 validation, and the M1 `st2110_rx`/`st2110_tx` operators grow out of it.
+
+**`tx_pp` firmware gate (found 2026-06-15):** with DPDK 23.11.4 + mlx5 PMD installed, probe steps 1–3
+PASS, but `dpdk-testpmd -a <pci>,tx_pp=500` returns **`mlx5_net: Packet pacing is not supported`** and
+the port fails to probe. Root cause: the NIC's **`REAL_TIME_CLOCK_ENABLE` is off** — not a hardware
+limit (CX-7 has native wait-on-time pacing). Fix: `sudo apt install -y mft` → `sudo mst start` →
+`mlxconfig -y -d 0000:01:00.0 set REAL_TIME_CLOCK_ENABLE=1` (and on `0002:01:00.0`) → **cold reboot**
+→ re-probe. This requirement is NIC-level and applies to **Rivermax equally** — it does not reflect on
+the DPDK path choice.
+
+**RESOLVED 2026-06-15:** `REAL_TIME_CLOCK_ENABLE=1` set on both CX-7 devices (`mft` from apt) + cold
+reboot. The probe's step 4 now configures Port 0 with `tx_pp=500` and no error → **gate 2 mechanism
+CONFIRMED, Rivermax-free.** Side effect (expected): the 4 per-port free-running PHCs collapse to one
+shared real-time PHC (`ptp0`).
 
 ## Detailed findings
 
@@ -158,3 +173,39 @@ or a loopback to a second QSFP port / second device) before gates 1, 2, and 4 ca
 
 ## Reproduce
 See `spike/diagnose.sh` (read-only diagnostics used to produce this report).
+
+## M0 → M1 handoff
+
+**Verdict: the platform is feasible.** Every hardware unknown is answered favorably and the
+Rivermax-free networking stack is validated end to end. M1 (the
+`st2110_rx → unpack → resize → frc → pack → st2110_tx` pass-through) can begin.
+
+### What M1 inherits (proven + pinned)
+- **GPU primitives:** OFA hardware optical flow (FRUC) + NPP resize, large per-frame headroom at 60 fps
+  (gates 3/3b).
+- **Holoscan C++ runtime + build:** SDK v4.3.0 from source, `./run build --gpu dgpu --cuda 13`, install
+  tree `~/holoscan-sdk/install-cu13-aarch64-dgpu`. Engine builds + runs natively via
+  `find_package(holoscan)` (the tree bundles rmm/nvtx3/rapids_logger/MATX/Eigen3/CCCL).
+- **Networking (Rivermax-free):** DPDK 23.11.4 mlx5 PMD (bifurcated — no NIC unbind) binds the CX-7 and
+  accepts `tx_pp` hardware send-scheduling for ST 2110-21 pacing. NIC = 2× dual-port CX-7, 4× 100G.
+- **Required NIC firmware config (persist this!):** `REAL_TIME_CLOCK_ENABLE=1` on **both** devices
+  (`0000:01:00.0`, `0002:01:00.0`) via `mft`/`mlxconfig` + reboot — without it `tx_pp` fails with
+  "Packet pacing is not supported". Result: one shared real-time PHC (`ptp0`, all ports → index 0).
+- **Timing:** HW TX/RX timestamping on all ports; single real-time PHC ready for `ptp4l`/`phc2sys`.
+
+### Open items M1 must close (gate 4 + follow-ons)
+1. **Paced loopback at rate (gate 4):** push real ST 2110-20 out one QSFP port, receive on the other;
+   verify `tx_pp` pacing precision holds at 1080p (~3 Gbps) **and** 2160p (~12 Gbps) — precision degrades
+   under high Tx load, so 12G is the gate, not 3G. Measure zero-copy ingest latency here.
+2. **Identify the cabled loopback pair** — all 4 ports show link-up; first M1 task is to determine which
+   port↔port pair is the self-test path (assign IPs + connectivity test, or a testpmd forward).
+3. **`ptp4l`/`phc2sys` discipline** on the real-time PHC (loopback lock is trivial — all ports share
+   `ptp0`; a real grandmaster is the production validation).
+4. **Networking integration choice:** wire ST 2110 via the Holoscan `advanced_network` DPDK backend
+   (production path) rather than the raw-DPDK probe used here; DOCA GPUNetIO stays the GPUDirect reserve.
+5. **Provisioning:** fold `REAL_TIME_CLOCK_ENABLE=1` + hugepages into `deploy/` tooling so a fresh box is
+   reproducible (hugepages are currently allocated ad-hoc by the probe).
+
+### First M1 deliverable
+`st2110_rx → st2110_tx` pass-through (no processing) over the DPDK backend, `tx_pp`-paced and PTP-locked
+— which simultaneously closes gate 4. Resize + FRC operators graft on after.

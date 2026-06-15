@@ -5,10 +5,10 @@ Blackwell). The first module ingests uncompressed **SMPTE ST 2110-20** video, ch
 and/or frame rate (motion-compensated) on the GPU, and emits uncompressed **SMPTE ST 2110-20** — all
 controllable from a web interface.
 
-> **Status:** Milestone 0 (feasibility spike) in progress. See
-> [`docs/M0-feasibility-findings.md`](docs/M0-feasibility-findings.md). **Currently blocked** on
-> ConnectX-7 connectivity — the Spark's CX-7 NIC is hot-plug and must have a QSFP cable connected
-> before SMPTE 2110 ingest/egress and PTP can be validated.
+> **Status:** Milestone 0 (feasibility spike) **complete** (2026-06-15) — all hardware gates
+> validated, Rivermax-free (DPDK mlx5 `tx_pp` pacing on the CX-7). See
+> [`docs/M0-feasibility-findings.md`](docs/M0-feasibility-findings.md). Next: **M1**, the
+> `st2110_rx → … → st2110_tx` pass-through, which also measures paced-loopback precision/latency (gate 4).
 
 ## Architecture
 
