@@ -33,7 +33,7 @@ currently on the bus.
 Reproduce: `bash spike/build_probes.sh` (no sudo; uses on-system `libnvidia-opticalflow.so` + NPP + public NVOF headers in `spike/third_party/`). At 60 fps the per-frame budget is 16.7 ms, so resize + optical flow leave large headroom.
 
 ### Holoscan: runtime CONFIRMED, but conda-forge C++ build path is blocked on CUDA 13
-- **Runtime works on GB10 ✅** — installed Miniforge + a CUDA-13 conda env (`moo`) with `libholoscan-dev`
+- **Runtime works on GB10 ✅** — installed Miniforge + a CUDA-13 conda env (`spark`) with `libholoscan-dev`
   4.3.0 (cuda-version 13.3). The shipped `examples/ping_simple` ran the GXF executor and printed Rx
   1–10 (exit 0) once `librmm.so` was on the path. Holoscan headers report 4.3.0.
 - **C++ *build* against conda-forge is blocked ❌.** `holoscan-config.cmake` calls
@@ -168,7 +168,7 @@ or a loopback to a second QSFP port / second device) before gates 1, 2, and 4 ca
   documented as "not actively tested".)
 - Prereqs present: Docker 29.2.1, buildx 0.31.1, NVIDIA Container Toolkit 1.19.1. Blocker: **docker
   group access** (above). See `docs/SETUP.md` for exact steps.
-- The CUDA-13 conda env `moo` (Holoscan **runtime** + Python) is kept as-is — useful for quick checks;
+- The CUDA-13 conda env `spark` (Holoscan **runtime** + Python) is kept as-is — useful for quick checks;
   not used for the C++ build.
 
 ## Reproduce
