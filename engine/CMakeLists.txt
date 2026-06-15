@@ -116,9 +116,10 @@ target_link_libraries(resize_smoke PRIVATE spark_resize holoscan::core)
 add_executable(frc_smoke apps/frc_smoke.cpp)
 target_link_libraries(frc_smoke PRIVATE spark_frc)
 
-# full processing pipeline: rx -> unpack -> resize -> pack -> tx (shared EAL)
+# full processing pipeline: rx -> unpack -> resize -> frc -> pack -> tx (shared EAL)
 add_executable(st2110_pipeline apps/st2110_pipeline.cpp)
-target_link_libraries(st2110_pipeline PRIVATE spark_operators spark_codec spark_resize holoscan::core)
+target_link_libraries(st2110_pipeline
+  PRIVATE spark_operators spark_codec spark_resize spark_frc holoscan::core)
 
 # --- tests (framing round-trip; pure CPU, runs without NIC/root) -----------------------------------
 enable_testing()

@@ -29,6 +29,7 @@ struct NvofFlow::Impl {
   NV_OF_CUDA_API_FUNCTION_LIST fl{};
   NvOFHandle hof = nullptr;
   NvOFGPUBufferHandle bin = nullptr, bref = nullptr, bout = nullptr;
+  CUcontext ctx = nullptr;  // the (primary) context NVOF was created on
   CUdeviceptr in_dp = 0, ref_dp = 0, out_dp = 0;
   uint32_t in_pitch = 0, ref_pitch = 0, out_pitch = 0;
   uint32_t width = 0, height = 0, grid_size = 4, grid_w = 0, grid_h = 0;
@@ -72,6 +73,7 @@ void NvofFlow::init(uint32_t width, uint32_t height, uint32_t grid_size) {
     cu_check(cuDevicePrimaryCtxRetain(&ctx, dev), "cuDevicePrimaryCtxRetain");
     cu_check(cuCtxSetCurrent(ctx), "cuCtxSetCurrent");
   }
+  im.ctx = ctx;
 
   if (NvOFAPICreateInstanceCuda(NV_OF_API_VERSION, &im.fl) != NV_OF_SUCCESS)
     throw std::runtime_error("nvof: NvOFAPICreateInstanceCuda failed (OFA not usable)");
@@ -118,6 +120,9 @@ void NvofFlow::init(uint32_t width, uint32_t height, uint32_t grid_size) {
 
 void NvofFlow::compute(const uint8_t* prevY8, const uint8_t* curY8) {
   Impl& im = *p_;
+  // FrcOp::compute() may run on any Holoscan worker thread; make our context current so the NVOF
+  // driver calls (and the runtime kernels sharing this primary context) target the right device.
+  cu_check(cuCtxSetCurrent(im.ctx), "cuCtxSetCurrent");
   auto upload = [&](CUdeviceptr dst, uint32_t dpitch, const uint8_t* src) {
     CUDA_MEMCPY2D c{};
     c.srcMemoryType = CU_MEMORYTYPE_DEVICE;
