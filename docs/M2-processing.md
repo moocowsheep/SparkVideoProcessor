@@ -1,12 +1,13 @@
 # M2 — GPU processing operators + full pipeline
 
-Status: **resize + unpack/pack done; the end-to-end `st2110_rx → unpack → resize → pack → st2110_tx`
-pipeline runs on the NIC, upscaling 1080p→2160p in flight with zero loss and line-rate-paced output
-(2026-06-15).** FRC (optical-flow frame-rate conversion) is the remaining processing stage.
+Status: **all processing operators built — resize, unpack/pack, and FRC (motion-compensated
+interpolation on the OFA). The `st2110_rx → unpack → resize → pack → st2110_tx` pipeline runs on the
+NIC (1080p→2160p in flight, zero loss). FRC is validated standalone; wiring it into the live pipeline
+is the remaining integration step (2026-06-15).**
 
 ```
 st2110_rx → [unpack] → [resize] → [frc] → [pack] → st2110_tx
-   ✓          ✓ CUDA     ✓ NPP      ⬜       ✓ CUDA     ✓
+   ✓          ✓ CUDA     ✓ NPP    ✓ OFA     ✓ CUDA     ✓
 ```
 
 ## Intermediate format: GpuFrame
@@ -23,6 +24,14 @@ is the GPU working format for the whole processing chain.
   bijection; the round-trip test (`test_pixel_codec`, in ctest) is byte-identical. `UnpackOp`:
   VideoFrame (host packed) → GpuFrame; `PackOp`: the inverse. Default-stream ordered with sync
   H2D/D2H staging.
+- **`frc` (OFA, `frc/nvof_flow.cpp` + `frc/frc_kernels.cu`)** — motion-compensated interpolation,
+  hand-rolled on the raw NVIDIA Optical Flow API (NvOFFRUC isn't on aarch64). `NvofFlow` wraps the
+  NVOF driver API (shares the runtime primary context); a warp/blend kernel synthesizes a frame at
+  phase t from prev/cur along the flow. `FrcOp` holds prev and emits an interpolated frame per input
+  (1:1; 2× rate-conversion is a follow-on). Validated (`frc_smoke`, pure GPU): synthetic 16px
+  translation → flow `(16.00, 0.22)`, interpolation MAE 0.05 vs naive-blend 5.22 (~100× better — the
+  flow is actually used, no ghosting). Live-pipeline wiring + per-worker-thread context hardening
+  (`cuCtxSetCurrent` in compute) is the remaining step.
 
 ## Build note (GB10)
 Enabling the CUDA language sets `CMAKE_CUDA_ARCHITECTURES` to a conservative default (sm_75 here),
@@ -53,8 +62,9 @@ sudo -n SPARK_PROFILE=1080p SPARK_WARMUP_MS=800 SPARK_TX_PCI=0000:01:00.0 \
 Resize-only benchmark (pure GPU, no NIC/root): `./engine/build/resize_smoke`.
 
 ## Next
-1. **`frc` operator** — OFA/FRUC optical-flow frame-rate conversion (M0 gate 3 proven). The headline
-   feature; slots between resize and pack.
+1. **Wire `frc` into the live pipeline** — `rx → unpack → resize → frc → pack → tx`; harden the NVOF
+   driver context across Holoscan worker threads (`cuCtxSetCurrent` in `compute`), and decide the rate
+   model (1:1 motion-comp vs 2× rate-conversion + TX pacing change).
 2. **PTP discipline** (`ptp4l`/`phc2sys`, grandmaster) for production timing.
 3. **`deploy/` provisioning** — `REAL_TIME_CLOCK_ENABLE=1` + hugepages (M1 open item #5).
 4. **Perf**: per-operator CUDA streams (currently default-stream serialized); GPUDirect to avoid the
