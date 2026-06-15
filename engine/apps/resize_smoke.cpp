@@ -26,7 +26,7 @@ class ResizeSmoke : public holoscan::Application {
     auto src = make_operator<ops::TestGpuSourceOp>("src", Arg("profile", in_profile),
                                                    make_condition<CountCondition>(frames));
     auto rz = make_operator<ops::ResizeOp>("resize", Arg("out_width", ow), Arg("out_height", oh),
-                                           Arg("interp", interp));
+                                           Arg("interp", interp), Arg("measure", true));
     auto sink = make_operator<ops::GpuFrameSinkOp>("sink");
     add_flow(src, rz);
     add_flow(rz, sink);

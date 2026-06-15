@@ -29,6 +29,7 @@ class ResizeOp : public holoscan::Operator {
   holoscan::Parameter<uint32_t> out_width_;
   holoscan::Parameter<uint32_t> out_height_;
   holoscan::Parameter<std::string> interp_;  // linear | cubic | lanczos
+  holoscan::Parameter<bool> measure_;  // per-frame cudaEvent timing (benchmark only; a sync/frame)
 
   int interp_code_ = 0;
   NppStreamContext npp_ctx_{};

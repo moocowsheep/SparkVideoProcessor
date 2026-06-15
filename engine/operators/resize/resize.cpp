@@ -55,6 +55,8 @@ void ResizeOp::setup(holoscan::OperatorSpec& spec) {
   spec.param(out_width_, "out_width", "Out width", "target width", 3840u);
   spec.param(out_height_, "out_height", "Out height", "target height", 2160u);
   spec.param(interp_, "interp", "Interpolation", "linear | cubic | lanczos", std::string("cubic"));
+  spec.param(measure_, "measure", "Measure", "per-frame GPU timing (benchmark only; adds a sync)",
+             false);
 }
 
 void ResizeOp::start() {
@@ -79,30 +81,37 @@ void ResizeOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext
   auto dst = pool_[pool_idx_];
   pool_idx_ = (pool_idx_ + 1) % pool_.size();
 
+  const bool measure = measure_.get();
   auto a = static_cast<cudaEvent_t>(ev_start_);
   auto b = static_cast<cudaEvent_t>(ev_stop_);
-  cudaEventRecord(a);
+  if (measure) cudaEventRecord(a);
   resize_plane(src.y, src.width, src.height, dst->y, dst->width, dst->height, interp_code_, npp_ctx_);
   resize_plane(src.cb, src.chroma_width(), src.height, dst->cb, dst->chroma_width(), dst->height,
                interp_code_, npp_ctx_);
   resize_plane(src.cr, src.chroma_width(), src.height, dst->cr, dst->chroma_width(), dst->height,
                interp_code_, npp_ctx_);
-  cudaEventRecord(b);
-  cudaEventSynchronize(b);
-  float ms = 0.0f;
-  cudaEventElapsedTime(&ms, a, b);
-  ms_sum_ += ms;
-  if (ms < ms_min_) ms_min_ = ms;
-  if (ms > ms_max_) ms_max_ = ms;
+  if (measure) {  // benchmark path: a full GPU sync per frame. Off in the pipeline (stream-ordered).
+    cudaEventRecord(b);
+    cudaEventSynchronize(b);
+    float ms = 0.0f;
+    cudaEventElapsedTime(&ms, a, b);
+    ms_sum_ += ms;
+    if (ms < ms_min_) ms_min_ = ms;
+    if (ms > ms_max_) ms_max_ = ms;
+  }
   ++frames_;
 
   op_output.emit(dst, "out");
 }
 
 void ResizeOp::stop() {
-  const double avg = frames_ ? ms_sum_ / frames_ : 0.0;
-  HOLOSCAN_LOG_INFO("resize stopped: frames={} | resize ms/frame min/avg/max = {:.3f}/{:.3f}/{:.3f}",
-                    frames_, frames_ ? ms_min_ : 0.0, avg, ms_max_);
+  if (frames_ && ms_sum_ > 0.0) {
+    HOLOSCAN_LOG_INFO(
+        "resize stopped: frames={} | resize ms/frame min/avg/max = {:.3f}/{:.3f}/{:.3f}", frames_,
+        ms_min_, ms_sum_ / frames_, ms_max_);
+  } else {
+    HOLOSCAN_LOG_INFO("resize stopped: frames={} (timing off)", frames_);
+  }
   if (ev_start_) cudaEventDestroy(static_cast<cudaEvent_t>(ev_start_));
   if (ev_stop_) cudaEventDestroy(static_cast<cudaEvent_t>(ev_stop_));
 }

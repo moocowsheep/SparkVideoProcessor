@@ -39,20 +39,20 @@ void FrcOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& o
     return;
   }
 
-  // 10-bit luma -> 8-bit for the optical-flow engine (runtime kernels first, so the primary context
-  // is current on this thread before the NVOF driver calls).
+  // 10-bit luma -> 8-bit for the optical-flow engine. All on the default stream, which orders these
+  // kernels before NVOF's cuMemcpy2D — no explicit sync needed (NVOF's own ctxSync gates the flow,
+  // and downstream pack is default-stream-ordered after interpolate). Removing the per-frame
+  // cudaDeviceSynchronize() cuts the pipeline's pacing jitter / latency.
   spark::frc::y10_to_y8(prev_->y, prevY8_, cur->width, cur->height, 0);
   spark::frc::y10_to_y8(cur->y, curY8_, cur->width, cur->height, 0);
-  cudaDeviceSynchronize();
 
-  flow_.compute(prevY8_, curY8_);  // NVOF prev->cur (blocks)
+  flow_.compute(prevY8_, curY8_);  // NVOF prev->cur (ctxSync inside; flow ready on return)
 
   auto out = pool_[idx_];
   idx_ = (idx_ + 1) % pool_.size();
   spark::frc::interpolate(*prev_, *cur, flow_.flow_dev(), flow_.flow_pitch_bytes(), flow_.grid_w(),
                           flow_.grid_h(), flow_.grid_size(), *out,
                           static_cast<float>(phase_.get()), 0);
-  cudaDeviceSynchronize();
   ++frames_;
   prev_ = cur;
   op_output.emit(out, "out");
