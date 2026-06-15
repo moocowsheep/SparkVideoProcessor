@@ -42,6 +42,7 @@ class St2110RxOp : public holoscan::Operator {
   holoscan::Parameter<uint32_t> rxd_;
   holoscan::Parameter<std::string> eal_cores_;
   holoscan::Parameter<double> run_seconds_;
+  holoscan::Parameter<bool> manage_eal_;  // false in multi-backend processes (shared DpdkEal)
 
   std::unique_ptr<spark::net::ISt2110RxBackend> backend_;
   std::unique_ptr<spark::st2110::Depacketizer> depkt_;

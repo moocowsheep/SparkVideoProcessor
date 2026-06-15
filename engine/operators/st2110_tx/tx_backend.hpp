@@ -26,6 +26,8 @@ struct TxBackendConfig {
   std::string eal_core_list = "0,1";
   std::string file_prefix = "spark_tx";  // distinct per process (matches the spike's --file-prefix)
   bool pacing = true;                    // enable tx_pp HW send-scheduling
+  bool manage_eal = true;  // true: this backend owns rte_eal_init (standalone). false: shared EAL
+                           // already up (DpdkEal) — just attach to the port (multi-backend process).
 };
 
 // HW pacing counters mirrored from the mlx5 tx_pp xstats — the same metrics the gate-4 spike read.

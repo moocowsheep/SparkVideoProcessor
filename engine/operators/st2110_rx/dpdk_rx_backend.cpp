@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include <rte_dev.h>
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_ether.h>
@@ -16,10 +17,23 @@
 #include <rte_mbuf_dyn.h>
 #include <rte_udp.h>
 
+#include "../common/dpdk_eal.hpp"
 #include "rx_backend.hpp"
 
 namespace spark::net {
 namespace {
+
+// Find the DPDK port whose PCI BDF matches `pci` (rte_device::name is the BDF for PCI devices).
+uint16_t find_port_by_pci(const std::string& pci) {
+  uint16_t p;
+  RTE_ETH_FOREACH_DEV(p) {
+    rte_eth_dev_info di{};
+    if (rte_eth_dev_info_get(p, &di) != 0 || !di.device) continue;
+    const char* name = rte_dev_name(di.device);  // BDF for PCI devices (rte_device is opaque)
+    if (name && pci == name) return p;
+  }
+  return RTE_MAX_ETHPORTS;
+}
 
 constexpr uint16_t kRxBurst = 256;
 constexpr uint32_t kMbufCount = 16384;
@@ -33,8 +47,13 @@ class DpdkRxBackend final : public ISt2110RxBackend {
   void init(const RxBackendConfig& cfg) override {
     cfg_ = cfg;
     udp_port_be_ = rte_cpu_to_be_16(cfg_.udp_port);
-    init_eal();
-    pick_port();
+    if (cfg_.manage_eal)
+      own_eal_init();
+    else if (!DpdkEal::instance().initialized())
+      die("manage_eal=false but shared EAL is not initialized (call DpdkEal::init first)");
+    create_pool();
+    port_ = find_port_by_pci(cfg_.pci_addr);
+    if (port_ == RTE_MAX_ETHPORTS) die("no DPDK port matches PCI " + cfg_.pci_addr);
     setup_port();
     lookup_rx_timestamp();
     if (rte_eth_dev_start(port_) < 0) die("rte_eth_dev_start failed");
@@ -126,7 +145,7 @@ class DpdkRxBackend final : public ISt2110RxBackend {
     return true;
   }
 
-  void init_eal() {
+  void own_eal_init() {
     std::vector<std::string> args = {"spark_rx", "-l",           cfg_.eal_core_list,
                                      "-a",       cfg_.pci_addr,  "--file-prefix",
                                      cfg_.file_prefix};
@@ -135,18 +154,12 @@ class DpdkRxBackend final : public ISt2110RxBackend {
     if (rte_eal_init(static_cast<int>(argv.size()), argv.data()) < 0)
       die("rte_eal_init failed (root? hugepages? PCI " + cfg_.pci_addr + "?)");
     eal_inited_ = true;
+  }
+
+  void create_pool() {
     pool_ = rte_pktmbuf_pool_create("spark_rx_pool", kMbufCount, 256, 0,
                                     RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
     if (!pool_) die("rte_pktmbuf_pool_create failed");
-  }
-
-  void pick_port() {
-    uint16_t p;
-    RTE_ETH_FOREACH_DEV(p) {
-      port_ = p;
-      return;
-    }
-    die("no DPDK eth port found (check -a " + cfg_.pci_addr + ")");
   }
 
   void setup_port() {

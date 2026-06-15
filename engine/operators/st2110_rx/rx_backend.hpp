@@ -17,6 +17,7 @@ struct RxBackendConfig {
   uint16_t mtu = 1500;
   std::string eal_core_list = "2,3";
   std::string file_prefix = "spark_rx";  // distinct from the TX process (two-process loopback)
+  bool manage_eal = true;  // true: own rte_eal_init (standalone). false: shared EAL up (DpdkEal).
 };
 
 // One received media packet. `payload` points at the UDP payload (the RTP/RFC 4175 bytes) inside the
