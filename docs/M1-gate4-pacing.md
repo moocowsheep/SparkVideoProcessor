@@ -137,6 +137,6 @@ sudo -n SPARK_PROFILE=2160p SPARK_SECONDS=10 ./engine/build/st2110_rx_smoke &   
 sudo -n SPARK_PROFILE=2160p SPARK_FRAMES=300 ./engine/build/st2110_tx_smoke      # 0002:01:00.0
 ```
 
-## Provisioning note (M1 open item #5)
-`REAL_TIME_CLOCK_ENABLE=1` (both CX-7 devices) + hugepages must move into `deploy/` so a fresh box is
-reproducible — currently the probe self-allocates hugepages ad hoc.
+## Provisioning (M1 open item #5) — DONE
+`REAL_TIME_CLOCK_ENABLE=1` (both CX-7 devices) + hugepages are now provisioned reproducibly by
+`deploy/provision.sh` (idempotent; `--check` for read-only state). See `deploy/README.md`.
