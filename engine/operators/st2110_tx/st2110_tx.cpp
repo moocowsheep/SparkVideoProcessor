@@ -1,6 +1,7 @@
 #include "st2110_tx.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstdio>
 
 namespace spark::ops {
@@ -96,9 +97,20 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
   for (spark::st2110::PacketPlan p; pktz_->next(p); ++i) {
     const uint64_t send_ts = base + static_cast<uint64_t>(i) * gap_ns_;
     // Closed-loop throttle (the gate-4 lesson): keep the in-flight schedule within the tx_pp window
-    // so packets never become future_errors. A real-time sender is *meant* to wait here.
-    if (pace) {
-      while (send_ts > backend_->now_ns() + pacing_horizon_ns_) { /* spin until the clock catches up */ }
+    // so packets never become future_errors. A real-time sender is *meant* to wait here. Guarded by
+    // an independent wall-clock cap so a now_ns() unit mismatch (// BRINGUP) surfaces as future_errors
+    // in the xstats rather than hanging a root process.
+    if (pace && throttle_enabled_) {
+      const auto t0 = std::chrono::steady_clock::now();
+      while (send_ts > backend_->now_ns() + pacing_horizon_ns_) {
+        if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(50)) {
+          HOLOSCAN_LOG_WARN(
+              "st2110_tx: pacing throttle hit 50ms cap — disabling self-throttle (check now_ns() "
+              "units / pacing_horizon_ns); NIC tx_pp still active");
+          throttle_enabled_ = false;
+          break;
+        }
+      }
     }
     spark::net::TxBuf buf = backend_->reserve_packet(p.payload_len);
     pktz_->write_payload(p, frame.data->data(), buf.payload);

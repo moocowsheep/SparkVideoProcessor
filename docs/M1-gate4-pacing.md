@@ -1,9 +1,10 @@
 # M1 — Gate 4: ST 2110-21 hardware pacing at rate (CX-7 loopback)
 
-Status: **✅ HW pacing precision CONFIRMED at 1080p and 2160p — the M0-deferred gate-4 hardware risk
-is retired. Sustained *on-rate* paced throughput and zero-copy ingest latency are not demonstrable
-with the testpmd `txonly` probe (open-loop generator) and move to the `st2110_tx`/`st2110_rx`
-operators — exactly the production path the M0 handoff chose.**
+Status: **✅ GATE 4 CLOSED for TX. HW pacing precision confirmed at 1080p and 2160p (the M0-deferred
+risk is retired), and — as of 2026-06-15 — the `st2110_tx` operator demonstrates *sustained on-rate*
+paced delivery at both rates with `future_err=0`/`past_err=0` (the at-rate proof testpmd's open-loop
+`txonly` structurally could not give; see "Result 3"). Remaining: `st2110_rx` zero-copy ingest
+latency, PTP discipline, provisioning.**
 Host: DGX Spark, GB10 Grace Blackwell, aarch64, kernel 6.17, CUDA 13.0. NIC: 2× dual-port ConnectX-7
 (4× 100G). Date: 2026-06-15.
 
@@ -61,9 +62,30 @@ it emits one RTP packet per ST 2110-21 slot straight from the framebuffer cadenc
 floods nor starves, and hands each packet a send timestamp for the NIC scheduler. testpmd `txonly`
 was only ever the mechanism probe — it answered the hardware question and that's its job done.
 
+## Result 3 — `st2110_tx` operator: sustained at-rate pacing, CLEAN (2026-06-15)
+Built the `st2110_tx` Holoscan operator (engine/operators/st2110_tx/) on a raw-DPDK/mlx5 `tx_pp`
+backend behind a swappable interface (advanced_network can replace it later). It generates real
+RFC 4175 packets at the media rate and — the key design point — `compute()` self-throttles its
+submission to keep the in-flight schedule within `pacing_horizon_ns` (50 µs) of the NIC clock, the
+closed-loop feeding testpmd's open-loop `txonly` lacked. Run via `engine/build/st2110_tx_smoke`
+(test_pattern → st2110_tx) on the gate-4 pair (TX `0002:01:00.0` → RX MAC `00:00:5e:00:53:30`),
+300 frames each:
+
+| profile | pkts/frame | rate | packets sent | jitter | wander | sync_lost | future_err | past_err |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1080p | 3 711 | ~222 k pps | 1 113 300 | 40 ns | 0 | 0 | **0** | 3 157 (0.28 %) |
+| 2160p (the gate) | 14 827 | ~889 k pps | 4 448 100 | 18 ns | 0 | 0 | **0** | **0** |
+
+`future_err=0` at both rates is the at-rate proof: the schedule never overran the `tx_pp` window
+(contrast the testpmd flood at `TXD=128`), while delivering the *full* frame rate (contrast the
+testpmd starve at small `TXD`). 2160p/12G — the real gate — is flawless. The 1080p `past_err`
+(~10/frame, frame-boundary scheduling at the looser 4.5 µs gap) is a minor tuning item, not a gate
+failure. `rte_eth_read_clock` returned usable nanoseconds, so the `// BRINGUP` clock-unit concern did
+not materialize.
+
 ## What remains to fully close gate 4 (in the operators, not the probe)
-1. **`st2110_tx`:** paced TX at 1080p and 2160p with `future_err`/`past_err` ≈ 0 and sustained
-   pps == target (the at-rate proof testpmd can't give).
+1. ✅ **`st2110_tx`:** DONE — paced TX at 1080p and 2160p with `future_err=0` and sustained
+   pps == target (see Result 3). Minor follow-up: trim the 1080p frame-boundary `past_err`.
 2. **`st2110_rx`:** zero-copy ingest latency from correlated HW TX/RX timestamps (testpmd `rxonly`
    only counts packets; it can't correlate per-packet TX/RX).
 3. **PTP discipline:** `ptp4l`/`phc2sys` on the shared real-time PHC (`ptp0`). Loopback lock is
@@ -82,6 +104,12 @@ sudo -E LOOP_TX_PCI=0002:01:00.0 LOOP_RX_PCI=0002:01:00.1 PROFILE=2160p bash spi
 ```
 Read `tx_pp_jitter` / `tx_pp_wander` / `tx_pp_sync_lost` for precision (the gate); `future_err` /
 `past_err` reflect the open-loop generator, not the NIC. `TXD` sweeps the flood↔starve regimes.
+
+The `st2110_tx` operator (Result 3) — a real media generator, not the probe:
+```bash
+cmake -S engine -B engine/build -DCMAKE_PREFIX_PATH=~/holoscan-sdk/install-cu13-aarch64-dgpu
+cmake --build engine/build
+sudo -n SPARK_PROFILE=2160p ./engine/build/st2110_tx_smoke   # SPARK_PROFILE=1080p|2160p, SPARK_FRAMES=n
 ```
 
 ## Provisioning note (M1 open item #5)

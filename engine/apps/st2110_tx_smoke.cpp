@@ -11,6 +11,8 @@
 // port, count packets with the spike's rxonly testpmd (or, later, st2110_rx). Success = sustained pps
 // == target with future_err/past_err ~0 and tx_pp jitter in the tens of ns — the proof testpmd could
 // not give.
+#include <cstdlib>
+
 #include <holoscan/holoscan.hpp>
 
 #include "operators/st2110_tx/st2110_tx.hpp"
@@ -18,13 +20,18 @@
 
 namespace spark {
 
+// Env overrides (passed through sudo via the SETENV allowlist): SPARK_PROFILE=1080p|2160p,
+// SPARK_FRAMES=<n>. Defaults: 1080p, 300 frames (~5 s at 59.94 fps).
 class St2110TxSmoke : public holoscan::Application {
  public:
   void compose() override {
     using namespace holoscan;
-    auto src = make_operator<ops::TestPatternOp>(
-        "test_pattern", Arg("profile", std::string("1080p")),
-        make_condition<CountCondition>(300));  // ~5 s at 59.94 fps
+    const char* prof = std::getenv("SPARK_PROFILE");
+    const char* fr = std::getenv("SPARK_FRAMES");
+    const std::string profile = prof ? prof : "1080p";
+    const int64_t frames = fr ? std::atoll(fr) : 300;
+    auto src = make_operator<ops::TestPatternOp>("test_pattern", Arg("profile", profile),
+                                                 make_condition<CountCondition>(frames));
     auto tx = make_operator<ops::St2110TxOp>("st2110_tx");
     add_flow(src, tx);
   }
