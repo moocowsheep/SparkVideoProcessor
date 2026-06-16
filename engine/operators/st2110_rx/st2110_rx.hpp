@@ -54,6 +54,9 @@ class St2110RxOp : public holoscan::Operator {
   holoscan::Parameter<std::string> pci_addr_;
   holoscan::Parameter<uint32_t> udp_port_;
   holoscan::Parameter<std::string> profile_;
+  holoscan::Parameter<std::string> mcast_group_;  // ST 2110 group to join (NMOS); "" = legacy
+  holoscan::Parameter<std::string> src_ip_;       // SSM source filter
+  holoscan::Parameter<std::string> iface_ip_;     // local media interface IP (IGMP report source)
   holoscan::Parameter<uint32_t> rxd_;
   holoscan::Parameter<std::string> eal_cores_;
   holoscan::Parameter<double> run_seconds_;

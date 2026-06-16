@@ -135,6 +135,23 @@ bool start_locked(State& s, std::string& msg) {
     setenv("SPARK_TX_PCI", c.tx_pci().c_str(), 1);
     setenv("SPARK_DST_MAC", c.dst_mac().c_str(), 1);
     setenv("SPARK_FRAMES", std::to_string(c.frames()).c_str(), 1);
+    // NMOS / network-layer source + sink (M6) — empty unless an IS-05 connection set them.
+    setenv("SPARK_RX_MCAST", c.rx_mcast_group().c_str(), 1);
+    setenv("SPARK_RX_SRC", c.rx_src_ip().c_str(), 1);
+    setenv("SPARK_RX_PORT", std::to_string(c.rx_dst_port()).c_str(), 1);
+    setenv("SPARK_RX_IFACE", c.rx_iface_ip().c_str(), 1);
+    setenv("SPARK_RX_AUDIO_MCAST", c.rx_audio_mcast_group().c_str(), 1);
+    setenv("SPARK_RX_AUDIO_SRC", c.rx_audio_src_ip().c_str(), 1);
+    setenv("SPARK_RX_AUDIO_PORT", std::to_string(c.rx_audio_dst_port()).c_str(), 1);
+    setenv("SPARK_IN_W", std::to_string(c.in_width()).c_str(), 1);
+    setenv("SPARK_IN_H", std::to_string(c.in_height()).c_str(), 1);
+    setenv("SPARK_IN_FPS", c.in_exactframerate().c_str(), 1);
+    setenv("SPARK_IN_DEPTH", std::to_string(c.in_depth()).c_str(), 1);
+    setenv("SPARK_IN_SAMPLING", c.in_sampling().c_str(), 1);
+    setenv("SPARK_TX_MCAST", c.tx_mcast_group().c_str(), 1);
+    setenv("SPARK_TX_PORT", std::to_string(c.tx_dst_port()).c_str(), 1);
+    setenv("SPARK_TX_AUDIO_MCAST", c.tx_audio_mcast_group().c_str(), 1);
+    setenv("SPARK_TX_AUDIO_PORT", std::to_string(c.tx_audio_dst_port()).c_str(), 1);
     execl(g_pipeline.c_str(), g_pipeline.c_str(), (char*)nullptr);
     _exit(127);  // exec failed
   }
