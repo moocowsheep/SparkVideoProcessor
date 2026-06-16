@@ -14,6 +14,9 @@ void St2110RxOp::setup(holoscan::OperatorSpec& spec) {
              "ST 2110 group to IGMP-join + filter (NMOS); empty = legacy promiscuous", std::string(""));
   spec.param(src_ip_, "src_ip", "SSM source", "source-specific filter (sender IP)", std::string(""));
   spec.param(iface_ip_, "iface_ip", "Interface IP", "local media IP (IGMP report source)", std::string(""));
+  spec.param(in_width_, "in_width", "Input width", "override profile geometry (0 = profile)", uint32_t(0));
+  spec.param(in_height_, "in_height", "Input height", "override profile geometry (0 = profile)", uint32_t(0));
+  spec.param(in_fps_, "in_fps", "Input fps", "source frame rate (0 = profile)", 0.0);
   spec.param(rxd_, "rxd", "RX descriptors", "RX ring depth", uint32_t(4096));
   spec.param(eal_cores_, "eal_cores", "EAL cores", "DPDK lcore list", std::string("2,3"));
   spec.param(run_seconds_, "run_seconds", "Run seconds", "poll duration (sink mode)", 12.0);
@@ -26,6 +29,11 @@ void St2110RxOp::setup(holoscan::OperatorSpec& spec) {
 void St2110RxOp::start() {
   fmt_ = (profile_.get() == "2160p") ? spark::st2110::profile_2160p()
                                      : spark::st2110::profile_1080p();
+  // Adopt the source's actual geometry/rate from the SDP (NMOS) when provided; the depacketizer
+  // geometry must match the wire, and the rate flows downstream for correct TX pacing.
+  if (in_width_.get() > 0) fmt_.width = in_width_.get();
+  if (in_height_.get() > 0) fmt_.height = in_height_.get();
+  if (in_fps_.get() > 0.0) fmt_.fps = in_fps_.get();
   depkt_ = std::make_unique<spark::st2110::Depacketizer>(fmt_);
   frame_buf_.assign(fmt_.octets_per_frame(), 0);
 

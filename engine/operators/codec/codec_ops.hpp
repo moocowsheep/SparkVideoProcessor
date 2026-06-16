@@ -44,6 +44,7 @@ class PackOp : public holoscan::Operator {
 
  private:
   void ensure(uint32_t width, uint32_t height);
+  holoscan::Parameter<double> out_fps_;  // output RTP media rate (drives TX pacing); from the source SDP
   uint8_t* dpacked_ = nullptr;  // device staging for the packed frame
   size_t dpacked_bytes_ = 0;
   spark::st2110::VideoFormat fmt_{};
