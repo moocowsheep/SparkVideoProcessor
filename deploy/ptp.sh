@@ -87,9 +87,15 @@ case "$MODE" in
   slave|"")
     need_root
     [ -n "$IFACE_RESOLVED" ] || { fail "no CX-7 iface"; exit 1; }
-    info "ptp4l SLAVE on $IFACE_RESOLVED (disciplines PHC to network grandmaster); Ctrl-C to stop"
-    phc2sys -a -r -m >/tmp/spark_phc2sys.log 2>&1 &   # auto-follow ptp4l; also sync CLOCK_REALTIME
-    exec ptp4l -f "$CONF" -i "$IFACE_RESOLVED" -m
+    info "ptp4l SLAVE (slaveOnly) on $IFACE_RESOLVED (disciplines PHC to network grandmaster); Ctrl-C to stop"
+    # phc2sys -a follows ptp4l over its UDS management socket, which is domain-scoped — it MUST use the
+    # same domainNumber as ptp4l or it hangs forever at "Waiting for ptp4l..." and never syncs the
+    # system clock. Pull the domain from CONF so the two can't drift apart.
+    DOMAIN="$(awk '/^[[:space:]]*domainNumber/{print $2; exit}' "$CONF")"
+    phc2sys -a -r -n "${DOMAIN:-0}" -m >/tmp/spark_phc2sys.log 2>&1 &   # auto-follow ptp4l; also sync CLOCK_REALTIME
+    # -s = slaveOnly: a media slave node must NEVER win BMCA and become the facility grandmaster if the
+    # real GM drops out. (--master / --test deliberately omit this.)
+    exec ptp4l -f "$CONF" -i "$IFACE_RESOLVED" -s -m
     ;;
 
   *)
