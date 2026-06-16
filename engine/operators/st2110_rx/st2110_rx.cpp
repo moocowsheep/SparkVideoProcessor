@@ -10,6 +10,10 @@ void St2110RxOp::setup(holoscan::OperatorSpec& spec) {
   spec.param(pci_addr_, "pci_addr", "RX PCI", "CX-7 RX port BDF", std::string("0002:01:00.1"));
   spec.param(udp_port_, "udp_port", "UDP port", "RTP destination port to accept", uint32_t(20000));
   spec.param(profile_, "profile", "Profile", "1080p|2160p (frame geometry)", std::string("1080p"));
+  spec.param(mcast_group_, "mcast_group", "Multicast group",
+             "ST 2110 group to IGMP-join + filter (NMOS); empty = legacy promiscuous", std::string(""));
+  spec.param(src_ip_, "src_ip", "SSM source", "source-specific filter (sender IP)", std::string(""));
+  spec.param(iface_ip_, "iface_ip", "Interface IP", "local media IP (IGMP report source)", std::string(""));
   spec.param(rxd_, "rxd", "RX descriptors", "RX ring depth", uint32_t(4096));
   spec.param(eal_cores_, "eal_cores", "EAL cores", "DPDK lcore list", std::string("2,3"));
   spec.param(run_seconds_, "run_seconds", "Run seconds", "poll duration (sink mode)", 12.0);
@@ -32,9 +36,13 @@ void St2110RxOp::start() {
   cfg.rxd = static_cast<uint16_t>(rxd_.get());
   cfg.eal_core_list = eal_cores_.get();
   cfg.manage_eal = manage_eal_.get();
+  cfg.mcast_group = mcast_group_.get();
+  cfg.src_ip = src_ip_.get();
+  cfg.iface_ip = iface_ip_.get();
   backend_->init(cfg);
-  HOLOSCAN_LOG_INFO("st2110_rx started: RX {} udp:{} profile={} emit_frames={}", cfg.pci_addr,
-                    cfg.udp_port, profile_.get(), emit_frames_.get());
+  HOLOSCAN_LOG_INFO("st2110_rx started: RX {} udp:{} group={} profile={} emit_frames={}", cfg.pci_addr,
+                    cfg.udp_port, cfg.mcast_group.empty() ? "(none)" : cfg.mcast_group, profile_.get(),
+                    emit_frames_.get());
 
   // Source mode: a dedicated thread drains the NIC continuously (see poll_loop). compute() only
   // pops finished frames, so NIC polling never stalls while TX paces the previous frame.

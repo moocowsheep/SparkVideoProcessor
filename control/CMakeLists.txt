@@ -35,3 +35,17 @@ add_custom_command(
 add_executable(spark_controld daemon.cpp ${PB_SRC} ${GRPC_SRC})
 target_include_directories(spark_controld PRIVATE ${GEN})
 target_link_libraries(spark_controld PRIVATE PkgConfig::GRPCPP PkgConfig::PROTOBUF PkgConfig::MHD)
+
+# --- NMOS node (IS-04/IS-05 via nmos-cpp) — optional; build with -DSPARK_WITH_NMOS=ON ------------
+# Requires `bash deploy/nmos.sh --packages && bash deploy/nmos.sh --build` (installs nmos-cpp under
+# third_party/nmos-cpp/install). Heavy deps (cpprestsdk/Boost/Avahi) stay isolated to this target.
+option(SPARK_WITH_NMOS "Build the NMOS node (needs third_party/nmos-cpp/install)" OFF)
+if(SPARK_WITH_NMOS)
+  set(NMOS_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/nmos-cpp)
+  # our cpprestsdk shim (Ubuntu libcpprest-dev ships no CMake config) + the installed nmos-cpp package
+  set(cpprestsdk_DIR ${NMOS_ROOT}/cmake-shims/cpprestsdk)
+  list(APPEND CMAKE_PREFIX_PATH ${NMOS_ROOT}/install)
+  find_package(nmos-cpp REQUIRED)
+  add_executable(spark_nmos_node nmos/spark_node.cpp)
+  target_link_libraries(spark_nmos_node PRIVATE nmos-cpp::nmos-cpp)
+endif()

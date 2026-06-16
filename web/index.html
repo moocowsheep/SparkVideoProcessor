@@ -1,6 +1,7 @@
 <!DOCTYPE html>
-<!-- Spark Video Processor — control dashboard (M5). Vanilla; served by the control daemon
-     (control/daemon.cpp) over HTTP/JSON. No build step. -->
+<!-- Spark Video Processor — control dashboard. Vanilla; served by the control daemon
+     (control/daemon.cpp) over HTTP/JSON. The Discover panel talks directly to the NMOS registry
+     (IS-04 Query API) and our NMOS node (IS-05 Connection API) — both CORS-enabled. No build step. -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -15,6 +16,18 @@
   </header>
 
   <main>
+    <section class="card">
+      <h2>Discover sources <span class="sub">(NMOS IS-04 / IS-05)</span></h2>
+      <div class="nmos-cfg">
+        <label>Registry <input id="nmos_registry" type="text" placeholder="http://host:3211"></label>
+        <label>Node <input id="nmos_node" type="text" placeholder="http://host:3242"></label>
+        <button id="nmos_refresh" class="btn">Refresh</button>
+      </div>
+      <div id="nmos_status" class="nmos-status">…</div>
+      <div id="sources" class="sources"></div>
+      <p class="hint" id="nmos_hint">Pick a discovered sender to route it to this processor — no PCIe/MAC needed.</p>
+    </section>
+
     <section class="card">
       <h2>Pipeline</h2>
       <p class="sub">st2110_rx → unpack → resize → frc → pack → st2110_tx</p>
@@ -37,10 +50,15 @@
         <label>Out height <input id="out_height" type="number"></label>
         <label class="chk">FRC (motion-comp) <input id="frc" type="checkbox"></label>
         <label>Frames (0 = continuous) <input id="frames" type="number"></label>
-        <label>RX PCI <input id="rx_pci" type="text"></label>
-        <label>TX PCI <input id="tx_pci" type="text"></label>
-        <label>Dest MAC <input id="dst_mac" type="text"></label>
       </div>
+      <details class="advanced">
+        <summary>Advanced — manual transport (overridden by NMOS routing)</summary>
+        <div class="grid">
+          <label>RX PCI <input id="rx_pci" type="text"></label>
+          <label>TX PCI <input id="tx_pci" type="text"></label>
+          <label>Dest MAC <input id="dst_mac" type="text"></label>
+        </div>
+      </details>
       <div class="row">
         <button id="save" class="btn">Save config</button>
         <span class="hint">config is locked while running</span>

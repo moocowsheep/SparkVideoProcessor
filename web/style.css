@@ -33,3 +33,22 @@ input:disabled, select:disabled { opacity:.55; }
 .stat span { color:var(--mut); } .stat b { font-variant-numeric:tabular-nums; }
 .stat b.bad { color:#f85149; }
 @media (max-width:640px){ .grid,.stats { grid-template-columns:1fr 1fr; } }
+
+/* NMOS discovery */
+.nmos-cfg { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px; }
+.nmos-cfg label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--mut); flex:1; min-width:200px; }
+.nmos-status { font-size:13px; color:var(--mut); padding:9px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+.nmos-status b { color:var(--fg); font-variant-numeric:tabular-nums; }
+.nmos-status .ok { font-size:10px; } .nmos-status .err { font-size:10px; }
+.sources { display:grid; gap:8px; margin-top:12px; }
+.src { display:flex; align-items:center; justify-content:space-between; gap:12px;
+  background:#0e1219; border:1px solid var(--line); border-radius:9px; padding:10px 14px; }
+.src.on { border-color:rgba(57,217,138,.35); }
+.src-main { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.src-main b { overflow:hidden; text-overflow:ellipsis; }
+.src-fmt { color:var(--mut); font-size:12px; }
+.src-act { display:flex; align-items:center; gap:10px; flex:none; }
+.ok { color:var(--acc); } .err { color:#f85149; }
+.advanced { margin-top:12px; }
+.advanced summary { color:var(--mut); font-size:12px; cursor:pointer; padding:4px 0; }
+.advanced .grid { margin-top:10px; }

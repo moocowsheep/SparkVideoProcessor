@@ -36,6 +36,12 @@ add_library(spark_st2110_core STATIC
 )
 target_include_directories(spark_st2110_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+# --- ST 2110-30 audio framing core (pure C++; no DPDK / Holoscan) ---------------------------------
+add_library(spark_audio_core STATIC
+  operators/audio/audio_st2110.cpp
+)
+target_include_directories(spark_audio_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
 # --- ST 2110 transport backends + shared EAL (all rte_* confined here) ----------------------------
 add_library(spark_st2110_net STATIC
   operators/common/dpdk_eal.cpp
@@ -84,6 +90,15 @@ add_library(spark_operators STATIC
 target_include_directories(spark_operators PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(spark_operators PUBLIC holoscan::core spark_st2110_core spark_st2110_net)
 
+# --- ST 2110-30 audio Holoscan operators (rx -> lip-sync delay -> tx) ------------------------------
+add_library(spark_audio_operators STATIC
+  operators/audio/audio_rx.cpp
+  operators/audio/audio_delay.cpp
+  operators/audio/audio_tx.cpp
+)
+target_include_directories(spark_audio_operators PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(spark_audio_operators PUBLIC holoscan::core spark_audio_core spark_st2110_net)
+
 # --- placeholder engine (kept as Holoscan build/runtime validation; M1 skeleton) ------------------
 add_executable(spark_engine src/spark_engine.cpp)
 target_link_libraries(spark_engine
@@ -108,6 +123,10 @@ target_link_libraries(st2110_loopback PRIVATE spark_operators holoscan::core)
 add_executable(st2110_passthrough apps/st2110_passthrough.cpp)
 target_link_libraries(st2110_passthrough PRIVATE spark_operators holoscan::core)
 
+# ST 2110-30 audio passthrough: audio_rx -> lip-sync delay -> audio_tx (shared EAL)
+add_executable(audio_passthrough apps/audio_passthrough.cpp)
+target_link_libraries(audio_passthrough PRIVATE spark_audio_operators holoscan::core)
+
 # resize benchmark/bring-up (NPP; pure GPU, no NIC/root)
 add_executable(resize_smoke apps/resize_smoke.cpp)
 target_link_libraries(resize_smoke PRIVATE spark_resize holoscan::core)
@@ -130,3 +149,12 @@ add_test(NAME rtp_st2110 COMMAND test_rtp_st2110)
 add_executable(test_pixel_codec operators/codec/test/test_pixel_codec.cpp)
 target_link_libraries(test_pixel_codec PRIVATE spark_codec)
 add_test(NAME pixel_codec COMMAND test_pixel_codec)
+
+# ST 2110 multicast addressing (RFC 1112 MAC + IGMPv3 join); header-only, no DPDK
+add_executable(test_net_addr operators/common/test/test_net_addr.cpp)
+add_test(NAME net_addr COMMAND test_net_addr)
+
+# ST 2110-30 audio framing round-trip + lip-sync delay (pure CPU, no NIC)
+add_executable(test_audio_st2110 operators/audio/test/test_audio_st2110.cpp)
+target_link_libraries(test_audio_st2110 PRIVATE spark_audio_core)
+add_test(NAME audio_st2110 COMMAND test_audio_st2110)
