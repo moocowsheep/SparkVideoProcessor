@@ -8,15 +8,38 @@ package spark.control;
 
 // Pipeline configuration — maps to the st2110_pipeline env vars (SPARK_*).
 message PipelineConfig {
-  string profile = 1;     // input resolution: "1080p" | "2160p"
+  string profile = 1;     // input resolution: "1080p" | "2160p" (fallback when in_* unset)
   uint32 out_width = 2;   // resize target width  (e.g. 3840)
   uint32 out_height = 3;  // resize target height (e.g. 2160)
   string interp = 4;      // "linear" | "cubic" | "lanczos"
   bool frc = 5;           // motion-compensated frame interpolation on/off
-  string rx_pci = 6;      // CX-7 RX port BDF
+  string rx_pci = 6;      // CX-7 RX port BDF (one-time media-interface map; see rx_iface_ip)
   string tx_pci = 7;      // CX-7 TX port BDF
-  string dst_mac = 8;     // egress destination MAC
+  string dst_mac = 8;     // egress destination MAC (auto-derived from tx_mcast_group when multicast)
   uint32 frames = 9;      // 0 = run until stopped; >0 = bounded run
+
+  // --- NMOS / network-layer source + sink (M6). Filled by the NMOS node from a connected sender's
+  // IS-05 transport params + SDP, so 2110 sources are discovered/routed instead of typed by hand. ---
+  // RX video (ST 2110-20)
+  string rx_mcast_group = 10;   // multicast group to join
+  string rx_src_ip = 11;        // SSM source filter (sender's source IP)
+  uint32 rx_dst_port = 12;      // RTP destination UDP port
+  string rx_iface_ip = 13;      // local media interface IP (selects which CX-7 port)
+  // RX audio (ST 2110-30)
+  string rx_audio_mcast_group = 14;
+  string rx_audio_src_ip = 15;
+  uint32 rx_audio_dst_port = 16;
+  // explicit input video format from the sender SDP (overrides `profile` when in_width != 0)
+  uint32 in_width = 17;
+  uint32 in_height = 18;
+  string in_exactframerate = 19;  // e.g. "60000/1001"
+  uint32 in_depth = 20;           // bits per component, e.g. 10
+  string in_sampling = 21;        // e.g. "YCbCr-4:2:2"
+  // TX video/audio egress (our output senders' groups/ports)
+  string tx_mcast_group = 22;
+  uint32 tx_dst_port = 23;
+  string tx_audio_mcast_group = 24;
+  uint32 tx_audio_dst_port = 25;
 }
 
 enum PipelineState {

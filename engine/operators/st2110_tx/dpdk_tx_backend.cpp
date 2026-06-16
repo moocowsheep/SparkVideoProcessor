@@ -27,6 +27,7 @@
 #include <rte_udp.h>
 
 #include "../common/dpdk_eal.hpp"
+#include "../common/net_addr.hpp"
 #include "tx_backend.hpp"
 
 namespace spark::net {
@@ -85,7 +86,7 @@ class DpdkTxBackend final : public ISt2110TxBackend {
     uint8_t* p = rte_pktmbuf_mtod(m, uint8_t*);
 
     auto* eth = reinterpret_cast<rte_ether_hdr*>(p);
-    std::memcpy(eth->dst_addr.addr_bytes, cfg_.dst_mac.data(), 6);
+    std::memcpy(eth->dst_addr.addr_bytes, dst_mac_, 6);
     std::memcpy(eth->src_addr.addr_bytes, src_mac_, 6);
     eth->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
 
@@ -194,6 +195,16 @@ class DpdkTxBackend final : public ISt2110TxBackend {
     if (inet_pton(AF_INET, cfg_.src_ip.c_str(), &src_ip_be_) != 1) die("bad src_ip");
     if (inet_pton(AF_INET, cfg_.dst_ip.c_str(), &dst_ip_be_) != 1) die("bad dst_ip");
     udp_port_be_ = rte_cpu_to_be_16(cfg_.udp_port);
+    // dst MAC: if none was given (all-zero) and dst_ip is a multicast group, derive it (RFC 1112) —
+    // the NMOS egress path just sets the group. An explicit MAC wins (gate-4 loopback to a known RX
+    // port uses a unicast MAC even though dst_ip is a placeholder group).
+    bool mac_set = false;
+    for (uint8_t b : cfg_.dst_mac) mac_set |= (b != 0);
+    const uint32_t dst_ip_host = rte_be_to_cpu_32(dst_ip_be_);
+    if (!mac_set && spark::net::ipv4_is_multicast(dst_ip_host))
+      spark::net::multicast_mac(dst_ip_host, dst_mac_);
+    else
+      std::memcpy(dst_mac_, cfg_.dst_mac.data(), 6);
   }
 
   void setup_port() {
@@ -257,6 +268,7 @@ class DpdkTxBackend final : public ISt2110TxBackend {
   rte_mempool* pool_ = nullptr;
 
   uint8_t src_mac_[6] = {};
+  uint8_t dst_mac_[6] = {};  // resolved at init: derived from a multicast group, else cfg_.dst_mac
   uint32_t src_ip_be_ = 0, dst_ip_be_ = 0;
   uint16_t udp_port_be_ = 0;
 
