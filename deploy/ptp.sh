@@ -59,6 +59,17 @@ case "$MODE" in
     else
       warn "no up ConnectX-7 port found (cable it; the card is hot-plug)"
     fi
+    # NTP clients fight phc2sys for CLOCK_REALTIME in slave mode (PHC/ptp4l unaffected, but the OS
+    # wall-clock sawtooths). deploy/provision.sh disables them; warn here if any are active.
+    if command -v systemctl >/dev/null; then
+      ntp_active=""
+      for s in systemd-timesyncd chronyd ntpd; do
+        systemctl is-active --quiet "$s" 2>/dev/null && ntp_active="$ntp_active $s"
+      done
+      [ -n "$ntp_active" ] \
+        && warn "NTP client active:$ntp_active — fights phc2sys (disable: systemctl disable --now systemd-timesyncd)" \
+        || ok "no NTP client contending for CLOCK_REALTIME"
+    fi
     info "to run: sudo bash deploy/ptp.sh [--master|--test|slave] [iface]"
     ;;
 
@@ -87,9 +98,15 @@ case "$MODE" in
   slave|"")
     need_root
     [ -n "$IFACE_RESOLVED" ] || { fail "no CX-7 iface"; exit 1; }
-    info "ptp4l SLAVE on $IFACE_RESOLVED (disciplines PHC to network grandmaster); Ctrl-C to stop"
-    phc2sys -a -r -m >/tmp/spark_phc2sys.log 2>&1 &   # auto-follow ptp4l; also sync CLOCK_REALTIME
-    exec ptp4l -f "$CONF" -i "$IFACE_RESOLVED" -m
+    info "ptp4l SLAVE (slaveOnly) on $IFACE_RESOLVED (disciplines PHC to network grandmaster); Ctrl-C to stop"
+    # phc2sys -a follows ptp4l over its UDS management socket, which is domain-scoped — it MUST use the
+    # same domainNumber as ptp4l or it hangs forever at "Waiting for ptp4l..." and never syncs the
+    # system clock. Pull the domain from CONF so the two can't drift apart.
+    DOMAIN="$(awk '/^[[:space:]]*domainNumber/{print $2; exit}' "$CONF")"
+    phc2sys -a -r -n "${DOMAIN:-0}" -m >/tmp/spark_phc2sys.log 2>&1 &   # auto-follow ptp4l; also sync CLOCK_REALTIME
+    # -s = slaveOnly: a media slave node must NEVER win BMCA and become the facility grandmaster if the
+    # real GM drops out. (--master / --test deliberately omit this.)
+    exec ptp4l -f "$CONF" -i "$IFACE_RESOLVED" -s -m
     ;;
 
   *)
