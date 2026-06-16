@@ -60,6 +60,7 @@ void UnpackOp::stop() {
 void PackOp::setup(holoscan::OperatorSpec& spec) {
   spec.input<spark::gpu::GpuFramePtr>("in");
   spec.output<spark::st2110::VideoFrame>("out");
+  spec.param(out_fps_, "out_fps", "Output fps", "output RTP media rate (TX pacing)", 60000.0 / 1001.0);
 }
 
 void PackOp::ensure(uint32_t width, uint32_t height) {
@@ -68,7 +69,7 @@ void PackOp::ensure(uint32_t width, uint32_t height) {
   if (dpacked_) cudaFree(dpacked_);
   cuda_check(cudaMalloc(reinterpret_cast<void**>(&dpacked_), octets), "cudaMalloc packed");
   dpacked_bytes_ = octets;
-  fmt_ = spark::st2110::VideoFormat{width, height, 60000.0 / 1001.0};
+  fmt_ = spark::st2110::VideoFormat{width, height, out_fps_.get()};
   host_pool_.assign(kRing, nullptr);
   for (auto& b : host_pool_) b = std::make_shared<std::vector<uint8_t>>(octets);
   HOLOSCAN_LOG_INFO("pack: {}x{} ({} octets)", width, height, octets);
