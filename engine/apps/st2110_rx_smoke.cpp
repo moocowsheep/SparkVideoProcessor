@@ -6,6 +6,9 @@
 //   sudo -n SPARK_PROFILE=2160p ./engine/build/st2110_tx_smoke                      # then TX
 //
 // Defaults: RX on 0002:01:00.1 (the gate-4 RX port), udp:20000. SPARK_PROFILE / SPARK_SECONDS env.
+// Multicast (NMOS/real source): set SPARK_RX_MCAST (+ SPARK_RX_SRC for SSM, SPARK_RX_PORT,
+// SPARK_RX_IFACE) to IGMP-join a group and filter to it — e.g. point it at a real 2110-20 sender.
+#include <cstdint>
 #include <cstdlib>
 
 #include <holoscan/holoscan.hpp>
@@ -19,12 +22,18 @@ class St2110RxSmoke : public holoscan::Application {
  public:
   void compose() override {
     using namespace holoscan;
-    const char* prof = std::getenv("SPARK_PROFILE");
+    auto env = [](const char* k, const char* d) {
+      const char* v = std::getenv(k);
+      return std::string(v ? v : d);
+    };
     const char* secs = std::getenv("SPARK_SECONDS");
-    const char* pci = std::getenv("SPARK_RX_PCI");
+    const char* port = std::getenv("SPARK_RX_PORT");
     auto rx = make_operator<ops::St2110RxOp>(
-        "st2110_rx", Arg("profile", std::string(prof ? prof : "1080p")),
-        Arg("pci_addr", std::string(pci ? pci : "0002:01:00.1")),
+        "st2110_rx", Arg("profile", env("SPARK_PROFILE", "1080p")),
+        Arg("pci_addr", env("SPARK_RX_PCI", "0002:01:00.1")),
+        Arg("udp_port", port ? static_cast<uint32_t>(std::atoi(port)) : 20000u),
+        Arg("mcast_group", env("SPARK_RX_MCAST", "")), Arg("src_ip", env("SPARK_RX_SRC", "")),
+        Arg("iface_ip", env("SPARK_RX_IFACE", "")),
         Arg("run_seconds", secs ? std::atof(secs) : 12.0), make_condition<CountCondition>(1));
     auto sink = make_operator<ops::FrameSinkOp>("frame_sink");  // sink-mode rx never emits; wire anyway
     add_flow(rx, sink);

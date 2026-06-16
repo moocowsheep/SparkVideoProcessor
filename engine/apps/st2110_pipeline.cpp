@@ -47,6 +47,18 @@ class St2110Pipeline : public holoscan::Application {
     uint32_t tx_port = static_cast<uint32_t>(std::atoll(env("SPARK_TX_PORT", "0").c_str()));
     if (tx_port == 0) tx_port = 20000;
     const bool tx_multicast = !tx_mcast.empty();
+    // Source format from the SDP (SPARK_IN_*; the NMOS bridge fills these from the sender's fmtp). The
+    // real input rate must reach the TX pacer — FRC here is 1:1, so the output rate == the input rate.
+    auto parse_rate = [](const std::string& s) -> double {
+      const auto slash = s.find('/');
+      if (slash == std::string::npos) return std::atof(s.c_str());
+      const double den = std::atof(s.substr(slash + 1).c_str());
+      return den != 0.0 ? std::atof(s.substr(0, slash).c_str()) / den : 0.0;
+    };
+    const uint32_t in_w = static_cast<uint32_t>(std::atoll(env("SPARK_IN_W", "0").c_str()));
+    const uint32_t in_h = static_cast<uint32_t>(std::atoll(env("SPARK_IN_H", "0").c_str()));
+    const double in_fps = parse_rate(env("SPARK_IN_FPS", ""));
+    const double out_fps = in_fps > 0.0 ? in_fps : 60000.0 / 1001.0;
 
     auto& eal = spark::net::DpdkEal::instance();
     eal.add_device(tx_pci, "tx_pp=500");
@@ -57,12 +69,13 @@ class St2110Pipeline : public holoscan::Application {
                                              Arg("profile", profile), Arg("manage_eal", false),
                                              Arg("emit_frames", true), Arg("udp_port", rx_port),
                                              Arg("mcast_group", rx_mcast), Arg("src_ip", rx_src),
-                                             Arg("iface_ip", rx_iface),
+                                             Arg("iface_ip", rx_iface), Arg("in_width", in_w),
+                                             Arg("in_height", in_h), Arg("in_fps", in_fps),
                                              make_condition<CountCondition>(frames));
     auto unpack = make_operator<ops::UnpackOp>("unpack");
     auto resize = make_operator<ops::ResizeOp>("resize", Arg("out_width", ow), Arg("out_height", oh),
                                                Arg("interp", interp));
-    auto pack = make_operator<ops::PackOp>("pack");
+    auto pack = make_operator<ops::PackOp>("pack", Arg("out_fps", out_fps));
     // Multicast egress: pass the group as dst_ip and zero the MAC so the backend derives it (RFC 1112).
     auto tx = make_operator<ops::St2110TxOp>(
         "st2110_tx", Arg("pci_addr", tx_pci), Arg("manage_eal", false), Arg("udp_port", tx_port),
