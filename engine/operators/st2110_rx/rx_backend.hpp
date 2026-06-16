@@ -18,6 +18,11 @@ struct RxBackendConfig {
   std::string eal_core_list = "2,3";
   std::string file_prefix = "spark_rx";  // distinct from the TX process (two-process loopback)
   bool manage_eal = true;  // true: own rte_eal_init (standalone). false: shared EAL up (DpdkEal).
+  // NMOS/2110 source (M6). When mcast_group is set: join it via IGMPv3 + accept only that group
+  // (and src_ip, if set, for ST 2110 source-specific filtering). Empty = legacy promiscuous loopback.
+  std::string mcast_group;    // ST 2110-20 multicast group to receive (e.g. "239.100.0.10")
+  std::string src_ip;         // SSM source filter (sender's source IP); empty = any-source
+  std::string iface_ip;       // local media interface IP (IGMP report source; "" -> 0.0.0.0)
 };
 
 // One received media packet. `payload` points at the UDP payload (the RTP/RFC 4175 bytes) inside the

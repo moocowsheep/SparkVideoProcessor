@@ -35,6 +35,18 @@ class St2110Pipeline : public holoscan::Application {
     const std::string rx_pci = env("SPARK_RX_PCI", "0000:01:00.1");
     const std::string tx_pci = env("SPARK_TX_PCI", "0002:01:00.0");
     const std::string dst_mac = env("SPARK_DST_MAC", "30:c5:99:3e:9d:30");
+    // NMOS / network-layer source + sink (M6). When SPARK_RX_MCAST is set the RX joins that group
+    // (IGMPv3) and filters by group/source; when SPARK_TX_MCAST is set the TX egresses to that group
+    // with an RFC-1112-derived MAC (dst_mac forced to zero so the backend derives it).
+    const std::string rx_mcast = env("SPARK_RX_MCAST", "");
+    const std::string rx_src = env("SPARK_RX_SRC", "");
+    const std::string rx_iface = env("SPARK_RX_IFACE", "");
+    uint32_t rx_port = static_cast<uint32_t>(std::atoll(env("SPARK_RX_PORT", "0").c_str()));
+    if (rx_port == 0) rx_port = 20000;  // proto default 0 / legacy runs -> the standard 2110 port
+    const std::string tx_mcast = env("SPARK_TX_MCAST", "");
+    uint32_t tx_port = static_cast<uint32_t>(std::atoll(env("SPARK_TX_PORT", "0").c_str()));
+    if (tx_port == 0) tx_port = 20000;
+    const bool tx_multicast = !tx_mcast.empty();
 
     auto& eal = spark::net::DpdkEal::instance();
     eal.add_device(tx_pci, "tx_pp=500");
@@ -43,14 +55,19 @@ class St2110Pipeline : public holoscan::Application {
 
     auto rx = make_operator<ops::St2110RxOp>("st2110_rx", Arg("pci_addr", rx_pci),
                                              Arg("profile", profile), Arg("manage_eal", false),
-                                             Arg("emit_frames", true),
+                                             Arg("emit_frames", true), Arg("udp_port", rx_port),
+                                             Arg("mcast_group", rx_mcast), Arg("src_ip", rx_src),
+                                             Arg("iface_ip", rx_iface),
                                              make_condition<CountCondition>(frames));
     auto unpack = make_operator<ops::UnpackOp>("unpack");
     auto resize = make_operator<ops::ResizeOp>("resize", Arg("out_width", ow), Arg("out_height", oh),
                                                Arg("interp", interp));
     auto pack = make_operator<ops::PackOp>("pack");
-    auto tx = make_operator<ops::St2110TxOp>("st2110_tx", Arg("pci_addr", tx_pci),
-                                             Arg("dst_mac", dst_mac), Arg("manage_eal", false));
+    // Multicast egress: pass the group as dst_ip and zero the MAC so the backend derives it (RFC 1112).
+    auto tx = make_operator<ops::St2110TxOp>(
+        "st2110_tx", Arg("pci_addr", tx_pci), Arg("manage_eal", false), Arg("udp_port", tx_port),
+        Arg("dst_ip", tx_multicast ? tx_mcast : std::string("239.0.0.1")),
+        Arg("dst_mac", tx_multicast ? std::string("00:00:00:00:00:00") : dst_mac));
     add_flow(rx, unpack);
     add_flow(unpack, resize);
     if (with_frc) {
