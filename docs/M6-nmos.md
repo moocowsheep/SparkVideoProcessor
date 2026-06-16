@@ -48,7 +48,27 @@ controller / registry ──IS-04 query / IS-05 connect──▶ spark NMOS Node
   the node derives transport params from the SDP and the P2 bridge starts the engine. The manual
   PCIe/MAC fields moved into an "Advanced" disclosure. Validated end-to-end via the exact dashboard
   calls (discover → connect → engine RUNNING on the discovered group).
-- **P5** (next): interop / on-wire validation.
+- **P5 — interop / on-wire validation (harness added; on-wire pending hardware).** A dependency-free
+  **software ST 2110 sender** (`spike/st2110_software_sender.cpp`) reuses the engine's pure RFC 4175 /
+  RFC 3190 framing over kernel multicast sockets (no DPDK/root) to feed the processor without a camera,
+  plus a matching `--recv` validator. `deploy/p5_bench.sh` builds it, self-tests over loopback, and
+  stands up a registry + sender + NMOS "camera" to drive from the dashboard. Still needs the CX-7 +
+  cabling for the real on-wire test, and the shared-port RX demux for one-process video+audio.
+
+## Bench harness (P5)
+```bash
+bash deploy/p5_bench.sh --build       # compile the software sender (g++, pure C++)
+bash deploy/p5_bench.sh --selftest    # send<->recv over the default mcast iface — no NIC needed
+bash deploy/p5_bench.sh --run         # registry + software sender + NMOS camera; connect from dashboard
+#   env: GROUP=239.100.0.10 PORT=5004 IFACE=<media-NIC-ip> PROFILE=1080p AUDIO=1 REGISTRY=<url>
+```
+- `st2110_software_sender --send` emits a correct (not 2110-21-paced) RFC 4175 2110-20 stream (+ a
+  2110-30 L24 tone with `--audio`); `--recv` joins the group and depacketizes with the real engine
+  `Depacketizer`, reporting frames/packets/loss — so the harness self-validates with zero hardware.
+- The self-test reconstructs full frames over loopback (a handful of socket-buffer drops on bursts are
+  expected — kernel sockets, no HW pacing).
+- For the on-wire test, run the processor (`spark_controld` + `spark_nmos_node`) on the CX-7 box,
+  point the dashboard's Registry at the bench, and Connect the camera's video source.
 
 ## Dashboard (P4)
 - **Discover sources** card: editable Registry + Node URLs (saved to localStorage; default
