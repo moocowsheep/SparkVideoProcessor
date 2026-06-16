@@ -85,6 +85,21 @@ class DpdkTxBackend final : public ISt2110TxBackend {
     m->pkt_len = total;
     uint8_t* p = rte_pktmbuf_mtod(m, uint8_t*);
 
+    // The L2/L3/L4 headers are fully determined by payload_len (only IP total_length/checksum and UDP
+    // length vary with it) and every packet in a frame is the same size but the last — so build the
+    // 42-byte header once per size and memcpy the template, skipping the per-packet field writes and
+    // rte_ipv4_cksum that, at hundreds of thousands of pps, were a chunk of the TX CPU.
+    if (payload_len == hdr_cache_len_) {
+      std::memcpy(p, hdr_cache_, kL2L3L4Hdr);
+    } else {
+      build_headers(p, payload_len);
+      std::memcpy(hdr_cache_, p, kL2L3L4Hdr);
+      hdr_cache_len_ = payload_len;
+    }
+    return TxBuf{p + kL2L3L4Hdr, payload_len, m};
+  }
+
+  void build_headers(uint8_t* p, uint32_t payload_len) {
     auto* eth = reinterpret_cast<rte_ether_hdr*>(p);
     std::memcpy(eth->dst_addr.addr_bytes, dst_mac_, 6);
     std::memcpy(eth->src_addr.addr_bytes, src_mac_, 6);
@@ -109,8 +124,6 @@ class DpdkTxBackend final : public ISt2110TxBackend {
     udp->dst_port = udp_port_be_;
     udp->dgram_len = rte_cpu_to_be_16(static_cast<uint16_t>(sizeof(rte_udp_hdr) + payload_len));
     udp->dgram_cksum = 0;  // UDP checksum optional over IPv4
-
-    return TxBuf{p + kL2L3L4Hdr, payload_len, m};
   }
 
   void submit(const TxBuf& buf, uint64_t send_ts_ns) override {
@@ -271,6 +284,8 @@ class DpdkTxBackend final : public ISt2110TxBackend {
   uint8_t dst_mac_[6] = {};  // resolved at init: derived from a multicast group, else cfg_.dst_mac
   uint32_t src_ip_be_ = 0, dst_ip_be_ = 0;
   uint16_t udp_port_be_ = 0;
+  uint8_t hdr_cache_[kL2L3L4Hdr] = {};  // prebuilt L2/L3/L4 header for the dominant payload size
+  uint32_t hdr_cache_len_ = 0;          // payload_len the cache was built for (0 = uncached)
 
   int ts_field_off_ = -1;
   uint64_t ts_flag_ = 0;
