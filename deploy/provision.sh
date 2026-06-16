@@ -125,12 +125,35 @@ vm.nr_hugepages = $HUGEPAGES" > "$SYSCTL_FILE" && ok "wrote $SYSCTL_FILE"
   mountpoint -q /dev/hugepages && ok "/dev/hugepages mounted" || warn "/dev/hugepages mount failed"
 }
 
+# --- 4. PTP host clock: NTP clients must not fight phc2sys ----------------------------------------
+provision_ptp() {
+  hr "PTP: NTP clients off (they fight phc2sys for CLOCK_REALTIME in slave mode)"
+  if ! command -v systemctl >/dev/null; then
+    warn "systemctl not present — skip NTP-client check"
+    return
+  fi
+  local hit=0 s
+  for s in systemd-timesyncd chronyd ntpd; do
+    systemctl is-active --quiet "$s" 2>/dev/null || continue
+    hit=1
+    if [ "$CHECK" = 1 ]; then
+      warn "$s active — will be disabled on apply (conflicts with phc2sys)"
+    elif systemctl disable --now "$s" >/dev/null 2>&1; then
+      ok "$s disabled"
+    else
+      warn "$s active but 'systemctl disable --now $s' failed"
+    fi
+  done
+  [ "$hit" = 0 ] && ok "no NTP client active (phc2sys owns CLOCK_REALTIME)"
+}
+
 # --- run ------------------------------------------------------------------------------------------
 need_root
 printf 'Spark provisioning — mode: %s\n' "$([ "$CHECK" = 1 ] && echo CHECK || echo APPLY)"
 provision_packages
 provision_firmware
 provision_hugepages
+provision_ptp
 
 hr "summary"
 if [ "$CHECK" = 1 ]; then
