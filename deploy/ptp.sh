@@ -59,6 +59,17 @@ case "$MODE" in
     else
       warn "no up ConnectX-7 port found (cable it; the card is hot-plug)"
     fi
+    # NTP clients fight phc2sys for CLOCK_REALTIME in slave mode (PHC/ptp4l unaffected, but the OS
+    # wall-clock sawtooths). deploy/provision.sh disables them; warn here if any are active.
+    if command -v systemctl >/dev/null; then
+      ntp_active=""
+      for s in systemd-timesyncd chronyd ntpd; do
+        systemctl is-active --quiet "$s" 2>/dev/null && ntp_active="$ntp_active $s"
+      done
+      [ -n "$ntp_active" ] \
+        && warn "NTP client active:$ntp_active — fights phc2sys (disable: systemctl disable --now systemd-timesyncd)" \
+        || ok "no NTP client contending for CLOCK_REALTIME"
+    fi
     info "to run: sudo bash deploy/ptp.sh [--master|--test|slave] [iface]"
     ;;
 
