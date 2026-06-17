@@ -40,6 +40,10 @@ message PipelineConfig {
   uint32 tx_dst_port = 23;
   string tx_audio_mcast_group = 24;
   uint32 tx_audio_dst_port = 25;
+
+  // FRC mode: 0=off, 1=retime (1:1 motion-comp), 2=up-convert (2x output rate, e.g. 30->60).
+  // Supersedes the legacy `frc` bool (frc=true ⇒ mode 1) whenever frc_mode > 0.
+  uint32 frc_mode = 26;
 }
 
 enum PipelineState {

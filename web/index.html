@@ -48,7 +48,8 @@
           <select id="interp"><option>cubic</option><option>linear</option><option>lanczos</option></select></label>
         <label>Out width <input id="out_width" type="number"></label>
         <label>Out height <input id="out_height" type="number"></label>
-        <label class="chk">FRC (motion-comp) <input id="frc" type="checkbox"></label>
+        <label>FRC (motion-comp)
+          <select id="frc_mode"><option value="0">off</option><option value="1">retime (1:1)</option><option value="2">up-convert (2×)</option></select></label>
         <label>Frames (0 = continuous) <input id="frames" type="number"></label>
       </div>
       <details class="advanced">
