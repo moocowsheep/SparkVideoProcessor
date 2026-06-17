@@ -27,6 +27,7 @@ class UnpackOp : public holoscan::Operator {
 
  private:
   void ensure(uint32_t width, uint32_t height);
+  cudaStream_t stream_ = nullptr;  // own CUDA stream (H2D + unpack kernel), pipelined vs other ops
   uint8_t* dpacked_ = nullptr;  // device staging for the packed frame
   size_t dpacked_bytes_ = 0;
   std::vector<spark::gpu::GpuFramePtr> pool_;  // output ring
@@ -45,11 +46,15 @@ class PackOp : public holoscan::Operator {
  private:
   void ensure(uint32_t width, uint32_t height);
   holoscan::Parameter<double> out_fps_;  // output RTP media rate (drives TX pacing); from the source SDP
+  cudaStream_t stream_ = nullptr;  // own CUDA stream (pack kernel + D2H), pipelined vs other ops
   uint8_t* dpacked_ = nullptr;  // device staging for the packed frame
   size_t dpacked_bytes_ = 0;
   spark::st2110::VideoFormat fmt_{};
   std::vector<std::shared_ptr<std::vector<uint8_t>>> host_pool_;  // output ring (host packed)
   size_t idx_ = 0;
+  // unpack->pack pipeline latency (ns), from GpuFrame::t_ingest_ns; logged 1 Hz + a final summary.
+  double last_live_s_ = 0;
+  uint64_t lat_min_ = UINT64_MAX, lat_max_ = 0, lat_sum_ = 0, lat_n_ = 0;
 };
 
 }  // namespace spark::ops

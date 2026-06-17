@@ -19,20 +19,37 @@ void FrcOp::emit_live(bool force) {
 
 void FrcOp::setup(holoscan::OperatorSpec& spec) {
   spec.input<spark::gpu::GpuFramePtr>("in");
-  spec.output<spark::gpu::GpuFramePtr>("out");
+  // Up-convert mode emits TWO frames per compute (real + mid) on "out". Size the transmitter so both
+  // are held until GXF delivers them downstream (default capacity 1 would drop the second), and gate
+  // FRC's execution on the downstream (resize) having room for BOTH (min_size=2). Without that, the
+  // default room-for-1 condition lets FRC run with a single free slot, so the second emit overflows
+  // and GXF logs "Sync failed" every frame; requiring room for 2 makes FRC backpressure cleanly.
+  spec.output<spark::gpu::GpuFramePtr>("out")
+      .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
+                 holoscan::Arg("capacity", static_cast<uint64_t>(2)),  // exactly the 2-emit pair (floor)
+                 holoscan::Arg("policy", static_cast<uint64_t>(2)))  // 2 = fault: warn, don't drop
+      .condition(holoscan::ConditionType::kDownstreamMessageAffordable,
+                 holoscan::Arg("min_size", static_cast<uint64_t>(2)));
   spec.param(phase_, "phase", "Phase", "interpolation t in [0,1] (0.5 = midpoint)", 0.5);
   spec.param(grid_size_, "grid_size", "NVOF grid", "flow output grid 1|2|4", 4u);
+  spec.param(rate_mult_, "rate_mult", "Rate multiplier", "1 = retime (1:1), 2 = up-convert (2x)", 1u);
 }
 
 void FrcOp::ensure(uint32_t width, uint32_t height) {
   if (inited_) return;
+  cudaStreamCreate(&stream_);  // default-flags: concurrent with other ops' streams, ordered vs stream 0
   flow_.init(width, height, grid_size_.get());
   cudaMalloc(reinterpret_cast<void**>(&prevY8_), static_cast<size_t>(width) * height);
   cudaMalloc(reinterpret_cast<void**>(&curY8_), static_cast<size_t>(width) * height);
-  pool_.assign(4, nullptr);
+  cudaMalloc(reinterpret_cast<void**>(&wmap_), static_cast<size_t>(width) * height * sizeof(float));
+  // Up-convert mids feed the resize input queue (capacity 2); the pool must exceed that + the mids in
+  // flight (being read by resize / built here) so a transiently-full queue can never alias a slot still
+  // in use. Mids are at native input resolution now (FRC precedes resize), so this is cheap.
+  pool_.assign(10, nullptr);
   for (auto& f : pool_) f = std::make_shared<spark::gpu::GpuFrame>(width, height);
   inited_ = true;
-  HOLOSCAN_LOG_INFO("frc: {}x{} grid={} phase={}", width, height, grid_size_.get(), phase_.get());
+  HOLOSCAN_LOG_INFO("frc: {}x{} grid={} phase={} rate_mult={}", width, height, grid_size_.get(),
+                    phase_.get(), rate_mult_.get());
 }
 
 void FrcOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
@@ -45,32 +62,46 @@ void FrcOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& o
 
   if (!prev_) {  // first frame: nothing to interpolate from -> pass it through
     prev_ = cur;
-    op_output.emit(cur, "out");
+    op_output.emit(cur, "out");  // carries the producer's (unpack) ready event downstream unchanged
     return;
   }
 
-  // 10-bit luma -> 8-bit for the optical-flow engine. All on the default stream, which orders these
-  // kernels before NVOF's cuMemcpy2D — no explicit sync needed (NVOF's own ctxSync gates the flow,
-  // and downstream pack is default-stream-ordered after interpolate). Removing the per-frame
-  // cudaDeviceSynchronize() cuts the pipeline's pacing jitter / latency.
-  spark::frc::y10_to_y8(prev_->y, prevY8_, cur->width, cur->height, 0);
-  spark::frc::y10_to_y8(cur->y, curY8_, cur->width, cur->height, 0);
+  // Order our stream behind the producers of both inputs (cross-stream), then run the whole chain on
+  // stream_: 10-bit luma -> 8-bit, NVOF flow (bound to stream_, no ctxSync), and the warp/blend. All
+  // same-stream so they order without explicit syncs; the shared prevY8_/curY8_/NVOF buffers reuse
+  // safely because FrcOp::compute is serial.
+  cudaStreamWaitEvent(stream_, prev_->ready, 0);
+  cudaStreamWaitEvent(stream_, cur->ready, 0);
+  spark::frc::y10_to_y8(prev_->y, prevY8_, cur->width, cur->height, stream_);
+  spark::frc::y10_to_y8(cur->y, curY8_, cur->width, cur->height, stream_);
 
-  flow_.compute(prevY8_, curY8_);  // NVOF prev->cur (ctxSync inside; flow ready on return)
+  flow_.compute(prevY8_, curY8_, stream_);  // NVOF fwd (prev->cur) + bwd (cur->prev), async on stream_
 
-  auto out = pool_[idx_];
+  auto mid = pool_[idx_];
   idx_ = (idx_ + 1) % pool_.size();
-  spark::frc::interpolate(*prev_, *cur, flow_.flow_dev(), flow_.flow_pitch_bytes(), flow_.grid_w(),
-                          flow_.grid_h(), flow_.grid_size(), *out,
-                          static_cast<float>(phase_.get()), 0);
+  spark::frc::interpolate(*prev_, *cur, flow_.flow_dev(), flow_.flow_dev_bwd(),
+                          flow_.flow_pitch_bytes(), flow_.grid_w(), flow_.grid_h(),
+                          flow_.grid_size(), *mid, wmap_, static_cast<float>(phase_.get()), stream_);
+  cudaEventRecord(mid->ready, stream_);  // mid is ready once interpolate completes on stream_
+  mid->t_ingest_ns = cur->t_ingest_ns;   // mid rides cur's ingest time for the latency probe
   ++frames_;
   prev_ = cur;
-  op_output.emit(out, "out");
+
+  // Emit. Up-convert (rate_mult>=2): the motion-comp MIDPOINT then the REAL current frame, so the
+  // output stream is ... F0, M01, F1, M12, F2 ... at 2x the input rate (real frames preserved, only
+  // the in-between frames synthetic). Retime (rate_mult==1): just the single motion-comp frame (1:1).
+  op_output.emit(mid, "out");
+  if (rate_mult_.get() >= 2) op_output.emit(cur, "out");
 }
 
 void FrcOp::stop() {
   emit_live(true);  // final live snapshot for the daemon
   HOLOSCAN_LOG_INFO("frc stopped: interpolated {} frames", frames_);
+  if (stream_) {
+    cudaStreamSynchronize(stream_);
+    cudaStreamDestroy(stream_);
+    stream_ = nullptr;
+  }
   if (prevY8_) {
     cudaFree(prevY8_);
     prevY8_ = nullptr;
@@ -78,6 +109,10 @@ void FrcOp::stop() {
   if (curY8_) {
     cudaFree(curY8_);
     curY8_ = nullptr;
+  }
+  if (wmap_) {
+    cudaFree(wmap_);
+    wmap_ = nullptr;
   }
 }
 

@@ -22,13 +22,17 @@ void GpuFrame::alloc(uint32_t w, uint32_t h) {
   check(cudaMalloc(reinterpret_cast<void**>(&y), y_bytes), "cudaMalloc Y");
   check(cudaMalloc(reinterpret_cast<void**>(&cb), c_bytes), "cudaMalloc Cb");
   check(cudaMalloc(reinterpret_cast<void**>(&cr), c_bytes), "cudaMalloc Cr");
+  // Disable timing: this event is only ever used for cross-stream ordering, never elapsed-time queries.
+  check(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming), "cudaEventCreate ready");
 }
 
 void GpuFrame::free() {
   if (y) cudaFree(y);
   if (cb) cudaFree(cb);
   if (cr) cudaFree(cr);
+  if (ready) cudaEventDestroy(ready);
   y = cb = cr = nullptr;
+  ready = nullptr;
 }
 
 void fill_gradient(GpuFrame& f, uint32_t seed) {
