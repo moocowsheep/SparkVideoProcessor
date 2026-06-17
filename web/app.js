@@ -6,8 +6,8 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const CFG = ['profile', 'interp', 'out_width', 'out_height', 'frc', 'frames', 'rx_pci', 'tx_pci', 'dst_mac'];
-const CAMEL = { out_width: 'outWidth', out_height: 'outHeight', rx_pci: 'rxPci', tx_pci: 'txPci', dst_mac: 'dstMac' };
+const CFG = ['profile', 'interp', 'out_width', 'out_height', 'frc_mode', 'frames', 'rx_pci', 'tx_pci', 'dst_mac'];
+const CAMEL = { out_width: 'outWidth', out_height: 'outHeight', frc_mode: 'frcMode', rx_pci: 'rxPci', tx_pci: 'txPci', dst_mac: 'dstMac' };
 let formLoaded = false;
 
 async function api(path, opts) {
@@ -31,7 +31,7 @@ function readForm() {
     const el = $(id);
     const key = CAMEL[id] || id;
     if (el.type === 'checkbox') c[key] = el.checked;
-    else if (el.type === 'number') c[key] = parseInt(el.value, 10) || 0;
+    else if (el.type === 'number' || id === 'frc_mode') c[key] = parseInt(el.value, 10) || 0;
     else c[key] = el.value;
   }
   return c;

@@ -50,8 +50,9 @@ struct State {
     config.set_out_height(2160);
     config.set_interp("cubic");
     config.set_frc(true);
+    config.set_frc_mode(1);  // 1=retime; web UI / NMOS can pick 2=up-convert (30->60)
     config.set_rx_pci("0000:01:00.1");
-    config.set_tx_pci("0002:01:00.0");
+    config.set_tx_pci("0002:01:00.1");  // up port on this rig (.0 is the down link)
     config.set_dst_mac("30:c5:99:3e:9d:30");
     config.set_frames(300);
   }
@@ -130,7 +131,9 @@ bool start_locked(State& s, std::string& msg) {
     setenv("SPARK_OUT_W", std::to_string(c.out_width()).c_str(), 1);
     setenv("SPARK_OUT_H", std::to_string(c.out_height()).c_str(), 1);
     setenv("SPARK_INTERP", c.interp().c_str(), 1);
-    setenv("SPARK_FRC", c.frc() ? "1" : "0", 1);
+    // SPARK_FRC is a mode (0=off, 1=retime, 2=up-convert). frc_mode supersedes the legacy frc bool.
+    const int frc_mode = c.frc_mode() > 0 ? static_cast<int>(c.frc_mode()) : (c.frc() ? 1 : 0);
+    setenv("SPARK_FRC", std::to_string(frc_mode).c_str(), 1);
     setenv("SPARK_RX_PCI", c.rx_pci().c_str(), 1);
     setenv("SPARK_TX_PCI", c.tx_pci().c_str(), 1);
     setenv("SPARK_DST_MAC", c.dst_mac().c_str(), 1);

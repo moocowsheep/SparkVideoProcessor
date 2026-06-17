@@ -231,28 +231,40 @@ class EngineController {
         }
         return;
       }
-      value c;
-      c[U("profile")] = value::string(U("1080p"));
-      c[U("outWidth")] = 3840; c[U("outHeight")] = 2160;
-      c[U("interp")] = value::string(U("cubic"));
-      c[U("frc")] = value::boolean(true);
-      c[U("frames")] = 0;
+      // Start from the daemon's CURRENT config so the operator's transport (rx/tx PCI, dst MAC) and
+      // processing choices (output size, interp, FRC mode) persist — NMOS routing only swaps the SOURCE.
+      value c = current_config();
+      // Hard fallbacks so a real launch never gets empty PCI even if /api/status was unreachable.
+      if (!c.has_field(U("rxPci")) || c.at(U("rxPci")).as_string().empty())
+        c[U("rxPci")] = value::string(U("0000:01:00.1"));
+      if (!c.has_field(U("txPci")) || c.at(U("txPci")).as_string().empty())
+        c[U("txPci")] = value::string(U("0002:01:00.1"));
+      // RX video source (from the activated sender's transport params + SDP):
       c[U("rxMcastGroup")] = value::string(vrx.group);
       c[U("rxSrcIp")] = value::string(vrx.src);
       c[U("rxDstPort")] = vrx.port;
       c[U("rxIfaceIp")] = value::string(vrx.iface);
+      // RX audio: set when active, else clear any stale route.
       if (arx.active) {
         c[U("rxAudioMcastGroup")] = value::string(arx.group);
         c[U("rxAudioSrcIp")] = value::string(arx.src);
         c[U("rxAudioDstPort")] = arx.port;
+      } else {
+        c[U("rxAudioMcastGroup")] = value::string(U(""));
+        c[U("rxAudioSrcIp")] = value::string(U(""));
+        c[U("rxAudioDstPort")] = 0;
       }
+      // Input format from the SDP (overrides `profile` when width != 0).
       if (vfmt.width) {
         c[U("inWidth")] = vfmt.width; c[U("inHeight")] = vfmt.height;
         c[U("inExactframerate")] = value::string(vfmt.fps);
         c[U("inDepth")] = vfmt.depth; c[U("inSampling")] = value::string(vfmt.sampling);
       }
+      // TX egress groups: set when our matching sender is activated, else clear.
       if (!vtx.group.empty()) { c[U("txMcastGroup")] = value::string(vtx.group); c[U("txDstPort")] = vtx.port; }
+      else { c[U("txMcastGroup")] = value::string(U("")); c[U("txDstPort")] = 0; }
       if (!atx.group.empty()) { c[U("txAudioMcastGroup")] = value::string(atx.group); c[U("txAudioDstPort")] = atx.port; }
+      else { c[U("txAudioMcastGroup")] = value::string(U("")); c[U("txAudioDstPort")] = 0; }
 
       const auto body = c.serialize();
       if (body == last_applied_) return;  // already running with this exact config
@@ -266,6 +278,23 @@ class EngineController {
     } catch (const std::exception& e) {
       slog::log<slog::severities::error>(gate_, SLOG_FLF) << "spark nmos: engine control failed: " << e.what();
     }
+  }
+
+  // Read the daemon's live PipelineConfig (the `config` object from /api/status) so reconcile() can
+  // preserve operator-set fields it doesn't own (PCI BDFs, dst MAC, output size, interp, frc_mode).
+  // Returns an empty object on any failure — reconcile() then falls back to PCI defaults.
+  value current_config() {
+    try {
+      auto resp = client_.request(web::http::methods::GET, U("/api/status")).get();
+      if (resp.status_code() == web::http::status_codes::OK) {
+        const auto body = resp.extract_json().get();
+        if (body.has_field(U("config"))) return body.at(U("config"));
+      }
+    } catch (const std::exception& e) {
+      slog::log<slog::severities::warning>(gate_, SLOG_FLF)
+          << "spark nmos: could not read current daemon config (" << e.what() << ") — using PCI fallbacks";
+    }
+    return value::object();
   }
 
   void post(const utility::string_t& path, const utility::string_t& body) {
@@ -443,7 +472,13 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
     auto receiver = nmos::make_receiver(ids.receiver_v, ids.device, nmos::transports::rtp, interface_names,
                                         nmos::formats::video, { nmos::media_types::video_raw }, settings);
     receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({ value_of({
-        { nmos::caps::format::grain_rate, nmos::make_caps_rational_constraint({ frame_rate }) },
+        // Ingest receiver: accept the common broadcast rates (the FRC operator handles rate
+        // conversion downstream). Constraining to one rate makes nmos-cpp reject a real sender's
+        // SDP as "unsupported format-specific parameters" — e.g. a 30000/1001 Blackmagic source.
+        { nmos::caps::format::grain_rate, nmos::make_caps_rational_constraint({
+            nmos::rational{ 24, 1 }, nmos::rational{ 24000, 1001 }, nmos::rational{ 25, 1 },
+            nmos::rational{ 30, 1 }, nmos::rational{ 30000, 1001 }, nmos::rational{ 50, 1 },
+            nmos::rational{ 60, 1 }, nmos::rational{ 60000, 1001 } }) },
         { nmos::caps::format::frame_width, nmos::make_caps_integer_constraint({ 1920, 3840 }) },
         { nmos::caps::format::frame_height, nmos::make_caps_integer_constraint({ 1080, 2160 }) },
         { nmos::caps::format::interlace_mode, nmos::make_caps_string_constraint({ nmos::interlace_modes::progressive.name }) },
