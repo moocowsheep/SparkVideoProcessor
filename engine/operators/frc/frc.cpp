@@ -5,6 +5,7 @@
 
 #include <cuda_runtime.h>
 
+#include "../pipeline_caps.hpp"
 #include "frc_kernels.hpp"
 
 namespace spark::ops {
@@ -19,17 +20,19 @@ void FrcOp::emit_live(bool force) {
 
 void FrcOp::setup(holoscan::OperatorSpec& spec) {
   spec.input<spark::gpu::GpuFramePtr>("in");
-  // Up-convert mode emits TWO frames per compute (real + mid) on "out". Size the transmitter so both
-  // are held until GXF delivers them downstream (default capacity 1 would drop the second), and gate
-  // FRC's execution on the downstream (resize) having room for BOTH (min_size=2). Without that, the
-  // default room-for-1 condition lets FRC run with a single free slot, so the second emit overflows
-  // and GXF logs "Sync failed" every frame; requiring room for 2 makes FRC backpressure cleanly.
+  // Up-convert emits TWO frames per compute (real + mid) on "out"; retime emits one. Size the
+  // transmitter to hold the burst until GXF delivers it downstream, and gate FRC's execution on the
+  // downstream (resize) having room for the WHOLE burst. Without that gate the default room-for-1
+  // condition lets FRC run with a single free slot, so a second emit overflows and GXF logs "Sync
+  // failed" every frame; requiring room for `burst` makes FRC backpressure cleanly. burst==1 in retime
+  // keeps the queue (and its latency) minimal.
+  const auto burst = static_cast<uint64_t>(spark::pipeline_emit_burst());
   spec.output<spark::gpu::GpuFramePtr>("out")
       .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
-                 holoscan::Arg("capacity", static_cast<uint64_t>(2)),  // exactly the 2-emit pair (floor)
+                 holoscan::Arg("capacity", burst),  // exactly the emit burst (floor)
                  holoscan::Arg("policy", static_cast<uint64_t>(2)))  // 2 = fault: warn, don't drop
       .condition(holoscan::ConditionType::kDownstreamMessageAffordable,
-                 holoscan::Arg("min_size", static_cast<uint64_t>(2)));
+                 holoscan::Arg("min_size", burst));
   spec.param(phase_, "phase", "Phase", "interpolation t in [0,1] (0.5 = midpoint)", 0.5);
   spec.param(grid_size_, "grid_size", "NVOF grid", "flow output grid 1|2|4", 4u);
   spec.param(rate_mult_, "rate_mult", "Rate multiplier", "1 = retime (1:1), 2 = up-convert (2x)", 1u);

@@ -5,6 +5,7 @@
 
 #include <cuda_runtime.h>
 
+#include "../pipeline_caps.hpp"
 #include "pixel_codec.hpp"
 
 namespace spark::ops {
@@ -76,12 +77,14 @@ void UnpackOp::stop() {
 
 // ---- PackOp: GpuFrame (device planar) -> VideoFrame (host packed) ----
 void PackOp::setup(holoscan::OperatorSpec& spec) {
-  // Resize feeds one frame per compute here; pack drains one per compute. Buffer minimally (capacity 2 —
-  // the latency floor) without batching (min_size 1) so PackOp runs once per frame (one D2H + emit) and
-  // never lets a standing backlog form behind the paced TX.
+  // Resize feeds one frame per compute and pack drains one. Size to the emit burst (2 under FRC
+  // up-convert, where resize processes the pair back-to-back and two frames can land before the paced
+  // TX drains one; else 1). min_size 1 runs pack once per frame (one D2H + emit). Capacity == standing
+  // latency floor here, so passthrough/retime sit 1-deep.
+  const auto cap = static_cast<uint64_t>(spark::pipeline_emit_burst());
   spec.input<spark::gpu::GpuFramePtr>("in")
       .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
-                 holoscan::Arg("capacity", static_cast<uint64_t>(2)),
+                 holoscan::Arg("capacity", cap),
                  holoscan::Arg("policy", static_cast<uint64_t>(2)))
       .condition(holoscan::ConditionType::kMessageAvailable,
                  holoscan::Arg("min_size", static_cast<uint64_t>(1)));
