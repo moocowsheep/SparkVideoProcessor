@@ -5,6 +5,8 @@
 #include <cuda_runtime.h>
 #include <npp.h>
 
+#include "../pipeline_caps.hpp"
+
 namespace spark::ops {
 namespace {
 
@@ -50,12 +52,14 @@ void resize_plane(const uint16_t* src, uint32_t sw, uint32_t sh, uint16_t* dst, 
 
 // ---- ResizeOp ----
 void ResizeOp::setup(holoscan::OperatorSpec& spec) {
-  // With FRC ahead of it, up-convert delivers TWO frames per source tick here (real + mid). Buffer just
-  // the pair (capacity 2 — the latency floor) without batching (min_size 1) so resize still upscales one
-  // frame per compute. FRC gates on room for 2 here, so this is exactly sized and never overflows.
+  // Sized to the producer's per-compute emit burst: 2 under FRC up-convert (real + mid arrive together),
+  // else 1 (retime / passthrough — unpack or retiming FRC feed one frame per tick). min_size 1 keeps
+  // resize upscaling one frame per compute. This is the latency floor — capacity == standing latency
+  // behind the paced TX, so passthrough/retime run 1-deep here instead of 2.
+  const auto cap = static_cast<uint64_t>(spark::pipeline_emit_burst());
   spec.input<spark::gpu::GpuFramePtr>("in")
       .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
-                 holoscan::Arg("capacity", static_cast<uint64_t>(2)),
+                 holoscan::Arg("capacity", cap),
                  holoscan::Arg("policy", static_cast<uint64_t>(2)))
       .condition(holoscan::ConditionType::kMessageAvailable,
                  holoscan::Arg("min_size", static_cast<uint64_t>(1)));
