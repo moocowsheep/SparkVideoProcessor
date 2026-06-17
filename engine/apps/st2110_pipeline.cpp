@@ -28,7 +28,11 @@ class St2110Pipeline : public holoscan::Application {
     };
     const std::string profile = env("SPARK_PROFILE", "1080p");  // input resolution
     const std::string interp = env("SPARK_INTERP", "cubic");
-    const bool with_frc = env("SPARK_FRC", "1") != "0";  // include motion-comp FRC stage
+    // FRC mode: 0 = off, 1 = retime (1:1 motion-comp), 2 = up-convert (real + mid -> 2x rate).
+    const std::string frc_mode = env("SPARK_FRC", "1");
+    const bool with_frc = frc_mode != "0";
+    const bool frc_2x = frc_mode == "2";
+    const uint32_t frc_grid = static_cast<uint32_t>(std::atoll(env("SPARK_FRC_GRID", "1").c_str()));
     const int64_t frames = std::atoll(env("SPARK_FRAMES", "300").c_str());
     const uint32_t ow = static_cast<uint32_t>(std::atoll(env("SPARK_OUT_W", "3840").c_str()));
     const uint32_t oh = static_cast<uint32_t>(std::atoll(env("SPARK_OUT_H", "2160").c_str()));
@@ -47,6 +51,7 @@ class St2110Pipeline : public holoscan::Application {
     uint32_t tx_port = static_cast<uint32_t>(std::atoll(env("SPARK_TX_PORT", "0").c_str()));
     if (tx_port == 0) tx_port = 20000;
     const bool tx_multicast = !tx_mcast.empty();
+    const std::string tx_src = env("SPARK_TX_SRC", "192.168.50.10");  // egress source IP (SDP source-filter)
     // Source format from the SDP (SPARK_IN_*; the NMOS bridge fills these from the sender's fmtp). The
     // real input rate must reach the TX pacer — FRC here is 1:1, so the output rate == the input rate.
     auto parse_rate = [](const std::string& s) -> double {
@@ -58,7 +63,9 @@ class St2110Pipeline : public holoscan::Application {
     const uint32_t in_w = static_cast<uint32_t>(std::atoll(env("SPARK_IN_W", "0").c_str()));
     const uint32_t in_h = static_cast<uint32_t>(std::atoll(env("SPARK_IN_H", "0").c_str()));
     const double in_fps = parse_rate(env("SPARK_IN_FPS", ""));
-    const double out_fps = in_fps > 0.0 ? in_fps : 60000.0 / 1001.0;
+    const double base_fps = in_fps > 0.0 ? in_fps : 60000.0 / 1001.0;
+    // Up-convert doubles the media rate; the TX pacer + RTP media clock track out_fps (e.g. 30->60).
+    const double out_fps = frc_2x ? base_fps * 2.0 : base_fps;
 
     auto& eal = spark::net::DpdkEal::instance();
     eal.add_device(tx_pci, "tx_pp=500");
@@ -79,17 +86,23 @@ class St2110Pipeline : public holoscan::Application {
     // Multicast egress: pass the group as dst_ip and zero the MAC so the backend derives it (RFC 1112).
     auto tx = make_operator<ops::St2110TxOp>(
         "st2110_tx", Arg("pci_addr", tx_pci), Arg("manage_eal", false), Arg("udp_port", tx_port),
-        Arg("dst_ip", tx_multicast ? tx_mcast : std::string("239.0.0.1")),
+        Arg("src_ip", tx_src), Arg("dst_ip", tx_multicast ? tx_mcast : std::string("239.0.0.1")),
         Arg("dst_mac", tx_multicast ? std::string("00:00:00:00:00:00") : dst_mac));
     add_flow(rx, unpack);
-    add_flow(unpack, resize);
+    // FRC runs BEFORE resize so optical flow + interpolation happen at NATIVE input resolution: pixel
+    // displacements stay inside the NVOFA search range (they would double on 2160p-upscaled frames and
+    // exceed it -> torn warps) and the flow field is 1/4 the size (less GPU, lower jitter). The resize
+    // then upscales the real + mid frames identically, so there's no sharpness flicker between them.
     if (with_frc) {
-      auto frc = make_operator<ops::FrcOp>("frc");  // motion-compensated interpolation (OFA)
-      add_flow(resize, frc);
-      add_flow(frc, pack);
+      // motion-compensated interpolation (OFA): rate_mult 2 inserts a real+mid pair -> 2x output rate.
+      auto frc = make_operator<ops::FrcOp>("frc", Arg("rate_mult", frc_2x ? 2u : 1u),
+                                           Arg("grid_size", frc_grid));
+      add_flow(unpack, frc);
+      add_flow(frc, resize);
     } else {
-      add_flow(resize, pack);
+      add_flow(unpack, resize);
     }
+    add_flow(resize, pack);
     add_flow(pack, tx);
   }
 };

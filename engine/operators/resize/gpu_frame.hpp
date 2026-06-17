@@ -10,6 +10,8 @@
 #include <memory>
 #include <vector>
 
+#include <cuda_runtime.h>
+
 namespace spark::gpu {
 
 struct GpuFrame {
@@ -18,6 +20,13 @@ struct GpuFrame {
   uint16_t* cr = nullptr;  // (w/2) x h
   uint32_t width = 0;
   uint32_t height = 0;
+  // Cross-operator GPU ordering: the producing operator records this on its stream after the last
+  // write to the planes; consumers cudaStreamWaitEvent on it before reading. Lets operators run on
+  // independent CUDA streams (pipelined) instead of serializing on the default stream.
+  cudaEvent_t ready = nullptr;
+  // Latency probe: steady_clock ns stamped when the frame enters the GPU graph (unpack), propagated
+  // through frc/resize, read at pack egress. 0 = unset (host-only; device kernels never touch it).
+  uint64_t t_ingest_ns = 0;
 
   GpuFrame() = default;
   GpuFrame(uint32_t w, uint32_t h) { alloc(w, h); }

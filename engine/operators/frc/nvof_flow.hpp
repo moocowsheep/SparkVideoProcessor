@@ -19,12 +19,18 @@ class NvofFlow {
 
   void init(uint32_t width, uint32_t height, uint32_t grid_size = 4);
 
-  // prevY8/curY8: device 8-bit luma, width x height, tightly packed. Computes flow prev->cur into
-  // the internal output buffer (blocks until done).
-  void compute(const uint8_t* prevY8_dev, const uint8_t* curY8_dev);
+  // prevY8/curY8: device 8-bit luma, width x height, tightly packed. Enqueues BOTH flows on `stream`
+  // (a cudaStream_t): forward prev->cur into the fwd buffer and backward cur->prev into the bwd buffer
+  // (two nvOFExecute calls, frames swapped, no re-upload). The pair lets the warp do occlusion-aware
+  // interpolation (forward<->backward consistency). ASYNC: NVOF's I/O is bound to `stream` and there is
+  // no context sync, so the caller orders the consuming kernel on the same stream (or waits the output
+  // via an event). `stream`=nullptr uses the default stream.
+  void compute(const uint8_t* prevY8_dev, const uint8_t* curY8_dev, void* stream);
 
-  // Flow output (device): grid_w x grid_h vectors, each {int16 x, int16 y} in S10.5 (value/32 = px).
-  const void* flow_dev() const;
+  // Flow outputs (device): grid_w x grid_h vectors, each {int16 x, int16 y} in S10.5 (value/32 = px).
+  // fwd = prev->cur (indexed in prev coords); bwd = cur->prev (indexed in cur coords). Same pitch/grid.
+  const void* flow_dev() const;      // forward (prev->cur)
+  const void* flow_dev_bwd() const;  // backward (cur->prev)
   uint32_t flow_pitch_bytes() const;
   uint32_t grid_w() const;
   uint32_t grid_h() const;

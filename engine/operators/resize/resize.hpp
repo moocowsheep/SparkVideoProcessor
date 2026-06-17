@@ -32,6 +32,7 @@ class ResizeOp : public holoscan::Operator {
   holoscan::Parameter<bool> measure_;  // per-frame cudaEvent timing (benchmark only; a sync/frame)
 
   int interp_code_ = 0;
+  cudaStream_t stream_ = nullptr;  // own CUDA stream (NPP resize); pipelined vs other ops
   NppStreamContext npp_ctx_{};
   std::vector<spark::gpu::GpuFramePtr> pool_;  // output ring (target dims)
   size_t pool_idx_ = 0;
