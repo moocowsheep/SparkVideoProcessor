@@ -26,7 +26,7 @@ void FrcOp::setup(holoscan::OperatorSpec& spec) {
   // and GXF logs "Sync failed" every frame; requiring room for 2 makes FRC backpressure cleanly.
   spec.output<spark::gpu::GpuFramePtr>("out")
       .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
-                 holoscan::Arg("capacity", static_cast<uint64_t>(16)),
+                 holoscan::Arg("capacity", static_cast<uint64_t>(2)),  // exactly the 2-emit pair (floor)
                  holoscan::Arg("policy", static_cast<uint64_t>(2)))  // 2 = fault: warn, don't drop
       .condition(holoscan::ConditionType::kDownstreamMessageAffordable,
                  holoscan::Arg("min_size", static_cast<uint64_t>(2)));
@@ -42,10 +42,10 @@ void FrcOp::ensure(uint32_t width, uint32_t height) {
   cudaMalloc(reinterpret_cast<void**>(&prevY8_), static_cast<size_t>(width) * height);
   cudaMalloc(reinterpret_cast<void**>(&curY8_), static_cast<size_t>(width) * height);
   cudaMalloc(reinterpret_cast<void**>(&wmap_), static_cast<size_t>(width) * height * sizeof(float));
-  // Up-convert mids feed the resize input queue (capacity 16); the pool must exceed that + the mid
-  // being built so a transiently-full queue can never alias a slot still in flight. Mids are at native
-  // input resolution now (FRC precedes resize), so this is cheap.
-  pool_.assign(20, nullptr);
+  // Up-convert mids feed the resize input queue (capacity 2); the pool must exceed that + the mids in
+  // flight (being read by resize / built here) so a transiently-full queue can never alias a slot still
+  // in use. Mids are at native input resolution now (FRC precedes resize), so this is cheap.
+  pool_.assign(10, nullptr);
   for (auto& f : pool_) f = std::make_shared<spark::gpu::GpuFrame>(width, height);
   inited_ = true;
   HOLOSCAN_LOG_INFO("frc: {}x{} grid={} phase={} rate_mult={}", width, height, grid_size_.get(),
@@ -83,6 +83,7 @@ void FrcOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& o
                           flow_.flow_pitch_bytes(), flow_.grid_w(), flow_.grid_h(),
                           flow_.grid_size(), *mid, wmap_, static_cast<float>(phase_.get()), stream_);
   cudaEventRecord(mid->ready, stream_);  // mid is ready once interpolate completes on stream_
+  mid->t_ingest_ns = cur->t_ingest_ns;   // mid rides cur's ingest time for the latency probe
   ++frames_;
   prev_ = cur;
 

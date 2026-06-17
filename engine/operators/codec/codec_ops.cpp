@@ -1,5 +1,6 @@
 #include "codec_ops.hpp"
 
+#include <chrono>
 #include <stdexcept>
 
 #include <cuda_runtime.h>
@@ -8,9 +9,15 @@
 
 namespace spark::ops {
 namespace {
-constexpr size_t kRing = 20;  // unpack/pack pools; > the 16-deep frc->resize / resize->pack queues + slack
+constexpr size_t kRing = 10;  // unpack/pack pools; > the 2-deep frc->resize / resize->pack queues +
+                              // frames held in flight (frc keeps prev; TX holds host buffers while pacing)
 void cuda_check(cudaError_t e, const char* what) {
   if (e != cudaSuccess) throw std::runtime_error(std::string("codec_ops: ") + what);
+}
+uint64_t now_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
 }
 }  // namespace
 
@@ -51,6 +58,7 @@ void UnpackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext
   idx_ = (idx_ + 1) % pool_.size();
   spark::codec::unpack_422_10(dpacked_, dst->y, dst->cb, dst->cr, fmt.width, fmt.height, stream_);
   cuda_check(cudaEventRecord(dst->ready, stream_), "unpack record");  // consumers wait on this
+  dst->t_ingest_ns = now_ns();  // frame enters the GPU graph here; pack reads this for the latency probe
   op_output.emit(dst, "out");
 }
 
@@ -68,12 +76,12 @@ void UnpackOp::stop() {
 
 // ---- PackOp: GpuFrame (device planar) -> VideoFrame (host packed) ----
 void PackOp::setup(holoscan::OperatorSpec& spec) {
-  // Resize feeds one frame per compute here, but at up-convert/startup they can arrive in bursts ahead
-  // of the paced TX. Buffer them (capacity 16) without batching (min_size 1) so PackOp runs once per
-  // frame (one D2H + emit) and drains the burst across computes.
+  // Resize feeds one frame per compute here; pack drains one per compute. Buffer minimally (capacity 2 —
+  // the latency floor) without batching (min_size 1) so PackOp runs once per frame (one D2H + emit) and
+  // never lets a standing backlog form behind the paced TX.
   spec.input<spark::gpu::GpuFramePtr>("in")
       .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
-                 holoscan::Arg("capacity", static_cast<uint64_t>(16)),
+                 holoscan::Arg("capacity", static_cast<uint64_t>(2)),
                  holoscan::Arg("policy", static_cast<uint64_t>(2)))
       .condition(holoscan::ConditionType::kMessageAvailable,
                  holoscan::Arg("min_size", static_cast<uint64_t>(1)));
@@ -112,6 +120,25 @@ void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& 
              "D2H packed");
   cuda_check(cudaStreamSynchronize(stream_), "pack D2H sync");
 
+  // Latency probe: unpack stamped t_ingest_ns when the frame entered the GPU graph; the host buffer is
+  // ready for TX now, so (now - ingest) is the unpack->frc->resize->pack latency incl. the inter-op
+  // queues — the trimmable part. (RX assembly upstream and TX pacing horizon downstream are extra.)
+  if (src.t_ingest_ns) {
+    const uint64_t lat = now_ns() - src.t_ingest_ns;
+    lat_sum_ += lat;
+    ++lat_n_;
+    if (lat < lat_min_) lat_min_ = lat;
+    if (lat > lat_max_) lat_max_ = lat;
+    const double t = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+    if (t - last_live_s_ >= 1.0) {
+      last_live_s_ = t;
+      HOLOSCAN_LOG_INFO("spark_live pipe_latency_us cur={} min={} avg={} max={}", lat / 1000,
+                        lat_min_ / 1000, (lat_sum_ / lat_n_) / 1000, lat_max_ / 1000);
+    }
+  }
+
   spark::st2110::VideoFrame out;
   out.data = host;
   out.format = fmt_;
@@ -119,6 +146,10 @@ void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& 
 }
 
 void PackOp::stop() {
+  if (lat_n_) {
+    HOLOSCAN_LOG_INFO("pack stopped: pipe_latency_us (unpack->pack) min/avg/max = {}/{}/{}",
+                      lat_min_ / 1000, (lat_sum_ / lat_n_) / 1000, lat_max_ / 1000);
+  }
   if (stream_) {
     cudaStreamSynchronize(stream_);
     cudaStreamDestroy(stream_);

@@ -52,6 +52,9 @@ class PackOp : public holoscan::Operator {
   spark::st2110::VideoFormat fmt_{};
   std::vector<std::shared_ptr<std::vector<uint8_t>>> host_pool_;  // output ring (host packed)
   size_t idx_ = 0;
+  // unpack->pack pipeline latency (ns), from GpuFrame::t_ingest_ns; logged 1 Hz + a final summary.
+  double last_live_s_ = 0;
+  uint64_t lat_min_ = UINT64_MAX, lat_max_ = 0, lat_sum_ = 0, lat_n_ = 0;
 };
 
 }  // namespace spark::ops
