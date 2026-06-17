@@ -50,11 +50,12 @@ void resize_plane(const uint16_t* src, uint32_t sw, uint32_t sh, uint16_t* dst, 
 
 // ---- ResizeOp ----
 void ResizeOp::setup(holoscan::OperatorSpec& spec) {
-  // With FRC ahead of it, up-convert delivers TWO frames per source tick here (real + mid). Buffer the
-  // pair (capacity 16) without batching (min_size 1) so resize still upscales one frame per compute.
+  // With FRC ahead of it, up-convert delivers TWO frames per source tick here (real + mid). Buffer just
+  // the pair (capacity 2 — the latency floor) without batching (min_size 1) so resize still upscales one
+  // frame per compute. FRC gates on room for 2 here, so this is exactly sized and never overflows.
   spec.input<spark::gpu::GpuFramePtr>("in")
       .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
-                 holoscan::Arg("capacity", static_cast<uint64_t>(16)),
+                 holoscan::Arg("capacity", static_cast<uint64_t>(2)),
                  holoscan::Arg("policy", static_cast<uint64_t>(2)))
       .condition(holoscan::ConditionType::kMessageAvailable,
                  holoscan::Arg("min_size", static_cast<uint64_t>(1)));
@@ -71,9 +72,9 @@ void ResizeOp::start() {
   cudaStreamCreate(&stream_);  // resize runs here so it pipelines with FRC/pack on their own streams
   fill_npp_ctx(npp_ctx_);  // device context for the _Ctx primitives
   npp_ctx_.hStream = stream_;  // NPP enqueues on our stream, not the default
-  // Resize outputs feed the pack input queue (capacity 16); size the pool above that + the frame being
-  // produced so a transiently-full queue can never alias a 2160p slot still in flight.
-  pool_.resize(20);
+  // Resize outputs feed the pack input queue (capacity 2); size the pool above that + the 2160p frames
+  // in flight (being packed / produced) so a transiently-full queue can never alias a slot still in use.
+  pool_.resize(10);
   for (auto& f : pool_) f = std::make_shared<spark::gpu::GpuFrame>(out_width_.get(), out_height_.get());
   cudaEvent_t a, b;
   cudaEventCreate(&a);
@@ -112,6 +113,7 @@ void ResizeOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext
     if (ms > ms_max_) ms_max_ = ms;
   }
   cudaEventRecord(dst->ready, stream_);  // consumers (pack) wait on this before reading dst
+  dst->t_ingest_ns = src.t_ingest_ns;    // carry the ingest time through resize for the latency probe
   ++frames_;
 
   op_output.emit(dst, "out");
