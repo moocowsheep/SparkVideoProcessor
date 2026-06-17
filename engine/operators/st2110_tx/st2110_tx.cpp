@@ -29,11 +29,19 @@ void St2110TxOp::setup(holoscan::OperatorSpec& spec) {
   spec.param(payload_size_, "payload_size", "Payload octets", "UDP payload budget per packet",
              uint32_t(1420));
   spec.param(tx_pp_ns_, "tx_pp_ns", "tx_pp ns", "mlx5 tx_pp clock granularity", uint32_t(500));
-  spec.param(txd_, "txd", "TX descriptors", "TX ring depth (pacing horizon = txd * gap)",
-             uint32_t(2048));
+  // TX ring depth: the HW tx_pp shock-absorber. The NIC paces packets out of this ring precisely on
+  // their stamped send time, so a deep ring lets software run *ahead* and submit jitter-free — an OS
+  // preemption or GPU stall shorter than the ring's drain time (txd * gap) is invisible on the wire.
+  // 8192 * ~2250ns (2160p29.97) ≈ 18ms of buffer. (mlx5 may clamp; effective value is logged at init.)
+  spec.param(txd_, "txd", "TX descriptors", "TX ring depth — HW pacing buffer (txd * gap of wire time)",
+             uint32_t(8192));
+  // How far ahead of the NIC clock software keeps the schedule. Must stay (a) under the ring's wire
+  // time txd*gap so submissions don't block, and (b) under the tx_pp future window (else future_err).
+  // Sized as a jitter shock-absorber: 8ms rides any normal scheduling stall, so past_err stays ~0 and
+  // the wire never gaps — the gate-4 "don't flood" lesson was about the *window*, not keeping it tiny.
   spec.param(pacing_horizon_ns_, "pacing_horizon_ns", "Pacing horizon",
-             "Max schedule lead over the NIC clock (keep < tx_pp window; see M1-gate4-pacing)",
-             uint32_t(50000));
+             "Schedule lead over the NIC clock — jitter buffer (keep < txd*gap and < tx_pp window)",
+             uint32_t(8000000));
   spec.param(ssrc_, "ssrc", "RTP SSRC", "RTP synchronization source id", uint32_t(0x53504b31));
   spec.param(eal_cores_, "eal_cores", "EAL cores", "DPDK lcore list", std::string("0,1"));
   spec.param(pacing_, "pacing", "Enable pacing", "tx_pp hardware send-scheduling", true);
@@ -104,8 +112,6 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
       std::this_thread::sleep_for(std::chrono::milliseconds(warmup_ms_.get()));
   }
 
-  pktz_->start_frame(spark::st2110::rtp_timestamp_90k(frame.capture_ts_ns));
-
   // (Re)anchor the schedule: on the first frame, or if we have fallen behind the NIC clock, restart
   // the schedule one horizon ahead so the very first packet is schedulable (not already in the past).
   const uint64_t now = backend_->now_ns();
@@ -115,6 +121,16 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
   }
   const uint64_t base = schedule_base_ns_;
   const bool pace = pacing_.get();
+
+  // RTP media timestamp from a MONOTONIC clock anchored once to the GM-locked egress and advanced by
+  // exactly one frame interval per frame. (frame.capture_ts_ns doesn't survive the GPU path — planar
+  // GpuFrames carry no timestamp, so it arrives 0; and a processor's output media time is the locked
+  // send time anyway.) Decoupling it from schedule_base_ns_ matters: the pacer may re-anchor base
+  // (when it slips), and a timestamp that jumped with it would break a downstream receiver's clock
+  // recovery — the monotonic clock never jumps, so BMD-class receivers hold a solid lock.
+  if (media_ts_ns_ == 0) media_ts_ns_ = base;
+  pktz_->start_frame(spark::st2110::rtp_timestamp_90k(media_ts_ns_));
+  media_ts_ns_ += frame_interval_ns_;
 
   uint32_t i = 0;
   for (spark::st2110::PacketPlan p; pktz_->next(p); ++i) {

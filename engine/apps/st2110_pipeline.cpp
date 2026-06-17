@@ -47,6 +47,7 @@ class St2110Pipeline : public holoscan::Application {
     uint32_t tx_port = static_cast<uint32_t>(std::atoll(env("SPARK_TX_PORT", "0").c_str()));
     if (tx_port == 0) tx_port = 20000;
     const bool tx_multicast = !tx_mcast.empty();
+    const std::string tx_src = env("SPARK_TX_SRC", "192.168.50.10");  // egress source IP (SDP source-filter)
     // Source format from the SDP (SPARK_IN_*; the NMOS bridge fills these from the sender's fmtp). The
     // real input rate must reach the TX pacer — FRC here is 1:1, so the output rate == the input rate.
     auto parse_rate = [](const std::string& s) -> double {
@@ -79,7 +80,7 @@ class St2110Pipeline : public holoscan::Application {
     // Multicast egress: pass the group as dst_ip and zero the MAC so the backend derives it (RFC 1112).
     auto tx = make_operator<ops::St2110TxOp>(
         "st2110_tx", Arg("pci_addr", tx_pci), Arg("manage_eal", false), Arg("udp_port", tx_port),
-        Arg("dst_ip", tx_multicast ? tx_mcast : std::string("239.0.0.1")),
+        Arg("src_ip", tx_src), Arg("dst_ip", tx_multicast ? tx_mcast : std::string("239.0.0.1")),
         Arg("dst_mac", tx_multicast ? std::string("00:00:00:00:00:00") : dst_mac));
     add_flow(rx, unpack);
     add_flow(unpack, resize);
