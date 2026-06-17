@@ -28,9 +28,9 @@ NV_OF_OUTPUT_VECTOR_GRID_SIZE grid_enum(uint32_t g) {
 struct NvofFlow::Impl {
   NV_OF_CUDA_API_FUNCTION_LIST fl{};
   NvOFHandle hof = nullptr;
-  NvOFGPUBufferHandle bin = nullptr, bref = nullptr, bout = nullptr;
+  NvOFGPUBufferHandle bin = nullptr, bref = nullptr, bout = nullptr, bout_bwd = nullptr;
   CUcontext ctx = nullptr;  // the (primary) context NVOF was created on
-  CUdeviceptr in_dp = 0, ref_dp = 0, out_dp = 0;
+  CUdeviceptr in_dp = 0, ref_dp = 0, out_dp = 0, out_dp_bwd = 0;
   uint32_t in_pitch = 0, ref_pitch = 0, out_pitch = 0;
   uint32_t width = 0, height = 0, grid_size = 4, grid_w = 0, grid_h = 0;
 
@@ -50,6 +50,7 @@ struct NvofFlow::Impl {
       if (bin) fl.nvOFDestroyGPUBufferCuda(bin);
       if (bref) fl.nvOFDestroyGPUBufferCuda(bref);
       if (bout) fl.nvOFDestroyGPUBufferCuda(bout);
+      if (bout_bwd) fl.nvOFDestroyGPUBufferCuda(bout_bwd);
     }
     if (hof && fl.nvOFDestroy) fl.nvOFDestroy(hof);
   }
@@ -85,7 +86,7 @@ void NvofFlow::init(uint32_t width, uint32_t height, uint32_t grid_size) {
   ip.outGridSize = grid_enum(grid_size);
   ip.hintGridSize = NV_OF_HINT_VECTOR_GRID_SIZE_UNDEFINED;
   ip.mode = NV_OF_MODE_OPTICALFLOW;
-  ip.perfLevel = NV_OF_PERF_LEVEL_MEDIUM;
+  ip.perfLevel = NV_OF_PERF_LEVEL_SLOW;  // best-quality flow; we have ~75% GPU headroom to spend on it
   im.of_check(im.fl.nvOFInit(im.hof, &ip), "nvOFInit");
 
   im.grid_w = (width + grid_size - 1) / grid_size;
@@ -104,6 +105,7 @@ void NvofFlow::init(uint32_t width, uint32_t height, uint32_t grid_size) {
   mkbuf(width, height, NV_OF_BUFFER_USAGE_INPUT, NV_OF_BUFFER_FORMAT_GRAYSCALE8, &im.bin);
   mkbuf(width, height, NV_OF_BUFFER_USAGE_INPUT, NV_OF_BUFFER_FORMAT_GRAYSCALE8, &im.bref);
   mkbuf(im.grid_w, im.grid_h, NV_OF_BUFFER_USAGE_OUTPUT, NV_OF_BUFFER_FORMAT_SHORT2, &im.bout);
+  mkbuf(im.grid_w, im.grid_h, NV_OF_BUFFER_USAGE_OUTPUT, NV_OF_BUFFER_FORMAT_SHORT2, &im.bout_bwd);
 
   auto stride = [&](NvOFGPUBufferHandle b) -> uint32_t {
     NV_OF_CUDA_BUFFER_STRIDE_INFO si{};
@@ -116,13 +118,21 @@ void NvofFlow::init(uint32_t width, uint32_t height, uint32_t grid_size) {
   im.ref_pitch = stride(im.bref);
   im.out_dp = im.fl.nvOFGPUBufferGetCUdeviceptr(im.bout);
   im.out_pitch = stride(im.bout);
+  im.out_dp_bwd = im.fl.nvOFGPUBufferGetCUdeviceptr(im.bout_bwd);
+  // bout_bwd shares bout's descriptor (same grid/format), so its pitch matches out_pitch.
 }
 
-void NvofFlow::compute(const uint8_t* prevY8, const uint8_t* curY8) {
+void NvofFlow::compute(const uint8_t* prevY8, const uint8_t* curY8, void* stream) {
   Impl& im = *p_;
   // FrcOp::compute() may run on any Holoscan worker thread; make our context current so the NVOF
   // driver calls (and the runtime kernels sharing this primary context) target the right device.
   cu_check(cuCtxSetCurrent(im.ctx), "cuCtxSetCurrent");
+  const CUstream cs = reinterpret_cast<CUstream>(stream);
+  // Bind NVOF input/output processing to the caller's stream so the uploads, the execute, and the
+  // downstream interpolate (run on the same stream) order without a device-wide cuCtxSynchronize —
+  // that full-context sync was the pipeline's serialization point. nvOFExecute is then asynchronous.
+  if (im.fl.nvOFSetIOCudaStreams)
+    im.of_check(im.fl.nvOFSetIOCudaStreams(im.hof, cs, cs), "nvOFSetIOCudaStreams");
   auto upload = [&](CUdeviceptr dst, uint32_t dpitch, const uint8_t* src) {
     CUDA_MEMCPY2D c{};
     c.srcMemoryType = CU_MEMORYTYPE_DEVICE;
@@ -133,22 +143,32 @@ void NvofFlow::compute(const uint8_t* prevY8, const uint8_t* curY8) {
     c.dstPitch = dpitch;
     c.WidthInBytes = im.width;
     c.Height = im.height;
-    cu_check(cuMemcpy2D(&c), "cuMemcpy2D Y8");
+    cu_check(cuMemcpy2DAsync(&c, cs), "cuMemcpy2DAsync Y8");
   };
   upload(im.in_dp, im.in_pitch, prevY8);
   upload(im.ref_dp, im.ref_pitch, curY8);
 
+  // Forward flow: prev (bin) -> cur (bref), into bout. Indexed in prev coords.
   NV_OF_EXECUTE_INPUT_PARAMS ein{};
   ein.inputFrame = im.bin;
   ein.referenceFrame = im.bref;
   ein.disableTemporalHints = NV_OF_TRUE;
   NV_OF_EXECUTE_OUTPUT_PARAMS eout{};
   eout.outputBuffer = im.bout;
-  im.of_check(im.fl.nvOFExecute(im.hof, &ein, &eout), "nvOFExecute");
-  cu_check(cuCtxSynchronize(), "cuCtxSynchronize");
+  im.of_check(im.fl.nvOFExecute(im.hof, &ein, &eout), "nvOFExecute fwd");
+  // Backward flow: cur (bref) -> prev (bin), into bout_bwd. Same uploaded frames, roles swapped (no
+  // re-upload). Indexed in cur coords. The warp uses fwd<->bwd consistency to detect occlusions.
+  ein.inputFrame = im.bref;
+  ein.referenceFrame = im.bin;
+  eout.outputBuffer = im.bout_bwd;
+  im.of_check(im.fl.nvOFExecute(im.hof, &ein, &eout), "nvOFExecute bwd");
+  // No cuCtxSynchronize: both flow outputs are produced on `stream`; the caller's interpolate kernel on
+  // the same stream consumes them in order. Reuse of the shared in/ref/out buffers across frames is
+  // also stream-ordered (FrcOp::compute is serial), so no inter-frame hazard.
 }
 
 const void* NvofFlow::flow_dev() const { return reinterpret_cast<const void*>(p_->out_dp); }
+const void* NvofFlow::flow_dev_bwd() const { return reinterpret_cast<const void*>(p_->out_dp_bwd); }
 uint32_t NvofFlow::flow_pitch_bytes() const { return p_->out_pitch; }
 uint32_t NvofFlow::grid_w() const { return p_->grid_w; }
 uint32_t NvofFlow::grid_h() const { return p_->grid_h; }
