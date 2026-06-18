@@ -37,6 +37,7 @@ input:disabled, select:disabled { opacity:.55; }
 /* NMOS discovery */
 .nmos-cfg { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:12px; }
 .nmos-cfg label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--mut); flex:1; min-width:200px; }
+.nmos-cfg label.chk { flex-direction:row; align-items:center; gap:6px; flex:0 0 auto; min-width:0; white-space:nowrap; padding-bottom:4px; }
 .nmos-status { font-size:13px; color:var(--mut); padding:9px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
 .nmos-status b { color:var(--fg); font-variant-numeric:tabular-nums; }
 .nmos-status .ok { font-size:10px; } .nmos-status .err { font-size:10px; }

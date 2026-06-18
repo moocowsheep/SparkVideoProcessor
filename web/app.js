@@ -75,25 +75,39 @@ $('save').onclick = async () => {
 $('start').onclick = async () => { const a = await api('/api/start', { method: 'POST', body: '' }); $('msg').textContent = a.message || ''; poll(); };
 $('stop').onclick = async () => { const a = await api('/api/stop', { method: 'POST', body: '' }); $('msg').textContent = a.message || ''; poll(); };
 
-// ---------------- NMOS discovery (registry + node, direct) ----------------
-const NMOS = { registry: '', node: '', receivers: null };
+// ---------------- NMOS discovery (registry OR mDNS proxy + node, direct) ----------------
+// `registry` is the IS-04 Query API base the dashboard reads. In registry-free (P2P) mode it
+// points at the mDNS proxy (deploy/nmos_mdns_proxy.py), which browses _nmos-node._tcp and
+// re-serves the Query API shape — so no registry is needed. The Node base (IS-05) is unchanged.
+const NMOS = { registry: '', registryUrl: '', node: '', proxy: '', p2p: false, receivers: null };
 
 function nmosDefaults() {
   const h = location.hostname || 'localhost';
-  return { registry: `http://${h}:3211`, node: `http://${h}:3242` };
+  return { registry: `http://${h}:3211`, node: `http://${h}:3242`, proxy: `http://${h}:3290` };
+}
+function applyDiscoverySource() {
+  NMOS.registry = NMOS.p2p ? NMOS.proxy : NMOS.registryUrl;
+  $('nmos_registry').value = NMOS.registry;
+  $('nmos_registry').disabled = NMOS.p2p;  // proxy URL is fixed when P2P is on
 }
 function loadNmosCfg() {
   const d = nmosDefaults();
-  NMOS.registry = localStorage.getItem('nmos_registry') || d.registry;
+  NMOS.registryUrl = localStorage.getItem('nmos_registry') || d.registry;
   NMOS.node = localStorage.getItem('nmos_node') || d.node;
-  $('nmos_registry').value = NMOS.registry;
+  NMOS.proxy = localStorage.getItem('nmos_proxy') || d.proxy;
+  NMOS.p2p = localStorage.getItem('nmos_p2p') === '1';
   $('nmos_node').value = NMOS.node;
+  $('nmos_p2p').checked = NMOS.p2p;
+  applyDiscoverySource();
 }
 function saveNmosCfg() {
-  NMOS.registry = $('nmos_registry').value.replace(/\/$/, '');
+  NMOS.p2p = $('nmos_p2p').checked;
+  if (!NMOS.p2p) NMOS.registryUrl = $('nmos_registry').value.replace(/\/$/, '');
   NMOS.node = $('nmos_node').value.replace(/\/$/, '');
-  localStorage.setItem('nmos_registry', NMOS.registry);
+  localStorage.setItem('nmos_p2p', NMOS.p2p ? '1' : '0');
+  localStorage.setItem('nmos_registry', NMOS.registryUrl);
   localStorage.setItem('nmos_node', NMOS.node);
+  applyDiscoverySource();
   NMOS.receivers = null;  // re-resolve against the new node
 }
 async function jget(base, path) {
@@ -232,6 +246,7 @@ async function disconnectReceiver(rxId, btn) {
 function refreshNmos() { loadNodeStatus(); loadSources(); }
 
 $('nmos_refresh').onclick = () => { saveNmosCfg(); refreshNmos(); };
+$('nmos_p2p').onchange = () => { saveNmosCfg(); refreshNmos(); };
 
 // ---------------- boot ----------------
 loadNmosCfg();
