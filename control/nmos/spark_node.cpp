@@ -396,14 +396,20 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
   if (!media_if) throw std::logic_error("spark nmos: no interface for host_address " + utility::us2s(host_address));
   const std::vector<utility::string_t> interface_names{ media_if->name };
 
+  // Human-readable name for controllers / the BMD source list (resources were unlabeled -> blank).
+  const auto node_label = str_field(settings, U("spark_label"), U("Spark Video Processor"));
+
   // Node + Device
   {
     auto node = nmos::make_node(ids.node, clocks, nmos::make_node_interfaces(interfaces), settings);
+    node.data[nmos::fields::label] = value::string(node_label);
+    node.data[nmos::fields::description] = value::string(node_label + U(" - ST 2110 processor"));
     insert(model.node_resources, std::move(node));
   }
   {
     auto device = nmos::make_device(ids.device, ids.node, { ids.sender_v, ids.sender_a },
                                     { ids.receiver_v, ids.receiver_a }, settings);
+    device.data[nmos::fields::label] = value::string(node_label);
     insert(model.node_resources, std::move(device));
   }
 
@@ -424,6 +430,7 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
     const auto manifest = nmos::experimental::make_manifest_api_manifest(ids.sender_v, settings);
     auto sender = nmos::make_sender(ids.sender_v, ids.flow_v, nmos::transports::rtp, ids.device,
                                     manifest.to_string(), interface_names, settings);
+    sender.data[nmos::fields::label] = value::string(node_label + U(" - ST 2110-20 video"));
     auto connection_sender = nmos::make_connection_rtp_sender(ids.sender_v, false /*smpte2022_7*/);
     connection_sender.data[nmos::fields::endpoint_constraints][0][nmos::fields::source_ip] =
         value_of({ { nmos::fields::constraint_enum, value_from_elements(media_if->addresses) } });
@@ -452,6 +459,7 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
     const auto manifest = nmos::experimental::make_manifest_api_manifest(ids.sender_a, settings);
     auto sender = nmos::make_sender(ids.sender_a, ids.flow_a, nmos::transports::rtp, ids.device,
                                     manifest.to_string(), interface_names, settings);
+    sender.data[nmos::fields::label] = value::string(node_label + U(" - ST 2110-30 audio"));
     auto connection_sender = nmos::make_connection_rtp_sender(ids.sender_a, false);
     connection_sender.data[nmos::fields::endpoint_constraints][0][nmos::fields::source_ip] =
         value_of({ { nmos::fields::constraint_enum, value_from_elements(media_if->addresses) } });
@@ -471,6 +479,7 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
   {
     auto receiver = nmos::make_receiver(ids.receiver_v, ids.device, nmos::transports::rtp, interface_names,
                                         nmos::formats::video, { nmos::media_types::video_raw }, settings);
+    receiver.data[nmos::fields::label] = value::string(node_label + U(" - video in"));
     receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({ value_of({
         // Ingest receiver: accept the common broadcast rates (the FRC operator handles rate
         // conversion downstream). Constraining to one rate makes nmos-cpp reject a real sender's
@@ -496,6 +505,7 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
   // ---- audio receiver (ingest: ST 2110-30 PCM L16/L24 @ 48k) ----
   {
     auto receiver = nmos::make_audio_receiver(ids.receiver_a, ids.device, nmos::transports::rtp, interface_names, 24, settings);
+    receiver.data[nmos::fields::label] = value::string(node_label + U(" - audio in"));
     receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({ value_of({
         { nmos::caps::format::channel_count, nmos::make_caps_integer_constraint({}, 1, 8) },
         { nmos::caps::format::sample_rate, nmos::make_caps_rational_constraint({ { 48000, 1 } }) },
