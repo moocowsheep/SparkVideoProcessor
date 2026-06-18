@@ -77,8 +77,11 @@ class St2110Pipeline : public holoscan::Application {
                                              Arg("emit_frames", true), Arg("udp_port", rx_port),
                                              Arg("mcast_group", rx_mcast), Arg("src_ip", rx_src),
                                              Arg("iface_ip", rx_iface), Arg("in_width", in_w),
-                                             Arg("in_height", in_h), Arg("in_fps", in_fps),
-                                             make_condition<CountCondition>(frames));
+                                             Arg("in_height", in_h), Arg("in_fps", in_fps));
+    // frames <= 0 => run until stopped (proto contract: 0 = unbounded, e.g. a live NMOS feed);
+    // > 0 => bounded run via CountCondition. Without this guard frames=0 made CountCondition(0)
+    // gate the RX to zero compute() calls, so the graph emitted nothing and exited at startup.
+    if (frames > 0) rx->add_arg(make_condition<CountCondition>(frames));
     auto unpack = make_operator<ops::UnpackOp>("unpack");
     auto resize = make_operator<ops::ResizeOp>("resize", Arg("out_width", ow), Arg("out_height", oh),
                                                Arg("interp", interp));
