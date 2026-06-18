@@ -63,7 +63,17 @@ class DpdkRxBackend final : public ISt2110RxBackend {
     lookup_rx_timestamp();
     if (rte_eth_dev_start(port_) < 0) die("rte_eth_dev_start failed");
     if (group_be_) {
-      rte_eth_allmulticast_enable(port_);  // accept the group's multicast MAC (no promiscuous flood)
+      // Accept ONLY the 2110 group's multicast MAC — NOT all multicast. This mlx5 port is shared with
+      // the kernel netdev that runs ptp4l; rte_eth_allmulticast_enable() also sweeps up the
+      // grandmaster's PTP multicast, starving ptp4l so it drops the GM and promotes the local clock.
+      // A specific mc-addr filter leaves PTP (and other multicast) to the kernel. Fall back to
+      // allmulticast only if the PMD can't program the filter (so RX still works).
+      rte_ether_addr mc{};
+      spark::net::multicast_mac(rte_be_to_cpu_32(group_be_), mc.addr_bytes);
+      if (rte_eth_dev_set_mc_addr_list(port_, &mc, 1) != 0) {
+        std::printf("[st2110_rx] WARN: set_mc_addr_list unsupported; using allmulticast (may disturb PTP)\n");
+        rte_eth_allmulticast_enable(port_);
+      }
       send_igmp_join();                    // make the switch's IGMP snooping forward the group to us
     } else {
       rte_eth_promiscuous_enable(port_);   // legacy loopback: accept all, filter by dst port only
