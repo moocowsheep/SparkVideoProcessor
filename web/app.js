@@ -176,7 +176,8 @@ async function loadSources() {
       connectedSender[r.subscription.sender_id] = r.format.split(':').pop();
   }
 
-  const rtp = senders.filter((s) => (s.transport || '').endsWith('rtp'));
+  // match the whole RTP family: urn:x-nmos:transport:rtp, rtp.mcast, rtp.ucast
+  const rtp = senders.filter((s) => (s.transport || '').split(':').pop().startsWith('rtp'));
   if (!rtp.length) { box.innerHTML = '<p class="hint">no ST 2110 (RTP) senders registered.</p>'; return; }
 
   box.innerHTML = rtp.map((s) => {
