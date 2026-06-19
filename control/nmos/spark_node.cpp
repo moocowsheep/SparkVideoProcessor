@@ -22,6 +22,7 @@
 #include <thread>
 #include <vector>
 
+#include "bst/optional.h"
 #include "cpprest/host_utils.h"
 #include "cpprest/http_client.h"
 #include "nmos/activation_mode.h"
@@ -132,11 +133,20 @@ nmos::connection_resource_auto_resolver make_spark_auto_resolver(const nmos::set
   };
 }
 
+// PTP domain to embed in the SDP's ts-refclk (a=ts-refclk:ptp=IEEE1588-2008:<gmid>:<domain>).
+// Omitted (RFC 7273 allows that) when spark_ptp_domain is unset. ST 2110 receivers like the Blackmagic
+// BiDirect validate the refclk and reject the bare ":traceable" form, so we advertise gmid[:domain].
+bst::optional<int> ptp_domain_setting(const nmos::settings& s) {
+  return s.has_field(U("spark_ptp_domain")) ? bst::optional<int>((int)uint_field(s, U("spark_ptp_domain"), 0))
+                                            : bst::nullopt;
+}
+
 // Build an ST 2110 SDP transport file for a sender from its CURRENT node/source/flow + resolved
 // IS-05 transport params. The flow is read LIVE, so updating its frame_width/height/grain_rate and
 // re-running this regenerates the SDP. Returns null for an unknown sender. Caller holds the model lock.
 value build_sender_transportfile(const nmos::resources& node_resources, const Ids& ids,
-                                 const nmos::resource& sender, const nmos::resource& connection_sender) {
+                                 const nmos::resource& sender, const nmos::resource& connection_sender,
+                                 bst::optional<int> ptp_domain) {
   nmos::id source_id, flow_id;
   if (connection_sender.id == ids.sender_v) { source_id = ids.source_v; flow_id = ids.flow_v; }
   else if (connection_sender.id == ids.sender_a) { source_id = ids.source_a; flow_id = ids.flow_a; }
@@ -152,9 +162,9 @@ value build_sender_transportfile(const nmos::resources& node_resources, const Id
   const nmos::format format{ nmos::fields::format(flow->data) };
   const auto sdp_params = (nmos::formats::video == format)
       ? nmos::make_video_sdp_parameters(node->data, source->data, flow->data, sender.data,
-                                        nmos::details::payload_type_video_default, mids, {}, sdp::type_parameters::type_N)
+                                        nmos::details::payload_type_video_default, mids, ptp_domain, sdp::type_parameters::type_N)
       : nmos::make_audio_sdp_parameters(node->data, source->data, flow->data, sender.data,
-                                        nmos::details::payload_type_audio_default, mids, {}, 1.0 /*ptime ms*/);
+                                        nmos::details::payload_type_audio_default, mids, ptp_domain, 1.0 /*ptime ms*/);
 
   auto& transport_params = nmos::fields::transport_params(nmos::fields::endpoint_active(connection_sender.data));
   auto session_description = nmos::make_session_description(sdp_params, transport_params);
@@ -167,9 +177,10 @@ value build_sender_transportfile(const nmos::resources& node_resources, const Id
 nmos::connection_sender_transportfile_setter make_spark_transportfile_setter(
     const nmos::resources& node_resources, const nmos::settings& settings) {
   const Ids ids(settings);
-  return [&node_resources, ids](const nmos::resource& sender, const nmos::resource& connection_sender,
+  const auto ptp_domain = ptp_domain_setting(settings);
+  return [&node_resources, ids, ptp_domain](const nmos::resource& sender, const nmos::resource& connection_sender,
                                 value& endpoint_transportfile) {
-    auto tf = build_sender_transportfile(node_resources, ids, sender, connection_sender);
+    auto tf = build_sender_transportfile(node_resources, ids, sender, connection_sender, ptp_domain);
     if (!tf.is_null()) endpoint_transportfile = tf;  // model mutex already held by the calling thread
   };
 }
@@ -551,6 +562,7 @@ class OutputFormatSync {
  public:
   OutputFormatSync(nmos::node_model& model, slog::base_gate& gate)
       : model_(model), gate_(gate), ids_(model.settings),
+        ptp_domain_(ptp_domain_setting(model.settings)),
         client_(str_field(model.settings, U("spark_control_url"), U("http://127.0.0.1:8080"))),
         thread_([this] { run(); }) {}
   ~OutputFormatSync() {
@@ -617,7 +629,7 @@ class OutputFormatSync {
       if (model_.connection_resources.end() != csender && model_.node_resources.end() != sender &&
           sender_resolved(*csender)) {
         nmos::modify_resource(model_.connection_resources, ids_.sender_v, [&](nmos::resource& cr) {
-          auto tf = build_sender_transportfile(model_.node_resources, ids_, *sender, cr);
+          auto tf = build_sender_transportfile(model_.node_resources, ids_, *sender, cr, ptp_domain_);
           if (!tf.is_null()) cr.data[nmos::fields::endpoint_transportfile] = tf;
         });
         tf_synced_ = true;
@@ -674,6 +686,7 @@ class OutputFormatSync {
   nmos::node_model& model_;
   slog::base_gate& gate_;
   Ids ids_;
+  bst::optional<int> ptp_domain_;
   web::http::client::http_client client_;
   std::mutex mu_;
   std::condition_variable cv_;
