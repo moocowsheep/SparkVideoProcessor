@@ -12,7 +12,9 @@
 // Structure follows nmos-cpp's nmos-cpp-node example (BSD-3): a node_implementation supplies the
 // IS-05 callbacks (resolve "auto", build the sender transport file/SDP, on-activated), and a thread
 // inserts our fixed resource set into the model once the server is up.
+#include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -42,6 +44,8 @@
 #include "nmos/node_server.h"       // make_node_server, node_implementation, insert_node_default_settings
 #include "nmos/process_utils.h"     // wait_term_signal
 #include "nmos/random.h"
+#include "nmos/rational.h"          // rational, make_rational, parse_rational
+#include "nmos/resources.h"         // find_resource, modify_resource
 #include "nmos/sdp_utils.h"
 #include "nmos/server.h"            // server_guard
 #include "nmos/settings.h"          // get_host_interfaces
@@ -128,6 +132,36 @@ nmos::connection_resource_auto_resolver make_spark_auto_resolver(const nmos::set
   };
 }
 
+// Build an ST 2110 SDP transport file for a sender from its CURRENT node/source/flow + resolved
+// IS-05 transport params. The flow is read LIVE, so updating its frame_width/height/grain_rate and
+// re-running this regenerates the SDP. Returns null for an unknown sender. Caller holds the model lock.
+value build_sender_transportfile(const nmos::resources& node_resources, const Ids& ids,
+                                 const nmos::resource& sender, const nmos::resource& connection_sender) {
+  nmos::id source_id, flow_id;
+  if (connection_sender.id == ids.sender_v) { source_id = ids.source_v; flow_id = ids.flow_v; }
+  else if (connection_sender.id == ids.sender_a) { source_id = ids.source_a; flow_id = ids.flow_a; }
+  else return value::null();
+
+  auto node = nmos::find_resource(node_resources, { ids.node, nmos::types::node });
+  auto source = nmos::find_resource(node_resources, { source_id, nmos::types::source });
+  auto flow = nmos::find_resource(node_resources, { flow_id, nmos::types::flow });
+  if (node_resources.end() == node || node_resources.end() == source || node_resources.end() == flow)
+    throw std::logic_error("spark nmos: node/source/flow not found for sender transportfile");
+
+  const std::vector<utility::string_t> mids{ U("PRIMARY") };  // single-path (no ST 2022-7 in v1)
+  const nmos::format format{ nmos::fields::format(flow->data) };
+  const auto sdp_params = (nmos::formats::video == format)
+      ? nmos::make_video_sdp_parameters(node->data, source->data, flow->data, sender.data,
+                                        nmos::details::payload_type_video_default, mids, {}, sdp::type_parameters::type_N)
+      : nmos::make_audio_sdp_parameters(node->data, source->data, flow->data, sender.data,
+                                        nmos::details::payload_type_audio_default, mids, {}, 1.0 /*ptime ms*/);
+
+  auto& transport_params = nmos::fields::transport_params(nmos::fields::endpoint_active(connection_sender.data));
+  auto session_description = nmos::make_session_description(sdp_params, transport_params);
+  auto sdp = utility::s2us(sdp::make_session_description(session_description));
+  return nmos::make_connection_rtp_sender_transportfile(sdp);
+}
+
 // ----- IS-05: build each sender's /transportfile (the ST 2110 SDP) at activation -----
 // Because the node clock is PTP, make_*_sdp_parameters emit a=ts-refclk:ptp=IEEE1588-2008:<gmid>.
 nmos::connection_sender_transportfile_setter make_spark_transportfile_setter(
@@ -135,30 +169,8 @@ nmos::connection_sender_transportfile_setter make_spark_transportfile_setter(
   const Ids ids(settings);
   return [&node_resources, ids](const nmos::resource& sender, const nmos::resource& connection_sender,
                                 value& endpoint_transportfile) {
-    nmos::id source_id, flow_id;
-    if (connection_sender.id == ids.sender_v) { source_id = ids.source_v; flow_id = ids.flow_v; }
-    else if (connection_sender.id == ids.sender_a) { source_id = ids.source_a; flow_id = ids.flow_a; }
-    else return;
-
-    // model mutex is already held by the calling thread
-    auto node = nmos::find_resource(node_resources, { ids.node, nmos::types::node });
-    auto source = nmos::find_resource(node_resources, { source_id, nmos::types::source });
-    auto flow = nmos::find_resource(node_resources, { flow_id, nmos::types::flow });
-    if (node_resources.end() == node || node_resources.end() == source || node_resources.end() == flow)
-      throw std::logic_error("spark nmos: node/source/flow not found for sender transportfile");
-
-    const std::vector<utility::string_t> mids{ U("PRIMARY") };  // single-path (no ST 2022-7 in v1)
-    const nmos::format format{ nmos::fields::format(flow->data) };
-    const auto sdp_params = (nmos::formats::video == format)
-        ? nmos::make_video_sdp_parameters(node->data, source->data, flow->data, sender.data,
-                                          nmos::details::payload_type_video_default, mids, {}, sdp::type_parameters::type_N)
-        : nmos::make_audio_sdp_parameters(node->data, source->data, flow->data, sender.data,
-                                          nmos::details::payload_type_audio_default, mids, {}, 1.0 /*ptime ms*/);
-
-    auto& transport_params = nmos::fields::transport_params(nmos::fields::endpoint_active(connection_sender.data));
-    auto session_description = nmos::make_session_description(sdp_params, transport_params);
-    auto sdp = utility::s2us(sdp::make_session_description(session_description));
-    endpoint_transportfile = nmos::make_connection_rtp_sender_transportfile(sdp);
+    auto tf = build_sender_transportfile(node_resources, ids, sender, connection_sender);
+    if (!tf.is_null()) endpoint_transportfile = tf;  // model mutex already held by the calling thread
   };
 }
 
@@ -413,7 +425,9 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
     insert(model.node_resources, std::move(device));
   }
 
-  // Output format (1080p59.94 4:2:2 10-bit video; stereo 48k/24-bit audio). P2 makes these dynamic.
+  // Initial output format (4:2:2 10-bit video; stereo 48k/24-bit audio). These are seed values only:
+  // OutputFormatSync polls the control daemon and keeps the video flow + sender SDP in step with the
+  // operator's selected output resolution / FRC mode at runtime (no node restart needed).
   const nmos::rational frame_rate{ 60000, 1001 };
   const unsigned int frame_width = uint_field(settings, U("spark_out_w"), 1920);
   const unsigned int frame_height = uint_field(settings, U("spark_out_h"), 1080);
@@ -428,7 +442,10 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
     insert(model.node_resources, std::move(flow));
 
     const auto manifest = nmos::experimental::make_manifest_api_manifest(ids.sender_v, settings);
-    auto sender = nmos::make_sender(ids.sender_v, ids.flow_v, nmos::transports::rtp, ids.device,
+    // rtp.mcast (not generic rtp): ST 2110 senders are multicast, and controllers (e.g. the Blackmagic
+    // source dropdown) filter to senders whose transport matches the receiver's rtp.mcast — a generic
+    // rtp sender is hidden even though a forced IS-05 PATCH still connects.
+    auto sender = nmos::make_sender(ids.sender_v, ids.flow_v, nmos::transports::rtp_mcast, ids.device,
                                     manifest.to_string(), interface_names, settings);
     sender.data[nmos::fields::label] = value::string(node_label + U(" - ST 2110-20 video"));
     auto connection_sender = nmos::make_connection_rtp_sender(ids.sender_v, false /*smpte2022_7*/);
@@ -457,7 +474,7 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
     insert(model.node_resources, std::move(flow));
 
     const auto manifest = nmos::experimental::make_manifest_api_manifest(ids.sender_a, settings);
-    auto sender = nmos::make_sender(ids.sender_a, ids.flow_a, nmos::transports::rtp, ids.device,
+    auto sender = nmos::make_sender(ids.sender_a, ids.flow_a, nmos::transports::rtp_mcast, ids.device,
                                     manifest.to_string(), interface_names, settings);
     sender.data[nmos::fields::label] = value::string(node_label + U(" - ST 2110-30 audio"));
     auto connection_sender = nmos::make_connection_rtp_sender(ids.sender_a, false);
@@ -525,6 +542,146 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
       << "spark nmos: inserted node/device + video & audio senders/receivers (clk0=ptp gmid=" << utility::us2s(gmid) << ")";
 }
 
+// ----- keep the output video sender's flow + SDP in step with the daemon's selected output format ---
+// The web UI sets the output resolution / FRC mode on the control daemon (outWidth/outHeight/frcMode);
+// the node owns the sender SDP. This polls /api/status and, when the output changes, updates the video
+// flow (frame_width/height/grain_rate) and regenerates the sender transport file (SDP) live — so
+// controllers always see our real egress format, no node restart. Runs on its own thread.
+class OutputFormatSync {
+ public:
+  OutputFormatSync(nmos::node_model& model, slog::base_gate& gate)
+      : model_(model), gate_(gate), ids_(model.settings),
+        client_(str_field(model.settings, U("spark_control_url"), U("http://127.0.0.1:8080"))),
+        thread_([this] { run(); }) {}
+  ~OutputFormatSync() {
+    { std::lock_guard<std::mutex> lk(mu_); stop_ = true; }
+    cv_.notify_all();
+    if (thread_.joinable()) thread_.join();
+  }
+
+ private:
+  void run() {
+    std::unique_lock<std::mutex> lk(mu_);
+    while (!stop_) {
+      // wait first: lets the auto-activated sender resolve its transport params before the first rebuild
+      cv_.wait_for(lk, std::chrono::seconds(3), [this] { return stop_; });
+      if (stop_) break;
+      lk.unlock();
+      try { sync_once(); }
+      catch (const std::exception& e) {
+        slog::log<slog::severities::more_info>(gate_, SLOG_FLF) << "spark nmos: output-format sync skipped: " << e.what();
+      }
+      lk.lock();
+    }
+  }
+
+  void sync_once() {
+    auto resp = client_.request(web::http::methods::GET, U("/api/status")).get();
+    if (resp.status_code() != web::http::status_codes::OK) return;
+    const auto body = resp.extract_json().get();
+    if (!body.has_field(U("config"))) return;
+    const auto& c = body.at(U("config"));
+    const uint32_t w = cfg_uint(c, U("outWidth")), h = cfg_uint(c, U("outHeight"));
+    if (0 == w || 0 == h) return;  // daemon output not configured yet
+    apply(w, h, output_rate(cfg_str(c, U("inExactframerate")), cfg_uint(c, U("frcMode"))));
+  }
+
+  void apply(uint32_t w, uint32_t h, const nmos::rational& rate) {
+    auto lock = model_.write_lock();
+    auto flow = nmos::find_resource(model_.node_resources, { ids_.flow_v, nmos::types::flow });
+    if (model_.node_resources.end() == flow) return;  // resources not inserted yet
+
+    bool updated = false;
+    if ((uint32_t)nmos::fields::frame_width(flow->data) != w ||
+        (uint32_t)nmos::fields::frame_height(flow->data) != h ||
+        nmos::parse_rational(nmos::fields::grain_rate(flow->data)) != rate) {
+      const auto ver = value(nmos::make_version());
+      nmos::modify_resource(model_.node_resources, ids_.flow_v, [&](nmos::resource& r) {
+        r.data[nmos::fields::frame_width] = value((int)w);
+        r.data[nmos::fields::frame_height] = value((int)h);
+        r.data[nmos::fields::grain_rate] = nmos::make_rational(rate);
+        r.data[nmos::fields::version] = ver;
+      });
+      nmos::modify_resource(model_.node_resources, ids_.source_v, [&](nmos::resource& r) {
+        r.data[nmos::fields::grain_rate] = nmos::make_rational(rate);
+        r.data[nmos::fields::version] = ver;
+      });
+      tf_synced_ = false;
+      updated = true;
+    }
+
+    // Regenerate the sender SDP once the (auto-activated) sender has resolved its transport params.
+    if (!tf_synced_) {
+      auto csender = nmos::find_resource(model_.connection_resources, { ids_.sender_v, nmos::types::sender });
+      auto sender = nmos::find_resource(model_.node_resources, { ids_.sender_v, nmos::types::sender });
+      if (model_.connection_resources.end() != csender && model_.node_resources.end() != sender &&
+          sender_resolved(*csender)) {
+        nmos::modify_resource(model_.connection_resources, ids_.sender_v, [&](nmos::resource& cr) {
+          auto tf = build_sender_transportfile(model_.node_resources, ids_, *sender, cr);
+          if (!tf.is_null()) cr.data[nmos::fields::endpoint_transportfile] = tf;
+        });
+        tf_synced_ = true;
+        updated = true;
+      }
+    }
+
+    if (updated) {
+      model_.notify();
+      slog::log<slog::severities::info>(gate_, SLOG_FLF)
+          << "spark nmos: output format -> " << w << "x" << h << " @ "
+          << rate.numerator() << "/" << rate.denominator() << " (flow + sender SDP)";
+    }
+  }
+
+  // out rate mirrors the engine (st2110_pipeline): up-convert (frc_mode 2) doubles the source rate,
+  // else 1:1; fall back to 59.94 when no source is connected (the engine's base_fps default).
+  static nmos::rational output_rate(const utility::string_t& in_fps, uint32_t frc_mode) {
+    nmos::rational base = nmos::rates::rate59_94;
+    const auto s = utility::us2s(in_fps);
+    if (!s.empty()) {
+      try {
+        const auto slash = s.find('/');
+        const int64_t num = std::stoll(s.substr(0, slash));
+        const int64_t den = (std::string::npos == slash) ? 1 : std::stoll(s.substr(slash + 1));
+        if (num > 0 && den > 0) base = nmos::rational(num, den);
+      } catch (...) {}
+    }
+    return 2 == frc_mode ? nmos::rational(base.numerator() * 2, base.denominator()) : base;
+  }
+
+  static bool sender_resolved(const nmos::resource& connection_sender) {
+    const auto& active = nmos::fields::endpoint_active(connection_sender.data);
+    if (!active.is_object() || !active.has_field(U("transport_params"))) return false;
+    const auto& tps = active.at(U("transport_params"));
+    if (!tps.is_array() || 0 == tps.as_array().size()) return false;
+    const auto& tp0 = tps.at(0);
+    if (!tp0.has_field(U("destination_ip"))) return false;
+    const auto& d = tp0.at(U("destination_ip"));
+    return d.is_string() && !d.as_string().empty() && U("auto") != d.as_string();
+  }
+
+  static uint32_t cfg_uint(const value& c, const utility::string_t& k) {
+    if (!c.has_field(k)) return 0;
+    const auto& v = c.at(k);
+    if (v.is_integer()) return (uint32_t)v.as_integer();
+    if (v.is_string()) { try { return (uint32_t)std::stoul(utility::us2s(v.as_string())); } catch (...) {} }
+    return 0;
+  }
+  static utility::string_t cfg_str(const value& c, const utility::string_t& k) {
+    return (c.has_field(k) && c.at(k).is_string()) ? c.at(k).as_string() : utility::string_t{};
+  }
+
+  nmos::node_model& model_;
+  slog::base_gate& gate_;
+  Ids ids_;
+  web::http::client::http_client client_;
+  std::mutex mu_;
+  std::condition_variable cv_;
+  bool stop_ = false;
+  bool tf_synced_ = false;
+  std::thread thread_;
+};
+
 nmos::experimental::node_implementation make_spark_node_implementation(nmos::node_model& model, slog::base_gate& gate) {
   // The engine controller (HTTP -> control daemon) lives as long as the activation handler that holds it.
   auto ctrl = std::make_shared<EngineController>(
@@ -581,6 +738,9 @@ int main(int argc, char* argv[]) {
     slog::log<slog::severities::info>(gate, SLOG_FLF) << "Preparing for connections";
     nmos::server_guard node_server_guard(node_server);
     slog::log<slog::severities::info>(gate, SLOG_FLF) << "Ready for connections";
+
+    // Track the daemon's selected output format and reflect it in our sender flow/SDP (no restart).
+    spark::OutputFormatSync output_format_sync(node_model, gate);
 
     nmos::details::wait_term_signal();
     slog::log<slog::severities::info>(gate, SLOG_FLF) << "Closing connections";
