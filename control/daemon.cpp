@@ -8,6 +8,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -43,6 +44,7 @@ struct State {
   double start_time = 0;
   PipelineStats stats;
   std::string message = "idle";
+  std::string ptp_gmid;  // live PTP grandmaster (from pmc); the NMOS node mirrors it into its clock/SDP
 
   State() {  // sensible defaults (the gate-4 / pipeline topology)
     config.set_profile("1080p");
@@ -72,6 +74,31 @@ uint64_t grab(const std::string& s, const std::string& key, uint64_t def = 0) {
     any = true;
   }
   return any ? v : def;
+}
+
+// Query the live PTP grandmaster from the local ptp4l (root-only pmc UDS — the daemon runs as root)
+// and format it as an NMOS gmid: EUI-64, lower-case, dash-separated (e.g. 00-00-5e-ff-fe-00-53-88).
+// Returns "" if ptp4l/pmc is unavailable or has no lock, so callers keep the last known value.
+std::string read_ptp_gmid() {
+  // absolute path: a root daemon's popen PATH may not include /usr/sbin where pmc lives
+  FILE* p = popen("timeout 2 /usr/sbin/pmc -u -b 0 'GET PARENT_DATA_SET' 2>/dev/null", "r");
+  if (!p) return "";
+  std::string gmid;
+  char buf[512];
+  while (fgets(buf, sizeof buf, p)) {
+    std::string s(buf);
+    const auto pos = s.find("grandmasterIdentity");
+    if (pos == std::string::npos) continue;
+    std::istringstream iss(s.substr(pos + 19));  // past "grandmasterIdentity"
+    std::string tok;  // e.g. "7c2e0d.fffe.1e4b93"
+    iss >> tok;
+    std::string hex;
+    for (char c : tok) if (std::isxdigit((unsigned char)c)) hex += (char)std::tolower((unsigned char)c);
+    if (hex.size() == 16)
+      for (size_t i = 0; i < 16; i += 2) { if (i) gmid += '-'; gmid += hex.substr(i, 2); }
+  }
+  pclose(p);
+  return gmid;
 }
 
 void parse_stats(PipelineStats& st) {
@@ -202,6 +229,7 @@ PipelineStatus build_status_locked(State& s) {
   *out.mutable_stats() = s.stats;
   out.set_message(s.message);
   out.set_uptime_s(s.state == RUNNING ? now_s() - s.start_time : 0.0);
+  out.set_ptp_gmid(s.ptp_gmid);
   return out;
 }
 }  // namespace
@@ -354,6 +382,16 @@ int main(int argc, char** argv) {
     else if (a == "--http") http_port = std::atoi(next());
   }
   signal(SIGPIPE, SIG_IGN);  // SIGCHLD left default: we reap children via waitpid(WNOHANG)
+
+  // Poll the live PTP grandmaster so the NMOS node can mirror it into clk0 + sender SDPs (the GM can
+  // change via BMC; a static gmid goes stale and ST 2110 receivers reject the mismatch).
+  std::thread([] {
+    for (;;) {
+      std::string gm = read_ptp_gmid();
+      if (!gm.empty()) { std::lock_guard<std::mutex> lk(g_state.mu); g_state.ptp_gmid = gm; }
+      std::this_thread::sleep_for(std::chrono::seconds(3));
+    }
+  }).detach();
 
   SparkControlImpl svc;
   grpc::ServerBuilder b;

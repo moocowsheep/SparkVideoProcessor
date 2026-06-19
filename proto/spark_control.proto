@@ -72,6 +72,7 @@ message PipelineStatus {
   PipelineStats stats = 4;
   string message = 5;   // last info / error
   double uptime_s = 6;
+  string ptp_gmid = 7;  // live PTP grandmaster id from pmc (EUI-64, dash form); "" if unknown. JSON: ptpGmid
 }
 
 message Empty {}

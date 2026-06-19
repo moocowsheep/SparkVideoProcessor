@@ -553,19 +553,20 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
       << "spark nmos: inserted node/device + video & audio senders/receivers (clk0=ptp gmid=" << utility::us2s(gmid) << ")";
 }
 
-// ----- keep the output video sender's flow + SDP in step with the daemon's selected output format ---
-// The web UI sets the output resolution / FRC mode on the control daemon (outWidth/outHeight/frcMode);
-// the node owns the sender SDP. This polls /api/status and, when the output changes, updates the video
-// flow (frame_width/height/grain_rate) and regenerates the sender transport file (SDP) live — so
-// controllers always see our real egress format, no node restart. Runs on its own thread.
-class OutputFormatSync {
+// ----- keep the node's advertised state (output format + PTP grandmaster) in step with reality -------
+// Two things drift from a static node config: (1) the operator's output resolution / FRC mode, set on
+// the control daemon via the web UI (outWidth/outHeight/frcMode); (2) the live PTP grandmaster, which
+// the daemon reads from pmc (ptpGmid) and which can change via BMC. Both feed our sender SDPs (the GM
+// into ts-refclk on BOTH senders), and ST 2110 receivers reject a mismatch — so we poll /api/status and
+// mirror changes into the video flow + node clk0 + the sender transport files, live, no restart.
+class NodeStateSync {
  public:
-  OutputFormatSync(nmos::node_model& model, slog::base_gate& gate)
+  NodeStateSync(nmos::node_model& model, slog::base_gate& gate)
       : model_(model), gate_(gate), ids_(model.settings),
         ptp_domain_(ptp_domain_setting(model.settings)),
         client_(str_field(model.settings, U("spark_control_url"), U("http://127.0.0.1:8080"))),
         thread_([this] { run(); }) {}
-  ~OutputFormatSync() {
+  ~NodeStateSync() {
     { std::lock_guard<std::mutex> lk(mu_); stop_ = true; }
     cv_.notify_all();
     if (thread_.joinable()) thread_.join();
@@ -575,13 +576,13 @@ class OutputFormatSync {
   void run() {
     std::unique_lock<std::mutex> lk(mu_);
     while (!stop_) {
-      // wait first: lets the auto-activated sender resolve its transport params before the first rebuild
+      // wait first: lets the auto-activated senders resolve their transport params before the first rebuild
       cv_.wait_for(lk, std::chrono::seconds(3), [this] { return stop_; });
       if (stop_) break;
       lk.unlock();
       try { sync_once(); }
       catch (const std::exception& e) {
-        slog::log<slog::severities::more_info>(gate_, SLOG_FLF) << "spark nmos: output-format sync skipped: " << e.what();
+        slog::log<slog::severities::more_info>(gate_, SLOG_FLF) << "spark nmos: node-state sync skipped: " << e.what();
       }
       lk.lock();
     }
@@ -595,19 +596,22 @@ class OutputFormatSync {
     const auto& c = body.at(U("config"));
     const uint32_t w = cfg_uint(c, U("outWidth")), h = cfg_uint(c, U("outHeight"));
     if (0 == w || 0 == h) return;  // daemon output not configured yet
-    apply(w, h, output_rate(cfg_str(c, U("inExactframerate")), cfg_uint(c, U("frcMode"))));
+    const auto gmid = (body.has_field(U("ptpGmid")) && body.at(U("ptpGmid")).is_string())
+                          ? body.at(U("ptpGmid")).as_string() : utility::string_t{};
+    apply(w, h, output_rate(cfg_str(c, U("inExactframerate")), cfg_uint(c, U("frcMode"))), gmid);
   }
 
-  void apply(uint32_t w, uint32_t h, const nmos::rational& rate) {
+  void apply(uint32_t w, uint32_t h, const nmos::rational& rate, const utility::string_t& gmid) {
     auto lock = model_.write_lock();
     auto flow = nmos::find_resource(model_.node_resources, { ids_.flow_v, nmos::types::flow });
     if (model_.node_resources.end() == flow) return;  // resources not inserted yet
-
+    const auto ver = value(nmos::make_version());
     bool updated = false;
+
+    // (1) output format -> video flow (resolution / rate); affects the video SDP only.
     if ((uint32_t)nmos::fields::frame_width(flow->data) != w ||
         (uint32_t)nmos::fields::frame_height(flow->data) != h ||
         nmos::parse_rational(nmos::fields::grain_rate(flow->data)) != rate) {
-      const auto ver = value(nmos::make_version());
       nmos::modify_resource(model_.node_resources, ids_.flow_v, [&](nmos::resource& r) {
         r.data[nmos::fields::frame_width] = value((int)w);
         r.data[nmos::fields::frame_height] = value((int)h);
@@ -618,31 +622,54 @@ class OutputFormatSync {
         r.data[nmos::fields::grain_rate] = nmos::make_rational(rate);
         r.data[nmos::fields::version] = ver;
       });
-      tf_synced_ = false;
+      v_sdp_dirty_ = true;
       updated = true;
     }
 
-    // Regenerate the sender SDP once the (auto-activated) sender has resolved its transport params.
-    if (!tf_synced_) {
-      auto csender = nmos::find_resource(model_.connection_resources, { ids_.sender_v, nmos::types::sender });
-      auto sender = nmos::find_resource(model_.node_resources, { ids_.sender_v, nmos::types::sender });
-      if (model_.connection_resources.end() != csender && model_.node_resources.end() != sender &&
-          sender_resolved(*csender)) {
-        nmos::modify_resource(model_.connection_resources, ids_.sender_v, [&](nmos::resource& cr) {
-          auto tf = build_sender_transportfile(model_.node_resources, ids_, *sender, cr, ptp_domain_);
-          if (!tf.is_null()) cr.data[nmos::fields::endpoint_transportfile] = tf;
-        });
-        tf_synced_ = true;
-        updated = true;
-      }
+    // (2) PTP grandmaster -> node clk0; affects ts-refclk in BOTH sender SDPs.
+    if (!gmid.empty() && gmid != current_gmid()) {
+      nmos::modify_resource(model_.node_resources, ids_.node, [&](nmos::resource& r) {
+        for (auto& clk : r.data[nmos::fields::clocks].as_array())
+          if (nmos::fields::name(clk) == nmos::clock_names::clk0.name)
+            clk[nmos::fields::gmid] = value::string(gmid);
+        r.data[nmos::fields::version] = ver;
+      });
+      v_sdp_dirty_ = a_sdp_dirty_ = true;
+      updated = true;
     }
+
+    // (3) regenerate any dirty sender SDP, once that (auto-activated) sender's transport params resolve.
+    if (v_sdp_dirty_ && rebuild_sender(ids_.sender_v)) { v_sdp_dirty_ = false; updated = true; }
+    if (a_sdp_dirty_ && rebuild_sender(ids_.sender_a)) { a_sdp_dirty_ = false; updated = true; }
 
     if (updated) {
       model_.notify();
       slog::log<slog::severities::info>(gate_, SLOG_FLF)
-          << "spark nmos: output format -> " << w << "x" << h << " @ "
-          << rate.numerator() << "/" << rate.denominator() << " (flow + sender SDP)";
+          << "spark nmos: advert -> " << w << "x" << h << " @ " << rate.numerator() << "/" << rate.denominator()
+          << " gmid=" << utility::us2s(current_gmid());
     }
+  }
+
+  // Regenerate one sender's transport file (SDP) from the current node/source/flow. No-op (returns
+  // false) until the sender's IS-05 transport params have resolved, so the dirty flag retries later.
+  bool rebuild_sender(const nmos::id& sender_id) {  // caller holds the write lock
+    auto csender = nmos::find_resource(model_.connection_resources, { sender_id, nmos::types::sender });
+    auto sender = nmos::find_resource(model_.node_resources, { sender_id, nmos::types::sender });
+    if (model_.connection_resources.end() == csender || model_.node_resources.end() == sender) return false;
+    if (!sender_resolved(*csender)) return false;
+    nmos::modify_resource(model_.connection_resources, sender_id, [&](nmos::resource& cr) {
+      auto tf = build_sender_transportfile(model_.node_resources, ids_, *sender, cr, ptp_domain_);
+      if (!tf.is_null()) cr.data[nmos::fields::endpoint_transportfile] = tf;
+    });
+    return true;
+  }
+
+  utility::string_t current_gmid() {  // clk0's advertised grandmaster; caller holds the lock
+    auto node = nmos::find_resource(model_.node_resources, { ids_.node, nmos::types::node });
+    if (model_.node_resources.end() == node) return {};
+    for (const auto& clk : nmos::fields::clocks(node->data))
+      if (nmos::fields::name(clk) == nmos::clock_names::clk0.name) return nmos::fields::gmid(clk);
+    return {};
   }
 
   // out rate mirrors the engine (st2110_pipeline): up-convert (frc_mode 2) doubles the source rate,
@@ -691,7 +718,8 @@ class OutputFormatSync {
   std::mutex mu_;
   std::condition_variable cv_;
   bool stop_ = false;
-  bool tf_synced_ = false;
+  bool v_sdp_dirty_ = false;
+  bool a_sdp_dirty_ = false;
   std::thread thread_;
 };
 
@@ -752,8 +780,8 @@ int main(int argc, char* argv[]) {
     nmos::server_guard node_server_guard(node_server);
     slog::log<slog::severities::info>(gate, SLOG_FLF) << "Ready for connections";
 
-    // Track the daemon's selected output format and reflect it in our sender flow/SDP (no restart).
-    spark::OutputFormatSync output_format_sync(node_model, gate);
+    // Mirror the daemon's output format + live PTP grandmaster into our flow/clock/SDPs (no restart).
+    spark::NodeStateSync node_state_sync(node_model, gate);
 
     nmos::details::wait_term_signal();
     slog::log<slog::severities::info>(gate, SLOG_FLF) << "Closing connections";
