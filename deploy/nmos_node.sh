@@ -26,7 +26,9 @@ REGISTRY_PORT="${REGISTRY_PORT:-8010}"            # its registration API port
 REGISTRY_VER="${REGISTRY_VER:-v1.3}"
 HOST_ADDR="${HOST_ADDR:-192.0.2.101}"          # this box's media/mgmt IP the node advertises
 HTTP_PORT="${HTTP_PORT:-3242}"                     # multiplexes all of the node's APIs onto one port
-GMID="${GMID:-00-00-5e-ff-fe-00-53-88}"           # PTP grandmaster the node advertises on clk0
+GMID="${GMID:-00-00-5e-ff-fe-00-53-93}"           # PTP grandmaster the node advertises on clk0 (the
+                                                  # current GM on domain 127 — both BMDs lock to this)
+PTP_DOMAIN="${PTP_DOMAIN:-127}"                    # PTP domain -> SDP ts-refclk (must match the GM/ptp4l)
 CONTROL_URL="${CONTROL_URL:-http://127.0.0.1:8080}" # the engine control daemon (IS-05 -> engine)
 LOG_LEVEL="${LOG_LEVEL:-0}"
 LOG="/tmp/spark_nmos_node.log"
@@ -41,7 +43,8 @@ settings_json() {
   "registration_port": $REGISTRY_PORT,
   "registry_version": "$REGISTRY_VER",
   "spark_ptp_gmid": "$GMID",
-  "spark_ptp_traceable": true,
+  "spark_ptp_domain": $PTP_DOMAIN,
+  "spark_ptp_traceable": false,
   "spark_ptp_locked": true,
   "spark_control_url": "$CONTROL_URL"
 }
