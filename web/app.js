@@ -81,9 +81,13 @@ $('stop').onclick = async () => { const a = await api('/api/stop', { method: 'PO
 // re-serves the Query API shape — so no registry is needed. The Node base (IS-05) is unchanged.
 const NMOS = { registry: '', registryUrl: '', node: '', proxy: '', p2p: false, receivers: null };
 
+// Facility NMOS registry (IS-04 Query API). External registry on registry-host.
+// Per-browser override: edit the Registry field in the Discover card (saved to localStorage).
+const DEFAULT_REGISTRY = 'http://192.0.2.41:8010';
+
 function nmosDefaults() {
   const h = location.hostname || 'localhost';
-  return { registry: `http://${h}:3211`, node: `http://${h}:3242`, proxy: `http://${h}:3290` };
+  return { registry: DEFAULT_REGISTRY, node: `http://${h}:3242`, proxy: `http://${h}:3290` };
 }
 function applyDiscoverySource() {
   NMOS.registry = NMOS.p2p ? NMOS.proxy : NMOS.registryUrl;
