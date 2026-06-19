@@ -26,8 +26,8 @@ REGISTRY_PORT="${REGISTRY_PORT:-8010}"            # its registration API port
 REGISTRY_VER="${REGISTRY_VER:-v1.3}"
 HOST_ADDR="${HOST_ADDR:-192.168.18.101}"          # this box's media/mgmt IP the node advertises
 HTTP_PORT="${HTTP_PORT:-3242}"                     # multiplexes all of the node's APIs onto one port
-GMID="${GMID:-7c-2e-0d-ff-fe-1e-4b-93}"           # PTP grandmaster the node advertises on clk0 (the
-                                                  # current GM on domain 127 — both BMDs lock to this)
+GMID="${GMID:-34-84-e4-ff-fe-aa-d9-88}"           # initial PTP grandmaster seed for clk0; the node
+                                                  # auto-tracks the live GM from the daemon (pmc) at runtime
 PTP_DOMAIN="${PTP_DOMAIN:-127}"                    # PTP domain -> SDP ts-refclk (must match the GM/ptp4l)
 CONTROL_URL="${CONTROL_URL:-http://127.0.0.1:8080}" # the engine control daemon (IS-05 -> engine)
 LOG_LEVEL="${LOG_LEVEL:-0}"
