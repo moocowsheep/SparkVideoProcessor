@@ -131,8 +131,23 @@ void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& 
     spark::codec::ip10::ip10_pack_422(dpacked_, src.y, src.cb, src.cr, src.width, src.height, stream_);
   else
     spark::codec::pack_422_10(dpacked_, src.y, src.cb, src.cr, src.width, src.height, stream_);
-  auto host = host_pool_[idx_];
-  idx_ = (idx_ + 1) % host_pool_.size();
+  // Pick a host buffer the TX has finished transmitting. The TX holds the emitted shared_ptr for the
+  // whole ~frame-long send, so use_count()==1 means only the pool still references it (TX released it).
+  // A blind round-robin can lap the in-flight TX buffer under FRC up-convert + motion-driven GPU
+  // latency spikes (pipeline runs many frames deep) and overwrite the frame mid-send — corrupting the
+  // last-sent (bottom) lines (the bottom-tear, worse with motion). If every buffer is still in flight,
+  // grow the pool rather than clobber one; it settles at the working depth and stops growing.
+  std::shared_ptr<std::vector<uint8_t>> host;
+  for (size_t n = 0; n < host_pool_.size(); ++n) {
+    auto& cand = host_pool_[idx_];
+    idx_ = (idx_ + 1) % host_pool_.size();
+    if (cand.use_count() == 1) { host = cand; break; }
+  }
+  if (!host) {
+    host = std::make_shared<std::vector<uint8_t>>(dpacked_bytes_);
+    host_pool_.push_back(host);
+    HOLOSCAN_LOG_INFO("pack: grew host pool to {} buffers (TX holding the rest in flight)", host_pool_.size());
+  }
   cuda_check(cudaMemcpyAsync(host->data(), dpacked_, dpacked_bytes_, cudaMemcpyDeviceToHost, stream_),
              "D2H packed");
   cuda_check(cudaStreamSynchronize(stream_), "pack D2H sync");

@@ -51,6 +51,7 @@ class St2110TxOp : public holoscan::Operator {
   holoscan::Parameter<uint32_t> ssrc_;
   holoscan::Parameter<std::string> eal_cores_;
   holoscan::Parameter<bool> pacing_;
+  holoscan::Parameter<double> pacing_fill_;  // spread a frame over fill×interval (<1 finishes early)
   holoscan::Parameter<bool> manage_eal_;   // false in multi-backend processes (shared DpdkEal)
   holoscan::Parameter<uint32_t> warmup_ms_;  // one-time delay before first send (let RX start first)
 

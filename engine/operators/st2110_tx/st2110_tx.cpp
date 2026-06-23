@@ -45,6 +45,11 @@ void St2110TxOp::setup(holoscan::OperatorSpec& spec) {
   spec.param(ssrc_, "ssrc", "RTP SSRC", "RTP synchronization source id", uint32_t(0x53504b31));
   spec.param(eal_cores_, "eal_cores", "EAL cores", "DPDK lcore list", std::string("0,1"));
   spec.param(pacing_, "pacing", "Enable pacing", "tx_pp hardware send-scheduling", true);
+  // Spread each frame's packets over fill×(frame interval) instead of the whole interval. <1.0 finishes
+  // the frame early so its tail reaches a narrow (2110TPN) receiver before its display deadline — fixes
+  // bottom-of-frame breakup at high rates (e.g. 2160p59.94 IP10). Keep fill above (avg rate / link rate)
+  // so the higher instantaneous rate stays under the receiver's link (e.g. 8.5/10G ⇒ fill ≥ ~0.9).
+  spec.param(pacing_fill_, "pacing_fill", "Pacing fill", "fraction of the frame interval to pace over (<=1.0)", 1.0);
   spec.param(manage_eal_, "manage_eal", "Manage EAL",
              "true: own rte_eal_init; false: shared DpdkEal already up", true);
   spec.param(warmup_ms_, "warmup_ms", "Warmup ms",
@@ -87,10 +92,12 @@ void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
                                                       ssrc_.get());
   const uint32_t ppf = pktz_->packets_per_frame();
   frame_interval_ns_ = static_cast<uint64_t>(1e9 / fmt.fps);
-  gap_ns_ = ppf ? frame_interval_ns_ / ppf : 0;
-  HOLOSCAN_LOG_INFO("st2110_tx: {}x{}@{:.3f}fps -> {} pkts/frame, gap {} ns (~{} pps)", fmt.width,
-                    fmt.height, fmt.fps, ppf, gap_ns_,
-                    static_cast<uint64_t>(ppf * fmt.fps));
+  double fill = pacing_fill_.get();
+  if (!(fill > 0.0) || fill > 1.0) fill = 1.0;  // clamp; finish each frame within fill×interval
+  gap_ns_ = ppf ? static_cast<uint64_t>(frame_interval_ns_ * fill) / ppf : 0;
+  HOLOSCAN_LOG_INFO("st2110_tx: {}x{}@{:.3f}fps -> {} pkts/frame, gap {} ns (~{} pps, fill {:.2f})",
+                    fmt.width, fmt.height, fmt.fps, ppf, gap_ns_,
+                    static_cast<uint64_t>(ppf * fmt.fps), fill);
 }
 
 void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext&,

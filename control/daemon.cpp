@@ -184,6 +184,8 @@ bool start_locked(State& s, std::string& msg) {
     setenv("SPARK_TX_PORT", std::to_string(c.tx_dst_port()).c_str(), 1);
     // Only override the egress source IP when set (NMOS-resolved); empty keeps the engine default.
     if (!c.tx_src().empty()) setenv("SPARK_TX_SRC", c.tx_src().c_str(), 1);
+    // TX pacing fill (narrow-profile): only override when set (>0); 0 keeps the engine default (0.9).
+    if (c.tx_fill() > 0.0) setenv("SPARK_TX_FILL", std::to_string(c.tx_fill()).c_str(), 1);
     setenv("SPARK_TX_AUDIO_MCAST", c.tx_audio_mcast_group().c_str(), 1);
     setenv("SPARK_TX_AUDIO_PORT", std::to_string(c.tx_audio_dst_port()).c_str(), 1);
     execl(g_pipeline.c_str(), g_pipeline.c_str(), (char*)nullptr);
