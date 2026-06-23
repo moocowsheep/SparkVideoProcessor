@@ -26,7 +26,7 @@ class UnpackOp : public holoscan::Operator {
   void stop() override;
 
  private:
-  void ensure(uint32_t width, uint32_t height);
+  void ensure(uint32_t width, uint32_t height, bool ip10);
   cudaStream_t stream_ = nullptr;  // own CUDA stream (H2D + unpack kernel), pipelined vs other ops
   uint8_t* dpacked_ = nullptr;  // device staging for the packed frame
   size_t dpacked_bytes_ = 0;

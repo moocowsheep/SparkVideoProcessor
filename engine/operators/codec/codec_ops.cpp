@@ -29,16 +29,18 @@ void UnpackOp::setup(holoscan::OperatorSpec& spec) {
   spec.output<spark::gpu::GpuFramePtr>("out");
 }
 
-void UnpackOp::ensure(uint32_t width, uint32_t height) {
+void UnpackOp::ensure(uint32_t width, uint32_t height, bool ip10) {
   if (!stream_) cuda_check(cudaStreamCreate(&stream_), "unpack stream");
-  const size_t octets = static_cast<size_t>(width / 2) * height * 5;
+  // IP10 sources arrive as 8-bit codeword pgroups (4 octets/pgroup); raw is 5. The planar GpuFrame
+  // (10-bit Y/Cb/Cr) is identical either way — only the device staging buffer size differs.
+  const size_t octets = static_cast<size_t>(width / 2) * height * (ip10 ? 4 : 5);
   if (dpacked_bytes_ == octets && !pool_.empty()) return;
   if (dpacked_) cudaFree(dpacked_);
   cuda_check(cudaMalloc(reinterpret_cast<void**>(&dpacked_), octets), "cudaMalloc packed");
   dpacked_bytes_ = octets;
   pool_.assign(kRing, nullptr);
   for (auto& f : pool_) f = std::make_shared<spark::gpu::GpuFrame>(width, height);
-  HOLOSCAN_LOG_INFO("unpack: {}x{} ({} octets)", width, height, octets);
+  HOLOSCAN_LOG_INFO("unpack: {}x{} ({} octets, {})", width, height, octets, ip10 ? "IP10 10:8" : "raw 10-bit");
 }
 
 void UnpackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
@@ -47,7 +49,8 @@ void UnpackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext
   if (!in || !in.value().data) return;
   const auto& vf = in.value();
   const auto& fmt = vf.format;
-  ensure(fmt.width, fmt.height);
+  const bool ip10 = fmt.sampling == spark::st2110::Sampling::YCbCr422_8;
+  ensure(fmt.width, fmt.height, ip10);
 
   // Host packed -> device, then unpack to the planar GpuFrame, all on our stream (async H2D is host-
   // synchronous for pageable memory but stays off the default stream, so it doesn't serialize the
@@ -58,7 +61,10 @@ void UnpackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext
              "H2D packed");
   auto dst = pool_[idx_];
   idx_ = (idx_ + 1) % pool_.size();
-  spark::codec::unpack_422_10(dpacked_, dst->y, dst->cb, dst->cr, fmt.width, fmt.height, stream_);
+  if (ip10)
+    spark::codec::ip10::ip10_unpack_422(dpacked_, dst->y, dst->cb, dst->cr, fmt.width, fmt.height, stream_);
+  else
+    spark::codec::unpack_422_10(dpacked_, dst->y, dst->cb, dst->cr, fmt.width, fmt.height, stream_);
   cuda_check(cudaEventRecord(dst->ready, stream_), "unpack record");  // consumers wait on this
   dst->t_ingest_ns = now_ns();  // frame enters the GPU graph here; pack reads this for the latency probe
   op_output.emit(dst, "out");

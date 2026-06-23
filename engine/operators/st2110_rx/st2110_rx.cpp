@@ -24,6 +24,8 @@ void St2110RxOp::setup(holoscan::OperatorSpec& spec) {
              "true: own rte_eal_init; false: shared DpdkEal already up", true);
   spec.param(emit_frames_, "emit_frames", "Emit frames",
              "true: source mode (one VideoFrame per compute); false: terminal sink", false);
+  spec.param(ip10_, "ip10", "IP10 source",
+             "source is Blackmagic IP10 (8-bit 4:2:2 pgroups, decoded to 10-bit downstream)", false);
 }
 
 void St2110RxOp::start() {
@@ -34,6 +36,9 @@ void St2110RxOp::start() {
   if (in_width_.get() > 0) fmt_.width = in_width_.get();
   if (in_height_.get() > 0) fmt_.height = in_height_.get();
   if (in_fps_.get() > 0.0) fmt_.fps = in_fps_.get();
+  // IP10 source: the wire carries 8-bit codeword pgroups (4 octets/pgroup), so the depacketizer
+  // geometry + reassembly buffer must be 8-bit; UnpackOp IP10-decodes them back to 10-bit planar.
+  if (ip10_.get()) fmt_.sampling = spark::st2110::Sampling::YCbCr422_8;
   depkt_ = std::make_unique<spark::st2110::Depacketizer>(fmt_);
   frame_buf_.assign(fmt_.octets_per_frame(), 0);
 
@@ -48,9 +53,9 @@ void St2110RxOp::start() {
   cfg.src_ip = src_ip_.get();
   cfg.iface_ip = iface_ip_.get();
   backend_->init(cfg);
-  HOLOSCAN_LOG_INFO("st2110_rx started: RX {} udp:{} group={} profile={} emit_frames={}", cfg.pci_addr,
+  HOLOSCAN_LOG_INFO("st2110_rx started: RX {} udp:{} group={} profile={} emit_frames={}{}", cfg.pci_addr,
                     cfg.udp_port, cfg.mcast_group.empty() ? "(none)" : cfg.mcast_group, profile_.get(),
-                    emit_frames_.get());
+                    emit_frames_.get(), ip10_.get() ? " IP10" : "");
 
   // Source mode: a dedicated thread drains the NIC continuously (see poll_loop). compute() only
   // pops finished frames, so NIC polling never stalls while TX paces the previous frame.

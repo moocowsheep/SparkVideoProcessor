@@ -49,6 +49,11 @@ message PipelineConfig {
   // over 10G (uncompressed 4K60 ~12 Gbps won't fit). Off ⇒ uncompressed RFC 4175. Maps to SPARK_IP10;
   // the sender SDP then advertises vnd.blackmagicdesign.ip10 (ST 2110-22). JSON: ip10
   bool ip10 = 27;
+
+  // Input source is Blackmagic IP10 (e.g. a Blackmagic 2160p59.94/60 sender). The RX depacketizes
+  // 8-bit codeword pgroups and the unpack stage IP10-decodes them to 10-bit. Maps to SPARK_IN_IP10.
+  // Auto-set by the NMOS bridge from the connected sender's SDP (rtpmap/scheme). JSON: inIp10
+  bool in_ip10 = 28;
 }
 
 enum PipelineState {

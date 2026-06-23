@@ -246,7 +246,7 @@ utility::string_t active_sdp(const value& endpoint_active) {
 class EngineController {
  public:
   struct Rtp { utility::string_t group, src, iface; uint32_t port = 0; bool active = false; };
-  struct VideoFmt { uint32_t width = 0, height = 0, depth = 0; utility::string_t fps, sampling; };
+  struct VideoFmt { uint32_t width = 0, height = 0, depth = 0; utility::string_t fps, sampling; bool ip10 = false; };
 
   EngineController(const utility::string_t& control_url, slog::base_gate& gate)
       : client_(control_url), gate_(gate), worker_([this] { run(); }) {}
@@ -311,11 +311,13 @@ class EngineController {
         c[U("rxAudioSrcIp")] = value::string(U(""));
         c[U("rxAudioDstPort")] = 0;
       }
-      // Input format from the SDP (overrides `profile` when width != 0).
+      // Input format from the SDP (overrides `profile` when width != 0). inIp10 is derived from the
+      // source SDP codec, so it's set (not preserved) — connecting an IP10 source auto-enables decode.
       if (vfmt.width) {
         c[U("inWidth")] = vfmt.width; c[U("inHeight")] = vfmt.height;
         c[U("inExactframerate")] = value::string(vfmt.fps);
         c[U("inDepth")] = vfmt.depth; c[U("inSampling")] = value::string(vfmt.sampling);
+        c[U("inIp10")] = value::boolean(vfmt.ip10);
       }
       // TX egress groups: set when our matching sender is activated, else clear.
       if (!vtx.group.empty()) { c[U("txMcastGroup")] = value::string(vtx.group); c[U("txDstPort")] = vtx.port; }
@@ -387,6 +389,10 @@ void parse_video_fmtp(const utility::string_t& sdp_u, EngineController::VideoFmt
   try { if (!d.empty()) f.depth = std::stoul(d); } catch (...) {}
   f.fps = utility::s2us(grab("exactframerate="));
   f.sampling = utility::s2us(grab("sampling="));
+  // Blackmagic IP10 source: the rtpmap encoding name (or the 10:8 scheme attribute) marks it. The wire
+  // is 8-bit codeword pgroups; the engine RX must IP10-decode them. Drives inIp10 in the pushed config.
+  f.ip10 = sdp.find("vnd.blackmagicdesign.ip10") != std::string::npos ||
+           sdp.find("scheme=10:8") != std::string::npos;
 }
 
 // ----- IS-05 on-activation: translate connection state into engine control via the daemon -----
@@ -539,8 +545,13 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
 
   // ---- video receiver (ingest: ST 2110-20 raw 4:2:2 10-bit) ----
   {
+    // Accept raw AND Blackmagic IP10 (so an IP10 2160p59.94/60 sender's SDP can stage/activate on this
+    // receiver). The format params (sampling/depth/width/height/rate) match the raw constraint_sets below.
     auto receiver = nmos::make_receiver(ids.receiver_v, ids.device, nmos::transports::rtp, interface_names,
-                                        nmos::formats::video, { nmos::media_types::video_raw }, settings);
+                                        nmos::formats::video,
+                                        { nmos::media_types::video_raw,
+                                          nmos::media_type{ U("video/vnd.blackmagicdesign.ip10") } },
+                                        settings);
     receiver.data[nmos::fields::label] = value::string(node_label + U(" - video in"));
     receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({ value_of({
         // Ingest receiver: accept the common broadcast rates (the FRC operator handles rate
