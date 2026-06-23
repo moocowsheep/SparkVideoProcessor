@@ -54,6 +54,11 @@ message PipelineConfig {
   // 8-bit codeword pgroups and the unpack stage IP10-decodes them to 10-bit. Maps to SPARK_IN_IP10.
   // Auto-set by the NMOS bridge from the connected sender's SDP (rtpmap/scheme). JSON: inIp10
   bool in_ip10 = 28;
+
+  // TX egress source IP — MUST match the sender SDP's source-filter, or SSM receivers (e.g. Blackmagic)
+  // filter our packets out and show black. Set by the NMOS bridge from our sender's resolved source_ip;
+  // empty ⇒ engine default. Maps to SPARK_TX_SRC. JSON: txSrc
+  string tx_src = 29;
 }
 
 enum PipelineState {

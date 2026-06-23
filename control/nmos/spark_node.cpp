@@ -322,9 +322,14 @@ class EngineController {
         c[U("inDepth")] = vfmt.depth; c[U("inSampling")] = value::string(vfmt.sampling);
         c[U("inIp10")] = value::boolean(vfmt.ip10);
       }
-      // TX egress groups: set when our matching sender is activated, else clear.
-      if (!vtx.group.empty()) { c[U("txMcastGroup")] = value::string(vtx.group); c[U("txDstPort")] = vtx.port; }
-      else { c[U("txMcastGroup")] = value::string(U("")); c[U("txDstPort")] = 0; }
+      // TX egress groups: set when our matching sender is activated, else clear. txSrc MUST match the
+      // sender SDP's source-filter (vtx.src = the sender's resolved source_ip) or SSM receivers drop us.
+      if (!vtx.group.empty()) {
+        c[U("txMcastGroup")] = value::string(vtx.group); c[U("txDstPort")] = vtx.port;
+        c[U("txSrc")] = value::string(vtx.src);
+      } else {
+        c[U("txMcastGroup")] = value::string(U("")); c[U("txDstPort")] = 0; c[U("txSrc")] = value::string(U(""));
+      }
       if (!atx.group.empty()) { c[U("txAudioMcastGroup")] = value::string(atx.group); c[U("txAudioDstPort")] = atx.port; }
       else { c[U("txAudioMcastGroup")] = value::string(U("")); c[U("txAudioDstPort")] = 0; }
 
