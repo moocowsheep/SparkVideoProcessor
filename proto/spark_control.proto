@@ -59,6 +59,11 @@ message PipelineConfig {
   // filter our packets out and show black. Set by the NMOS bridge from our sender's resolved source_ip;
   // empty ⇒ engine default. Maps to SPARK_TX_SRC. JSON: txSrc
   string tx_src = 29;
+
+  // TX pacing fill: fraction of the frame interval to spread packets over (0<fill<=1). <1 finishes each
+  // frame early so its tail reaches a narrow (2110TPN) receiver before its deadline — fixes bottom-of-
+  // frame breakup at high rates. 0 ⇒ engine default (0.9). Maps to SPARK_TX_FILL. JSON: txFill
+  double tx_fill = 30;
 }
 
 enum PipelineState {

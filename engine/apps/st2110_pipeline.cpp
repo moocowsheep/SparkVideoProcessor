@@ -59,6 +59,9 @@ class St2110Pipeline : public holoscan::Application {
     if (tx_port == 0) tx_port = 20000;
     const bool tx_multicast = !tx_mcast.empty();
     const std::string tx_src = env("SPARK_TX_SRC", "192.168.50.10");  // egress source IP (SDP source-filter)
+    // Pacing fill: finish each frame within fill×interval so the tail reaches a narrow (2110TPN) receiver
+    // before its display deadline. 0.9 default fixes bottom-of-frame breakup at 2160p59.94 IP10 on a 10G BMD.
+    const double tx_fill = std::atof(env("SPARK_TX_FILL", "0.9").c_str());
     // Source format from the SDP (SPARK_IN_*; the NMOS bridge fills these from the sender's fmtp). The
     // real input rate must reach the TX pacer — FRC here is 1:1, so the output rate == the input rate.
     auto parse_rate = [](const std::string& s) -> double {
@@ -98,7 +101,8 @@ class St2110Pipeline : public holoscan::Application {
     auto tx = make_operator<ops::St2110TxOp>(
         "st2110_tx", Arg("pci_addr", tx_pci), Arg("manage_eal", false), Arg("udp_port", tx_port),
         Arg("src_ip", tx_src), Arg("dst_ip", tx_multicast ? tx_mcast : std::string("239.0.0.1")),
-        Arg("dst_mac", tx_multicast ? std::string("00:00:00:00:00:00") : dst_mac));
+        Arg("dst_mac", tx_multicast ? std::string("00:00:00:00:00:00") : dst_mac),
+        Arg("pacing_fill", tx_fill));
     add_flow(rx, unpack);
     // FRC runs BEFORE resize so optical flow + interpolation happen at NATIVE input resolution: pixel
     // displacements stay inside the NVOFA search range (they would double on 2160p-upscaled frames and
