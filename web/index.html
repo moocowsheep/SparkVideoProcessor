@@ -52,6 +52,8 @@
         <label>FRC (motion-comp)
           <select id="frc_mode"><option value="0">off</option><option value="1">retime (1:1)</option><option value="2">up-convert (2×)</option></select></label>
         <label>Frames (0 = continuous) <input id="frames" type="number"></label>
+        <label class="chk" title="Blackmagic IP10 10:8 (ST 2110-22). Required for Blackmagic receivers to accept 2160p59.94/60 over 10G — uncompressed 4K60 won't fit.">
+          <input id="ip10" type="checkbox"> Blackmagic IP10 codec <span class="sub">(2160p59.94/60)</span></label>
       </div>
       <details class="advanced">
         <summary>Advanced — manual transport (overridden by NMOS routing)</summary>

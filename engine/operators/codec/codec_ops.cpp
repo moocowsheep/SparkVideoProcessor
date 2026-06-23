@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 
 #include "../pipeline_caps.hpp"
+#include "ip10_codec.hpp"
 #include "pixel_codec.hpp"
 
 namespace spark::ops {
@@ -90,19 +91,23 @@ void PackOp::setup(holoscan::OperatorSpec& spec) {
                  holoscan::Arg("min_size", static_cast<uint64_t>(1)));
   spec.output<spark::st2110::VideoFrame>("out");
   spec.param(out_fps_, "out_fps", "Output fps", "output RTP media rate (TX pacing)", 60000.0 / 1001.0);
+  spec.param(ip10_, "ip10", "IP10", "Blackmagic IP10 10:8 output (8-bit pgroups, ST 2110-22)", false);
 }
 
 void PackOp::ensure(uint32_t width, uint32_t height) {
   if (!stream_) cuda_check(cudaStreamCreate(&stream_), "pack stream");
-  const size_t octets = static_cast<size_t>(width / 2) * height * 5;
+  // IP10 emits the 10-bit samples as 8-bit codewords -> 4 octets/pgroup; raw stays at 5.
+  const auto sampling =
+      ip10_.get() ? spark::st2110::Sampling::YCbCr422_8 : spark::st2110::Sampling::YCbCr422_10;
+  const size_t octets = static_cast<size_t>(width / 2) * height * (ip10_.get() ? 4 : 5);
   if (dpacked_bytes_ == octets && !host_pool_.empty()) return;
   if (dpacked_) cudaFree(dpacked_);
   cuda_check(cudaMalloc(reinterpret_cast<void**>(&dpacked_), octets), "cudaMalloc packed");
   dpacked_bytes_ = octets;
-  fmt_ = spark::st2110::VideoFormat{width, height, out_fps_.get()};
+  fmt_ = spark::st2110::VideoFormat{width, height, out_fps_.get(), sampling};
   host_pool_.assign(kRing, nullptr);
   for (auto& b : host_pool_) b = std::make_shared<std::vector<uint8_t>>(octets);
-  HOLOSCAN_LOG_INFO("pack: {}x{} ({} octets)", width, height, octets);
+  HOLOSCAN_LOG_INFO("pack: {}x{} ({} octets, {})", width, height, octets, ip10_.get() ? "IP10 10:8" : "raw 10-bit");
 }
 
 void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
@@ -116,7 +121,10 @@ void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& 
   // on our stream. The blocking stream sync (not the default stream) waits only our work, so the host
   // buffer is valid before TX reads it without serializing the other operators.
   cuda_check(cudaStreamWaitEvent(stream_, src.ready, 0), "pack wait input");
-  spark::codec::pack_422_10(dpacked_, src.y, src.cb, src.cr, src.width, src.height, stream_);
+  if (ip10_.get())
+    spark::codec::ip10::ip10_pack_422(dpacked_, src.y, src.cb, src.cr, src.width, src.height, stream_);
+  else
+    spark::codec::pack_422_10(dpacked_, src.y, src.cb, src.cr, src.width, src.height, stream_);
   auto host = host_pool_[idx_];
   idx_ = (idx_ + 1) % host_pool_.size();
   cuda_check(cudaMemcpyAsync(host->data(), dpacked_, dpacked_bytes_, cudaMemcpyDeviceToHost, stream_),

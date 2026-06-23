@@ -44,6 +44,11 @@ message PipelineConfig {
   // FRC mode: 0=off, 1=retime (1:1 motion-comp), 2=up-convert (2x output rate, e.g. 30->60).
   // Supersedes the legacy `frc` bool (frc=true ⇒ mode 1) whenever frc_mode > 0.
   uint32 frc_mode = 26;
+
+  // Blackmagic IP10 (10:8) output codec. Required for Blackmagic receivers to accept 2160p59.94/60
+  // over 10G (uncompressed 4K60 ~12 Gbps won't fit). Off ⇒ uncompressed RFC 4175. Maps to SPARK_IP10;
+  // the sender SDP then advertises vnd.blackmagicdesign.ip10 (ST 2110-22). JSON: ip10
+  bool ip10 = 27;
 }
 
 enum PipelineState {

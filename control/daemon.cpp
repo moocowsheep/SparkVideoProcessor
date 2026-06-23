@@ -161,6 +161,7 @@ bool start_locked(State& s, std::string& msg) {
     // SPARK_FRC is a mode (0=off, 1=retime, 2=up-convert). frc_mode supersedes the legacy frc bool.
     const int frc_mode = c.frc_mode() > 0 ? static_cast<int>(c.frc_mode()) : (c.frc() ? 1 : 0);
     setenv("SPARK_FRC", std::to_string(frc_mode).c_str(), 1);
+    setenv("SPARK_IP10", c.ip10() ? "1" : "0", 1);  // Blackmagic IP10 10:8 output (for 2160p60 to BMD)
     setenv("SPARK_RX_PCI", c.rx_pci().c_str(), 1);
     setenv("SPARK_TX_PCI", c.tx_pci().c_str(), 1);
     setenv("SPARK_DST_MAC", c.dst_mac().c_str(), 1);

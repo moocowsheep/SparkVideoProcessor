@@ -12,6 +12,7 @@
 // Structure follows nmos-cpp's nmos-cpp-node example (BSD-3): a node_implementation supplies the
 // IS-05 callbacks (resolve "auto", build the sender transport file/SDP, on-activated), and a thread
 // inserts our fixed resource set into the model once the server is up.
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -141,12 +142,41 @@ bst::optional<int> ptp_domain_setting(const nmos::settings& s) {
                                             : bst::nullopt;
 }
 
+// Rewrite a raw-video SDP into Blackmagic IP10 (10:8) form. We reuse nmos-cpp's raw-video SDP for the
+// ts-refclk/mediaclk/framerate/components, then swap the codec signalling per the published IP10 spec:
+// encoding name "vnd.blackmagicdesign.ip10", SSN=ST2110-22:2022, TP=2110TPN, and the Blackmagic
+// scheme=10:8 attribute; PM is omitted (defaults to 2110GPM). The wire payload is an 8-bit 4:2:2 RFC
+// 4175 stream of IP10 codewords (see engine ip10_codec), and depth stays 10 (the SOURCE sample depth).
+void apply_ip10_video(nmos::sdp_parameters& sdp) {
+  sdp.rtpmap.encoding_name = U("vnd.blackmagicdesign.ip10");
+  nmos::sdp_parameters::fmtp_t out;
+  const auto carry = [&](const utility::string_t& key) {
+    const auto it = std::find_if(sdp.fmtp.begin(), sdp.fmtp.end(),
+                                 [&](const std::pair<utility::string_t, utility::string_t>& p) { return p.first == key; });
+    if (it != sdp.fmtp.end()) out.push_back(*it);
+  };
+  // Keep (in the spec's example order) the format params the IP10 SDP carries; drop raw-only ones
+  // (PM, TCS, TSMODE, TSDELAY, …) by simply not copying them.
+  carry(U("sampling"));
+  carry(U("depth"));
+  carry(U("width"));
+  carry(U("height"));
+  carry(U("exactframerate"));
+  carry(U("colorimetry"));
+  out.emplace_back(U("SSN"), U("ST2110-22:2022"));
+  out.emplace_back(U("TP"), U("2110TPN"));
+  out.emplace_back(U("scheme"), U("10:8"));
+  sdp.fmtp = std::move(out);
+}
+
 // Build an ST 2110 SDP transport file for a sender from its CURRENT node/source/flow + resolved
 // IS-05 transport params. The flow is read LIVE, so updating its frame_width/height/grain_rate and
-// re-running this regenerates the SDP. Returns null for an unknown sender. Caller holds the model lock.
+// re-running this regenerates the SDP. `ip10` rewrites the VIDEO sender's SDP to Blackmagic IP10 (10:8)
+// — required for 2160p59.94/60 into Blackmagic receivers. Returns null for an unknown sender. Caller
+// holds the model lock.
 value build_sender_transportfile(const nmos::resources& node_resources, const Ids& ids,
                                  const nmos::resource& sender, const nmos::resource& connection_sender,
-                                 bst::optional<int> ptp_domain) {
+                                 bst::optional<int> ptp_domain, bool ip10) {
   nmos::id source_id, flow_id;
   if (connection_sender.id == ids.sender_v) { source_id = ids.source_v; flow_id = ids.flow_v; }
   else if (connection_sender.id == ids.sender_a) { source_id = ids.source_a; flow_id = ids.flow_a; }
@@ -160,11 +190,12 @@ value build_sender_transportfile(const nmos::resources& node_resources, const Id
 
   const std::vector<utility::string_t> mids{ U("PRIMARY") };  // single-path (no ST 2022-7 in v1)
   const nmos::format format{ nmos::fields::format(flow->data) };
-  const auto sdp_params = (nmos::formats::video == format)
+  auto sdp_params = (nmos::formats::video == format)
       ? nmos::make_video_sdp_parameters(node->data, source->data, flow->data, sender.data,
                                         nmos::details::payload_type_video_default, mids, ptp_domain, sdp::type_parameters::type_N)
       : nmos::make_audio_sdp_parameters(node->data, source->data, flow->data, sender.data,
                                         nmos::details::payload_type_audio_default, mids, ptp_domain, 1.0 /*ptime ms*/);
+  if (ip10 && nmos::formats::video == format) apply_ip10_video(sdp_params);  // raw 10-bit -> IP10 10:8
 
   auto& transport_params = nmos::fields::transport_params(nmos::fields::endpoint_active(connection_sender.data));
   auto session_description = nmos::make_session_description(sdp_params, transport_params);
@@ -180,7 +211,10 @@ nmos::connection_sender_transportfile_setter make_spark_transportfile_setter(
   const auto ptp_domain = ptp_domain_setting(settings);
   return [&node_resources, ids, ptp_domain](const nmos::resource& sender, const nmos::resource& connection_sender,
                                 value& endpoint_transportfile) {
-    auto tf = build_sender_transportfile(node_resources, ids, sender, connection_sender, ptp_domain);
+    // ip10=false here: at activation the daemon's IP10 choice isn't known yet. NodeStateSync polls
+    // /api/status and rebuilds the video SDP with the real IP10 state within a few seconds (same
+    // eventual-consistency path it uses for output resolution and the PTP grandmaster).
+    auto tf = build_sender_transportfile(node_resources, ids, sender, connection_sender, ptp_domain, false);
     if (!tf.is_null()) endpoint_transportfile = tf;  // model mutex already held by the calling thread
   };
 }
@@ -598,10 +632,11 @@ class NodeStateSync {
     if (0 == w || 0 == h) return;  // daemon output not configured yet
     const auto gmid = (body.has_field(U("ptpGmid")) && body.at(U("ptpGmid")).is_string())
                           ? body.at(U("ptpGmid")).as_string() : utility::string_t{};
-    apply(w, h, output_rate(cfg_str(c, U("inExactframerate")), cfg_uint(c, U("frcMode"))), gmid);
+    apply(w, h, output_rate(cfg_str(c, U("inExactframerate")), cfg_uint(c, U("frcMode"))), gmid,
+          cfg_bool(c, U("ip10")));
   }
 
-  void apply(uint32_t w, uint32_t h, const nmos::rational& rate, const utility::string_t& gmid) {
+  void apply(uint32_t w, uint32_t h, const nmos::rational& rate, const utility::string_t& gmid, bool ip10) {
     auto lock = model_.write_lock();
     auto flow = nmos::find_resource(model_.node_resources, { ids_.flow_v, nmos::types::flow });
     if (model_.node_resources.end() == flow) return;  // resources not inserted yet
@@ -638,6 +673,13 @@ class NodeStateSync {
       updated = true;
     }
 
+    // (2b) IP10 codec on/off -> video SDP signalling (rtpmap/fmtp). Video sender SDP only.
+    if (ip10 != ip10_) {
+      ip10_ = ip10;
+      v_sdp_dirty_ = true;
+      updated = true;
+    }
+
     // (3) regenerate any dirty sender SDP, once that (auto-activated) sender's transport params resolve.
     if (v_sdp_dirty_ && rebuild_sender(ids_.sender_v)) { v_sdp_dirty_ = false; updated = true; }
     if (a_sdp_dirty_ && rebuild_sender(ids_.sender_a)) { a_sdp_dirty_ = false; updated = true; }
@@ -646,7 +688,7 @@ class NodeStateSync {
       model_.notify();
       slog::log<slog::severities::info>(gate_, SLOG_FLF)
           << "spark nmos: advert -> " << w << "x" << h << " @ " << rate.numerator() << "/" << rate.denominator()
-          << " gmid=" << utility::us2s(current_gmid());
+          << (ip10_ ? " IP10" : "") << " gmid=" << utility::us2s(current_gmid());
     }
   }
 
@@ -658,7 +700,8 @@ class NodeStateSync {
     if (model_.connection_resources.end() == csender || model_.node_resources.end() == sender) return false;
     if (!sender_resolved(*csender)) return false;
     nmos::modify_resource(model_.connection_resources, sender_id, [&](nmos::resource& cr) {
-      auto tf = build_sender_transportfile(model_.node_resources, ids_, *sender, cr, ptp_domain_);
+      // ip10_ only affects the video sender (build_sender_transportfile ignores it for audio).
+      auto tf = build_sender_transportfile(model_.node_resources, ids_, *sender, cr, ptp_domain_, ip10_);
       if (!tf.is_null()) cr.data[nmos::fields::endpoint_transportfile] = tf;
     });
     return true;
@@ -709,6 +752,14 @@ class NodeStateSync {
   static utility::string_t cfg_str(const value& c, const utility::string_t& k) {
     return (c.has_field(k) && c.at(k).is_string()) ? c.at(k).as_string() : utility::string_t{};
   }
+  static bool cfg_bool(const value& c, const utility::string_t& k) {
+    if (!c.has_field(k)) return false;
+    const auto& v = c.at(k);
+    if (v.is_boolean()) return v.as_bool();
+    if (v.is_integer()) return 0 != v.as_integer();
+    if (v.is_string()) { const auto s = utility::us2s(v.as_string()); return s == "1" || s == "true"; }
+    return false;
+  }
 
   nmos::node_model& model_;
   slog::base_gate& gate_;
@@ -720,6 +771,7 @@ class NodeStateSync {
   bool stop_ = false;
   bool v_sdp_dirty_ = false;
   bool a_sdp_dirty_ = false;
+  bool ip10_ = false;  // last-applied IP10 state (from the daemon config); flips -> rebuild video SDP
   std::thread thread_;
 };
 

@@ -62,6 +62,7 @@ target_link_libraries(spark_resize PUBLIC holoscan::core CUDA::cudart CUDA::nppi
 # --- RFC 4175 pixel codec (CUDA kernels) + unpack/pack operators ----------------------------------
 add_library(spark_codec STATIC
   operators/codec/pixel_codec.cu
+  operators/codec/ip10_codec.cu
   operators/codec/codec_ops.cpp
 )
 target_include_directories(spark_codec PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -149,6 +150,13 @@ add_test(NAME rtp_st2110 COMMAND test_rtp_st2110)
 add_executable(test_pixel_codec operators/codec/test/test_pixel_codec.cpp)
 target_link_libraries(test_pixel_codec PRIVATE spark_codec)
 add_test(NAME pixel_codec COMMAND test_pixel_codec)
+
+# Blackmagic IP10 (10:8) codec reference — pure CPU (no GPU), so build the CPU source straight in.
+add_executable(test_ip10_codec
+  operators/codec/test/test_ip10_codec.cpp
+  operators/codec/ip10_codec.cpp)
+target_include_directories(test_ip10_codec PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME ip10_codec COMMAND test_ip10_codec)
 
 # ST 2110 multicast addressing (RFC 1112 MAC + IGMPv3 join); header-only, no DPDK
 add_executable(test_net_addr operators/common/test/test_net_addr.cpp)
