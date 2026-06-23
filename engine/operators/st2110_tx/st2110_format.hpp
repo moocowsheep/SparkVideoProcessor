@@ -15,7 +15,9 @@
 namespace spark::st2110 {
 
 enum class Sampling {
-  YCbCr422_10,  // 2 pixels/pgroup, 5 octets/pgroup (v1 target)
+  YCbCr422_10,  // raw RFC 4175: 2 pixels/pgroup, 5 octets/pgroup (uncompressed broadcast baseline)
+  YCbCr422_8,   // 8-bit 4:2:2 pgroups: 2 pixels/pgroup, 4 octets/pgroup. Carries Blackmagic IP10 (10:8)
+                // codewords, which packetize exactly like an 8-bit raw stream (ST 2110-22). See ip10_codec.hpp.
 };
 
 struct VideoFormat {
@@ -24,12 +26,14 @@ struct VideoFormat {
   double fps = 0.0;                       // e.g. 59.94 (60000/1001)
   Sampling sampling = Sampling::YCbCr422_10;
 
-  // --- RFC 4175 pgroup geometry (4:2:2 10-bit) ---
+  // --- RFC 4175 pgroup geometry ---
+  // 4:2:2 is always 2 pixels per pgroup ({Cb,Y0,Cr,Y1}); only the octet count depends on the sample
+  // width — 10-bit packs to 5 octets, 8-bit (the IP10 codeword stream) is byte-aligned at 4 octets.
   static constexpr uint32_t kPixelsPerPgroup = 2;
-  static constexpr uint32_t kOctetsPerPgroup = 5;
+  uint32_t octets_per_pgroup() const { return sampling == Sampling::YCbCr422_8 ? 4u : 5u; }
 
   uint32_t pgroups_per_line() const { return width / kPixelsPerPgroup; }
-  uint32_t octets_per_line() const { return pgroups_per_line() * kOctetsPerPgroup; }
+  uint32_t octets_per_line() const { return pgroups_per_line() * octets_per_pgroup(); }
   uint64_t octets_per_frame() const {
     return static_cast<uint64_t>(octets_per_line()) * height;
   }
@@ -37,7 +41,7 @@ struct VideoFormat {
   // offset_pixels must be pgroup-aligned (a multiple of kPixelsPerPgroup).
   uint64_t byte_offset(uint32_t line, uint32_t offset_pixels) const {
     return static_cast<uint64_t>(line) * octets_per_line() +
-           (offset_pixels / kPixelsPerPgroup) * kOctetsPerPgroup;
+           (offset_pixels / kPixelsPerPgroup) * octets_per_pgroup();
   }
 };
 

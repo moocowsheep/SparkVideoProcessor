@@ -56,7 +56,7 @@ void test_profile(const char* name, VideoFormat fmt, uint32_t max_payload) {
     if (info.marker) ++markers;
     depkt.scatter(info, buf.data(), recon.data());
     for (int k = 0; k < info.nsrd; ++k) {
-      if (info.srd[k].length % VideoFormat::kOctetsPerPgroup != 0) align_ok = false;
+      if (info.srd[k].length % fmt.octets_per_pgroup() != 0) align_ok = false;
       total_data += info.srd[k].length;
     }
     if (info.marker != (count + 1 == expect_pkts)) marker_last_ok = false;
@@ -82,6 +82,9 @@ int main() {
   test_profile("1080p", profile_1080p(), 1420);
   test_profile("2160p", profile_2160p(), 1420);
   test_profile("1080p tiny-payload", profile_1080p(), 200);  // forces many small / 2-SRD packets
+  // IP10 carries an 8-bit 4:2:2 codeword stream (4 octets/pgroup) — the generalized geometry must
+  // packetize/depacketize it just as faithfully as the 10-bit raw path.
+  test_profile("2160p60 IP10 (8-bit)", VideoFormat{3840, 2160, 60000.0 / 1001.0, Sampling::YCbCr422_8}, 1420);
   if (g_failures == 0) {
     std::printf("\n[PASS] all packetizer/depacketizer checks passed.\n");
     return 0;

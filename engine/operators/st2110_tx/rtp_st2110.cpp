@@ -17,7 +17,7 @@ struct Cursor {
 bool plan_one(const VideoFormat& fmt, uint32_t max_payload, Cursor& c, PacketPlan& out) {
   if (c.line >= fmt.height) return false;
   const uint32_t opl = fmt.octets_per_line();
-  constexpr uint32_t pg = VideoFormat::kOctetsPerPgroup;
+  const uint32_t pg = fmt.octets_per_pgroup();
 
   // Budget for SRD headers + pixel data = UDP payload - 12 (RTP) - 2 (ESN).
   int budget = static_cast<int>(max_payload) - 12 - 2;
@@ -159,7 +159,7 @@ bool Depacketizer::parse(const uint8_t* p, uint32_t len, RxPacketInfo& info) con
   uint32_t data = 0;
   for (int i = 0; i < info.nsrd; ++i) {
     const Srd& s = info.srd[i];
-    if (s.length % VideoFormat::kOctetsPerPgroup != 0) return false;
+    if (s.length % fmt_.octets_per_pgroup() != 0) return false;
     if (s.line_no >= fmt_.height) return false;
     if (fmt_.byte_offset(s.line_no, s.offset_pixels) + s.length > fmt_.octets_per_frame())
       return false;

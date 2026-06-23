@@ -36,6 +36,9 @@ class St2110Pipeline : public holoscan::Application {
     const int64_t frames = std::atoll(env("SPARK_FRAMES", "300").c_str());
     const uint32_t ow = static_cast<uint32_t>(std::atoll(env("SPARK_OUT_W", "3840").c_str()));
     const uint32_t oh = static_cast<uint32_t>(std::atoll(env("SPARK_OUT_H", "2160").c_str()));
+    // Blackmagic IP10 (10:8) output: required for Blackmagic receivers to take 2160p59.94/60 over 10G
+    // (uncompressed 4K60 ~12 Gbps won't fit). Off => uncompressed RFC 4175 (unchanged default path).
+    const bool ip10 = env("SPARK_IP10", "0") != "0";
     const std::string rx_pci = env("SPARK_RX_PCI", "0000:01:00.1");
     const std::string tx_pci = env("SPARK_TX_PCI", "0002:01:00.0");
     const std::string dst_mac = env("SPARK_DST_MAC", "00:00:5e:00:53:30");
@@ -85,7 +88,7 @@ class St2110Pipeline : public holoscan::Application {
     auto unpack = make_operator<ops::UnpackOp>("unpack");
     auto resize = make_operator<ops::ResizeOp>("resize", Arg("out_width", ow), Arg("out_height", oh),
                                                Arg("interp", interp));
-    auto pack = make_operator<ops::PackOp>("pack", Arg("out_fps", out_fps));
+    auto pack = make_operator<ops::PackOp>("pack", Arg("out_fps", out_fps), Arg("ip10", ip10));
     // Multicast egress: pass the group as dst_ip and zero the MAC so the backend derives it (RFC 1112).
     auto tx = make_operator<ops::St2110TxOp>(
         "st2110_tx", Arg("pci_addr", tx_pci), Arg("manage_eal", false), Arg("udp_port", tx_port),
