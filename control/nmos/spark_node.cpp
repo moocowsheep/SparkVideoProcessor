@@ -148,7 +148,10 @@ bst::optional<int> ptp_domain_setting(const nmos::settings& s) {
 // scheme=10:8 attribute; PM is omitted (defaults to 2110GPM). The wire payload is an 8-bit 4:2:2 RFC
 // 4175 stream of IP10 codewords (see engine ip10_codec), and depth stays 10 (the SOURCE sample depth).
 void apply_ip10_video(nmos::sdp_parameters& sdp) {
-  sdp.rtpmap.encoding_name = U("vnd.blackmagicdesign.ip10");
+  // Encoding name: match the spec's *device* example SDP (captured from a real Blackmagic unit), which
+  // uses the hyphenated vendor form "vnd.blackmagic-design.ip10" — Blackmagic receivers parse that. (The
+  // spec prose's unhyphenated "vnd.blackmagicdesign.ip10" is rejected with "SDP parsing" on the wire.)
+  sdp.rtpmap.encoding_name = U("vnd.blackmagic-design.ip10");
   nmos::sdp_parameters::fmtp_t out;
   const auto carry = [&](const utility::string_t& key) {
     const auto it = std::find_if(sdp.fmtp.begin(), sdp.fmtp.end(),
@@ -391,8 +394,9 @@ void parse_video_fmtp(const utility::string_t& sdp_u, EngineController::VideoFmt
   f.sampling = utility::s2us(grab("sampling="));
   // Blackmagic IP10 source: the rtpmap encoding name (or the 10:8 scheme attribute) marks it. The wire
   // is 8-bit codeword pgroups; the engine RX must IP10-decode them. Drives inIp10 in the pushed config.
-  f.ip10 = sdp.find("vnd.blackmagicdesign.ip10") != std::string::npos ||
-           sdp.find("scheme=10:8") != std::string::npos;
+  // Match both vendor spellings ("vnd.blackmagic-design.ip10" / "...blackmagicdesign...") + the scheme.
+  f.ip10 = sdp.find("scheme=10:8") != std::string::npos ||
+           (sdp.find("blackmagic") != std::string::npos && sdp.find("ip10") != std::string::npos);
 }
 
 // ----- IS-05 on-activation: translate connection state into engine control via the daemon -----

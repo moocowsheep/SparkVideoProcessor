@@ -123,11 +123,15 @@ class St2110Pipeline : public holoscan::Application {
 int main() {
   HOLOSCAN_LOG_INFO("ST 2110 pipeline: rx -> unpack -> resize -> pack -> tx (1080p->2160p).");
   auto app = holoscan::make_application<spark::St2110Pipeline>();
+  // max run time (ms). Default 0 = run until stopped (a live feed must not self-terminate); set
+  // SPARK_MAX_MS>0 to bound a test run. Holoscan needs a finite value, so 0 maps to ~1 week.
+  const char* ms = std::getenv("SPARK_MAX_MS");
+  const int64_t max_ms = (ms && std::atoll(ms) > 0) ? std::atoll(ms) : 7LL * 24 * 3600 * 1000;
   app->scheduler(app->make_scheduler<holoscan::MultiThreadScheduler>(
       "mts", holoscan::Arg("worker_thread_number", static_cast<int64_t>(6)),
       holoscan::Arg("stop_on_deadlock", true),
       holoscan::Arg("stop_on_deadlock_timeout", static_cast<int64_t>(3000)),
-      holoscan::Arg("max_duration_ms", static_cast<int64_t>(120000))));
+      holoscan::Arg("max_duration_ms", max_ms)));
   app->run();
   return 0;
 }
