@@ -65,6 +65,7 @@ class St2110RxOp : public holoscan::Operator {
   holoscan::Parameter<double> run_seconds_;
   holoscan::Parameter<bool> manage_eal_;    // false in multi-backend processes (shared DpdkEal)
   holoscan::Parameter<bool> emit_frames_;   // true: source mode (emit one VideoFrame per compute)
+  holoscan::Parameter<bool> ip10_;          // source carries Blackmagic IP10 (8-bit pgroups); decoded downstream
 
   std::unique_ptr<spark::net::ISt2110RxBackend> backend_;
   std::unique_ptr<spark::st2110::Depacketizer> depkt_;

@@ -39,6 +39,10 @@ class St2110Pipeline : public holoscan::Application {
     // Blackmagic IP10 (10:8) output: required for Blackmagic receivers to take 2160p59.94/60 over 10G
     // (uncompressed 4K60 ~12 Gbps won't fit). Off => uncompressed RFC 4175 (unchanged default path).
     const bool ip10 = env("SPARK_IP10", "0") != "0";
+    // IP10 on the INPUT side: the source (e.g. a Blackmagic 2160p60 sender) is IP10-coded, so the RX
+    // depacketizes 8-bit pgroups and the unpack stage IP10-decodes them back to 10-bit. Independent of
+    // the output codec — Spark can receive IP10 and send raw, or vice versa.
+    const bool in_ip10 = env("SPARK_IN_IP10", "0") != "0";
     const std::string rx_pci = env("SPARK_RX_PCI", "0000:01:00.1");
     const std::string tx_pci = env("SPARK_TX_PCI", "0002:01:00.0");
     const std::string dst_mac = env("SPARK_DST_MAC", "00:00:5e:00:53:30");
@@ -80,7 +84,8 @@ class St2110Pipeline : public holoscan::Application {
                                              Arg("emit_frames", true), Arg("udp_port", rx_port),
                                              Arg("mcast_group", rx_mcast), Arg("src_ip", rx_src),
                                              Arg("iface_ip", rx_iface), Arg("in_width", in_w),
-                                             Arg("in_height", in_h), Arg("in_fps", in_fps));
+                                             Arg("in_height", in_h), Arg("in_fps", in_fps),
+                                             Arg("ip10", in_ip10));
     // frames <= 0 => run until stopped (proto contract: 0 = unbounded, e.g. a live NMOS feed);
     // > 0 => bounded run via CountCondition. Without this guard frames=0 made CountCondition(0)
     // gate the RX to zero compute() calls, so the graph emitted nothing and exited at startup.

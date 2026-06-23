@@ -6,8 +6,8 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const CFG = ['profile', 'interp', 'out_width', 'out_height', 'frc_mode', 'ip10', 'frames', 'rx_pci', 'tx_pci', 'dst_mac'];
-const CAMEL = { out_width: 'outWidth', out_height: 'outHeight', frc_mode: 'frcMode', rx_pci: 'rxPci', tx_pci: 'txPci', dst_mac: 'dstMac' };
+const CFG = ['profile', 'interp', 'out_width', 'out_height', 'frc_mode', 'ip10', 'frames', 'rx_pci', 'tx_pci', 'dst_mac', 'in_ip10'];
+const CAMEL = { out_width: 'outWidth', out_height: 'outHeight', frc_mode: 'frcMode', rx_pci: 'rxPci', tx_pci: 'txPci', dst_mac: 'dstMac', in_ip10: 'inIp10' };
 let formLoaded = false;
 
 async function api(path, opts) {

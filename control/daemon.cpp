@@ -162,6 +162,7 @@ bool start_locked(State& s, std::string& msg) {
     const int frc_mode = c.frc_mode() > 0 ? static_cast<int>(c.frc_mode()) : (c.frc() ? 1 : 0);
     setenv("SPARK_FRC", std::to_string(frc_mode).c_str(), 1);
     setenv("SPARK_IP10", c.ip10() ? "1" : "0", 1);  // Blackmagic IP10 10:8 output (for 2160p60 to BMD)
+    setenv("SPARK_IN_IP10", c.in_ip10() ? "1" : "0", 1);  // source is IP10 (decode on RX)
     setenv("SPARK_RX_PCI", c.rx_pci().c_str(), 1);
     setenv("SPARK_TX_PCI", c.tx_pci().c_str(), 1);
     setenv("SPARK_DST_MAC", c.dst_mac().c_str(), 1);
