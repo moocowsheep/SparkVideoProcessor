@@ -92,12 +92,17 @@ void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
                                                       ssrc_.get());
   const uint32_t ppf = pktz_->packets_per_frame();
   frame_interval_ns_ = static_cast<uint64_t>(1e9 / fmt.fps);
+  // ST 2110-21 narrow pacing: spread the frame's packets over the ACTIVE period (T_frame × active/total
+  // lines), the rate a narrow receiver drains at. Pacing faster (the whole frame, or less) sends ahead
+  // of that drain and overflows its small buffer (tail drop); slower delivers the bottom late. `fill` is
+  // a fine-tune on top (default 1.0 = exact active-period rate).
+  const double active = fmt.active_ratio();
   double fill = pacing_fill_.get();
-  if (!(fill > 0.0) || fill > 1.0) fill = 1.0;  // clamp; finish each frame within fill×interval
-  gap_ns_ = ppf ? static_cast<uint64_t>(frame_interval_ns_ * fill) / ppf : 0;
-  HOLOSCAN_LOG_INFO("st2110_tx: {}x{}@{:.3f}fps -> {} pkts/frame, gap {} ns (~{} pps, fill {:.2f})",
+  if (!(fill > 0.0) || fill > 1.0) fill = 1.0;
+  gap_ns_ = ppf ? static_cast<uint64_t>(frame_interval_ns_ * active * fill) / ppf : 0;
+  HOLOSCAN_LOG_INFO("st2110_tx: {}x{}@{:.3f}fps -> {} pkts/frame, gap {} ns (~{} pps, active {:.3f} fill {:.2f})",
                     fmt.width, fmt.height, fmt.fps, ppf, gap_ns_,
-                    static_cast<uint64_t>(ppf * fmt.fps), fill);
+                    static_cast<uint64_t>(ppf * fmt.fps), active, fill);
 }
 
 void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext&,

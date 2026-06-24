@@ -59,9 +59,9 @@ class St2110Pipeline : public holoscan::Application {
     if (tx_port == 0) tx_port = 20000;
     const bool tx_multicast = !tx_mcast.empty();
     const std::string tx_src = env("SPARK_TX_SRC", "192.168.50.10");  // egress source IP (SDP source-filter)
-    // Pacing fill: finish each frame within fill×interval so the tail reaches a narrow (2110TPN) receiver
-    // before its display deadline. 0.9 default fixes bottom-of-frame breakup at 2160p59.94 IP10 on a 10G BMD.
-    const double tx_fill = std::atof(env("SPARK_TX_FILL", "0.9").c_str());
+    // Pacing fill: fine-tune on top of the ST 2110-21 active-period rate (the TX paces over T_active by
+    // default now). 1.0 = exact narrow rate; lower only if a receiver needs the tail even earlier.
+    const double tx_fill = std::atof(env("SPARK_TX_FILL", "1.0").c_str());
     // Source format from the SDP (SPARK_IN_*; the NMOS bridge fills these from the sender's fmtp). The
     // real input rate must reach the TX pacer — FRC here is 1:1, so the output rate == the input rate.
     auto parse_rate = [](const std::string& s) -> double {
