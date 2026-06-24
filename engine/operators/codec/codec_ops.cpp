@@ -67,6 +67,7 @@ void UnpackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext
     spark::codec::unpack_422_10(dpacked_, dst->y, dst->cb, dst->cr, fmt.width, fmt.height, stream_);
   cuda_check(cudaEventRecord(dst->ready, stream_), "unpack record");  // consumers wait on this
   dst->t_ingest_ns = now_ns();  // frame enters the GPU graph here; pack reads this for the latency probe
+  dst->capture_ts_ns = vf.capture_ts_ns;  // carry the source frame timing through for TX genlock
   op_output.emit(dst, "out");
 }
 
@@ -174,6 +175,7 @@ void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& 
   spark::st2110::VideoFrame out;
   out.data = host;
   out.format = fmt_;
+  out.capture_ts_ns = src.capture_ts_ns;  // source frame timing -> TX genlock
   op_output.emit(out, "out");
 }
 

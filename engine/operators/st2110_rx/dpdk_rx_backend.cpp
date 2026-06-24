@@ -84,6 +84,17 @@ class DpdkRxBackend final : public ISt2110RxBackend {
   }
 
   uint16_t receive(RxPacket* out, uint16_t max) override {
+    // Periodic IGMP membership renewal (group mode only). Checked rarely from this hot path: every
+    // ~256k calls read the PHC clock, and re-send the join every 30s — keeps switch forwarding alive
+    // even across a brief source gap, so the stream never freezes from an aged-out membership.
+    if (group_be_ && (++igmp_poll_ & 0x3FFFF) == 0) {
+      const uint64_t t = now_ns();
+      if (last_igmp_ns_ == 0) last_igmp_ns_ = t;
+      else if (t - last_igmp_ns_ > 30000000000ULL) {
+        send_igmp_join();
+        last_igmp_ns_ = t;
+      }
+    }
     rte_mbuf* bufs[kRxBurst];
     const uint16_t want = max < kRxBurst ? max : kRxBurst;
     const uint16_t n = rte_eth_rx_burst(port_, 0, bufs, want);
@@ -271,6 +282,12 @@ class DpdkRxBackend final : public ISt2110RxBackend {
   uint64_t rx_ts_flag_ = 0;
   bool have_ts_ = false;
   uint64_t raw_received_ = 0;
+  // IGMP membership keepalive: the switch's snooping ages out a group ~260s after the last report, so
+  // a single join at start makes the stream freeze after a few minutes. Re-send the membership report
+  // periodically (well under the query interval) to hold the forwarding state. last_igmp_ns_ is on the
+  // NIC PHC clock; igmp_poll_ throttles how often we read that clock from the hot receive() path.
+  uint64_t last_igmp_ns_ = 0;
+  uint32_t igmp_poll_ = 0;
 };
 
 }  // namespace

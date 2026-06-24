@@ -87,6 +87,7 @@ void FrcOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& o
                           flow_.grid_size(), *mid, wmap_, static_cast<float>(phase_.get()), stream_);
   cudaEventRecord(mid->ready, stream_);  // mid is ready once interpolate completes on stream_
   mid->t_ingest_ns = cur->t_ingest_ns;   // mid rides cur's ingest time for the latency probe
+  mid->capture_ts_ns = cur->capture_ts_ns;  // carry source frame timing (genlock is IP10-only; FRC off there)
   ++frames_;
   prev_ = cur;
 

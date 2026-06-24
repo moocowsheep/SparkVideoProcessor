@@ -1,8 +1,32 @@
 #include "st2110_rx.hpp"
 
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 
 namespace spark::ops {
+
+// Capture per-packet HW arrival time + line number for pacing analysis. SPARK_RX_CAPTURE=N records the
+// first N matched packets (relative ns) and writes a CSV once full — reveals the sender's gapped schedule.
+void St2110RxOp::cap_record(const spark::st2110::RxPacketInfo& info, const spark::net::RxPacket& pkt) {
+  if (!cap_target_ || cap_done_) return;
+  if (cap_.empty()) cap_t0_ = pkt.has_timestamp ? pkt.hw_timestamp_ns : 0;
+  cap_.push_back({pkt.has_timestamp ? pkt.hw_timestamp_ns - cap_t0_ : 0,
+                  static_cast<uint16_t>(info.nsrd ? info.srd[0].line_no : 0),
+                  static_cast<uint8_t>(info.nsrd), static_cast<uint8_t>(info.marker ? 1 : 0),
+                  static_cast<uint16_t>(pkt.len)});
+  if (cap_.size() >= cap_target_) {
+    if (FILE* f = std::fopen("/tmp/spark_rx_capture.csv", "w")) {
+      std::fprintf(f, "t_ns,line,nsrd,marker,len\n");
+      for (const auto& p : cap_)
+        std::fprintf(f, "%llu,%u,%u,%u,%u\n", static_cast<unsigned long long>(p.t_ns), p.line, p.nsrd,
+                     p.marker, p.len);
+      std::fclose(f);
+    }
+    HOLOSCAN_LOG_INFO("st2110_rx: captured {} packets -> /tmp/spark_rx_capture.csv", cap_.size());
+    cap_done_ = true;
+  }
+}
 
 void St2110RxOp::setup(holoscan::OperatorSpec& spec) {
   // Output used only in source mode (emit_frames=true); harmlessly unconnected in sink mode.
@@ -53,9 +77,14 @@ void St2110RxOp::start() {
   cfg.src_ip = src_ip_.get();
   cfg.iface_ip = iface_ip_.get();
   backend_->init(cfg);
-  HOLOSCAN_LOG_INFO("st2110_rx started: RX {} udp:{} group={} profile={} emit_frames={}{}", cfg.pci_addr,
+  if (const char* c = std::getenv("SPARK_RX_CAPTURE")) {
+    cap_target_ = static_cast<uint32_t>(std::atoll(c));
+    if (cap_target_) cap_.reserve(cap_target_);
+  }
+  HOLOSCAN_LOG_INFO("st2110_rx started: RX {} udp:{} group={} profile={} emit_frames={}{}{}", cfg.pci_addr,
                     cfg.udp_port, cfg.mcast_group.empty() ? "(none)" : cfg.mcast_group, profile_.get(),
-                    emit_frames_.get(), ip10_.get() ? " IP10" : "");
+                    emit_frames_.get(), ip10_.get() ? " IP10" : "",
+                    cap_target_ ? " CAPTURE" : "");
 
   // Source mode: a dedicated thread drains the NIC continuously (see poll_loop). compute() only
   // pops finished frames, so NIC polling never stalls while TX paces the previous frame.
@@ -85,9 +114,18 @@ std::shared_ptr<std::vector<uint8_t>> St2110RxOp::next_buffer() {
     buf_ring_.resize(8);
     for (auto& b : buf_ring_) b = std::make_shared<std::vector<uint8_t>>(fmt_.octets_per_frame());
   }
-  auto b = buf_ring_[buf_idx_];
-  buf_idx_ = (buf_idx_ + 1) % buf_ring_.size();
-  return b;
+  // Hand back a buffer that ONLY the ring references (use_count == 1). A buffer still held by a queued
+  // or in-flight frame must never be reused — overwriting it mid-pipeline corrupts a frame that's about
+  // to be sent (visible as glitches under a transient queue backlog). If every ring slot is in flight,
+  // grow the ring instead of overwriting.
+  for (size_t k = 0; k < buf_ring_.size(); ++k) {
+    auto& b = buf_ring_[buf_idx_];
+    buf_idx_ = (buf_idx_ + 1) % buf_ring_.size();
+    if (b.use_count() == 1) return b;
+  }
+  auto nb = std::make_shared<std::vector<uint8_t>>(fmt_.octets_per_frame());
+  buf_ring_.push_back(nb);
+  return nb;
 }
 
 void St2110RxOp::compute(holoscan::InputContext&, holoscan::OutputContext& op_output,
@@ -116,6 +154,7 @@ void St2110RxOp::compute_sink() {
         continue;
       }
       account(info, pkts[i], now);
+      cap_record(info, pkts[i]);
       depkt_->scatter(info, pkts[i].payload, frame_buf_.data());
       if (info.marker) ++frames_;
     }
@@ -145,6 +184,7 @@ void St2110RxOp::poll_loop() {
         continue;
       }
       account(info, pkts[i], now);
+      cap_record(info, pkts[i]);
       if (cur_first_) {
         cur_ts_ = info.rtp_timestamp;
         cur_first_ = false;
@@ -160,8 +200,14 @@ void St2110RxOp::poll_loop() {
           std::lock_guard<std::mutex> lk(q_mu_);
           if (frame_q_.size() < kMaxQ)
             frame_q_.push_back(std::move(f));
-          else
+          else {
             ++q_dropped_;
+            // Surface queue overflow (downstream/TX briefly fell behind) so transient stalls are visible
+            // in the log with timestamps — rate-limited to avoid flooding during a burst.
+            if (q_dropped_ == 1 || (q_dropped_ % 20) == 0)
+              HOLOSCAN_LOG_WARN("st2110_rx: frame queue full (depth {}) — dropped {} frames total",
+                                kMaxQ, q_dropped_);
+          }
         }
         q_cv_.notify_one();
         cur_buf_ = next_buffer();

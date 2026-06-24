@@ -118,6 +118,7 @@ void ResizeOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext
   }
   cudaEventRecord(dst->ready, stream_);  // consumers (pack) wait on this before reading dst
   dst->t_ingest_ns = src.t_ingest_ns;    // carry the ingest time through resize for the latency probe
+  dst->capture_ts_ns = src.capture_ts_ns;  // carry source frame timing through for TX genlock
   ++frames_;
 
   op_output.emit(dst, "out");

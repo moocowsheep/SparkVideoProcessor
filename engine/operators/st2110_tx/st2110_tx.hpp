@@ -48,6 +48,10 @@ class St2110TxOp : public holoscan::Operator {
   holoscan::Parameter<uint32_t> tx_pp_ns_;
   holoscan::Parameter<uint32_t> txd_;
   holoscan::Parameter<uint32_t> pacing_horizon_ns_;  // keep schedule within this of the NIC clock
+  // Lead the schedule base over the NIC clock on (re)anchor. 0 = use pacing_horizon_ns_ (legacy). A
+  // SMALL lead with a LARGE horizon lets compute() submit a whole frame to the NIC at once and return
+  // in ~ms — the NIC tx_pp HW-paces it, leaving ~a frame of slack so jitter never lags the grid.
+  holoscan::Parameter<uint32_t> reanchor_lead_ns_;
   holoscan::Parameter<uint32_t> ssrc_;
   holoscan::Parameter<std::string> eal_cores_;
   holoscan::Parameter<bool> pacing_;
@@ -58,12 +62,19 @@ class St2110TxOp : public holoscan::Operator {
   // --- runtime state ---
   std::unique_ptr<spark::net::ISt2110TxBackend> backend_;
   std::unique_ptr<spark::st2110::Packetizer> pktz_;
-  uint64_t gap_ns_ = 0;             // per-packet pacing interval
+  uint64_t gap_ns_ = 0;             // per-packet pacing interval (even/linear)
+  // Gapped (2110TPN) pacing for IP10: each line's packets burst early in its line slot then idle,
+  // matching the Blackmagic reference. pace_gapped_ enables it; else even gap_ns_ is used.
+  bool pace_gapped_ = false;
+  uint64_t t_line_ns_ = 0;          // duration of one raster line slot (T_active / active_lines)
+  uint64_t intra_gap_ns_ = 0;       // spacing between a line's packets (bunched within the slot)
   uint64_t frame_interval_ns_ = 0;  // 1e9 / fps
   uint64_t schedule_base_ns_ = 0;   // send time of the current frame's first packet
   uint64_t media_ts_ns_ = 0;        // monotonic RTP media clock (anchored once; +interval per frame)
   uint64_t frames_sent_ = 0;
   uint64_t packets_sent_ = 0;
+  uint64_t reanchors_ = 0;  // grid resyncs (should be near-zero; high = a real upstream stall)
+  uint64_t genlock_offset_ = 0;  // send_base = source capture_ts + this (calibrated once; GM-locked => const)
   bool throttle_enabled_ = true;  // self-disables if the spin caps out (likely now_ns() unit issue)
   bool warmed_ = false;
   double last_live_s_ = 0;

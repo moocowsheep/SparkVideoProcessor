@@ -42,6 +42,8 @@ void St2110TxOp::setup(holoscan::OperatorSpec& spec) {
   spec.param(pacing_horizon_ns_, "pacing_horizon_ns", "Pacing horizon",
              "Schedule lead over the NIC clock — jitter buffer (keep < txd*gap and < tx_pp window)",
              uint32_t(8000000));
+  spec.param(reanchor_lead_ns_, "reanchor_lead_ns", "Re-anchor lead",
+             "schedule base lead over NIC clock on (re)anchor; 0 = use pacing_horizon_ns", uint32_t(0));
   spec.param(ssrc_, "ssrc", "RTP SSRC", "RTP synchronization source id", uint32_t(0x53504b31));
   spec.param(eal_cores_, "eal_cores", "EAL cores", "DPDK lcore list", std::string("0,1"));
   spec.param(pacing_, "pacing", "Enable pacing", "tx_pp hardware send-scheduling", true);
@@ -82,8 +84,8 @@ void St2110TxOp::emit_live(bool force) {
   if (!force && t - last_live_s_ < 1.0) return;
   last_live_s_ = t;
   const spark::net::TxStats s = backend_ ? backend_->stats() : spark::net::TxStats{};
-  HOLOSCAN_LOG_INFO("spark_live tx_frames={} tx_packets={} tx_future_err={} tx_past_err={}",
-                    frames_sent_, packets_sent_, s.future_errors, s.past_errors);
+  HOLOSCAN_LOG_INFO("spark_live tx_frames={} tx_packets={} tx_future_err={} tx_past_err={} tx_reanchors={}",
+                    frames_sent_, packets_sent_, s.future_errors, s.past_errors, reanchors_);
 }
 
 void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
@@ -103,6 +105,23 @@ void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
   HOLOSCAN_LOG_INFO("st2110_tx: {}x{}@{:.3f}fps -> {} pkts/frame, gap {} ns (~{} pps, active {:.3f} fill {:.2f})",
                     fmt.width, fmt.height, fmt.fps, ppf, gap_ns_,
                     static_cast<uint64_t>(ppf * fmt.fps), active, fill);
+
+  // Gapped (2110TPN) pacing for IP10: deliver each line's packets bunched early in its line slot, then
+  // idle — exactly how the Blackmagic reference paces (measured: ~6 pkts/line at ~1082 ns spacing, then
+  // a ~2 us gap to the next line). Even pacing puts a line's LAST packet at the slot end, too late for
+  // the receiver's per-line drain -> tail-of-line drop, which IP10's per-line context then smears into
+  // colored line corruption. Raw 10-bit stays on the even gap_ns_ schedule (validated).
+  pace_gapped_ = (fmt.sampling == spark::st2110::Sampling::YCbCr422_8) && fmt.height > 0;
+  if (pace_gapped_) {
+    t_line_ns_ = static_cast<uint64_t>(frame_interval_ns_ * active * fill) / fmt.height;
+    const uint32_t pix_per_pkt = payload_size_.get() > 20 ? payload_size_.get() - 20 : 1;
+    const uint32_t ppl = (fmt.octets_per_line() + pix_per_pkt - 1) / pix_per_pkt;  // packets per line
+    // Spread the line's packets across ~73% of the slot (the measured BMD burst fraction), leaving the
+    // tail of the slot idle. ppl-1 gaps for ppl packets.
+    intra_gap_ns_ = (ppl > 1) ? (t_line_ns_ * 73) / (100 * (ppl - 1)) : gap_ns_;
+    HOLOSCAN_LOG_INFO("st2110_tx: gapped pacing — T_line {} ns, {} pkts/line, intra-gap {} ns", t_line_ns_,
+                      ppl, intra_gap_ns_);
+  }
 }
 
 void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext&,
@@ -124,12 +143,53 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
       std::this_thread::sleep_for(std::chrono::milliseconds(warmup_ms_.get()));
   }
 
-  // (Re)anchor the schedule: on the first frame, or if we have fallen behind the NIC clock, restart
-  // the schedule one horizon ahead so the very first packet is schedulable (not already in the past).
   const uint64_t now = backend_->now_ns();
-  if (schedule_base_ns_ == 0 || now + frame_interval_ns_ > schedule_base_ns_ + frame_interval_ns_) {
-    if (schedule_base_ns_ == 0 || now > schedule_base_ns_)
+  const uint64_t tgt = reanchor_lead_ns_.get();
+  if (tgt > 0 && frame.capture_ts_ns != 0) {
+    // GENLOCK (IP10): anchor the send base to the SOURCE's frame timing (capture_ts, from the sender's RTP
+    // clock, plumbed through the GPU stages) plus a calibrated constant offset. capture_ts advances at the
+    // source rate and is jitter-free — unlike the compute-time NIC clock, whose pipeline jitter forced
+    // every free-running-grid scheme into a no-win: hard corrections showed as dips to black, smooth ones
+    // let the lead erode into unpaced past-error bursts (colored lines). With GM-lock the source-clock vs
+    // NIC-clock offset is constant, so one calibration holds and the base tracks the source smoothly: no
+    // jumps (no dips) and a steady lead (no past-errors). Recalibrate only if a latency spike or RTP wrap
+    // pushes the lead out of a safe band (rare, single-frame).
+    // Constant offset => base = capture_ts + offset is PERFECTLY source-locked and smooth (no per-frame
+    // step), so the only thing that can disturb the receiver is a re-calibration. Keep the offset fixed
+    // and re-calibrate ONLY when the lead leaves a wide band: below tgt/4 (a real latency spike about to
+    // past-error -> colored lines) or above 2 frames (RTP-clock wrap / sustained queue growth). With a
+    // generous tgt the band is rarely tripped, so corrections (and thus dips) are rare while past-errors
+    // stay at zero.
+    if (genlock_offset_ == 0) genlock_offset_ = (now + tgt) - frame.capture_ts_ns;
+    int64_t gbase = static_cast<int64_t>(frame.capture_ts_ns) + static_cast<int64_t>(genlock_offset_);
+    const int64_t lead = gbase - static_cast<int64_t>(now);
+    if (lead < static_cast<int64_t>(tgt) / 4 || lead > 2 * static_cast<int64_t>(frame_interval_ns_)) {
+      genlock_offset_ = (now + tgt) - frame.capture_ts_ns;  // re-center the lead (rare)
+      gbase = static_cast<int64_t>(now) + static_cast<int64_t>(tgt);
+      ++reanchors_;
+    }
+    schedule_base_ns_ = static_cast<uint64_t>(gbase);
+  } else if (tgt > 0) {
+    // Fallback (capture_ts unavailable): smooth bounded-lead servo on the compute clock — hold the
+    // schedule ~tgt ahead, nudging a fraction of the error per frame; hard-resync only on a gross stall.
+    if (schedule_base_ns_ == 0) {
+      schedule_base_ns_ = now + tgt;
+    } else {
+      const int64_t err = static_cast<int64_t>(now + tgt) - static_cast<int64_t>(schedule_base_ns_);
+      if (err > static_cast<int64_t>(frame_interval_ns_) ||
+          err < -static_cast<int64_t>(frame_interval_ns_)) {
+        schedule_base_ns_ = now + tgt;
+        ++reanchors_;
+      } else {
+        schedule_base_ns_ += err / 8;
+      }
+    }
+  } else {
+    // Legacy fixed grid (raw path): re-anchor only on a genuine >1-frame stall.
+    if (schedule_base_ns_ == 0 || now > schedule_base_ns_ + frame_interval_ns_) {
+      if (schedule_base_ns_ != 0) ++reanchors_;
       schedule_base_ns_ = now + pacing_horizon_ns_;
+    }
   }
   const uint64_t base = schedule_base_ns_;
   const bool pace = pacing_.get();
@@ -145,8 +205,26 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
   media_ts_ns_ += frame_interval_ns_;
 
   uint32_t i = 0;
+  uint32_t pace_line = 0xffffffffu, pace_intra = 0;
   for (spark::st2110::PacketPlan p; pktz_->next(p); ++i) {
-    const uint64_t send_ts = base + static_cast<uint64_t>(i) * gap_ns_;
+    uint64_t send_ts;
+    if (pace_gapped_) {
+      // Per-line slot: line L's packets fire at L*T_line + k*intra_gap (k = packet index within line L),
+      // an early burst then idle — matching the BMD reference. Lines arrive in order, so send_ts is
+      // monotonic and the closed-loop throttle below still applies cleanly.
+      const uint32_t line = (p.nsrd > 0) ? p.srd[0].line_no : 0;
+      if (line != pace_line) {
+        pace_line = line;
+        pace_intra = 0;
+      } else {
+        ++pace_intra;
+      }
+      send_ts = base + static_cast<uint64_t>(line) * t_line_ns_ +
+                static_cast<uint64_t>(pace_intra) * intra_gap_ns_;
+    } else {
+      send_ts = base + static_cast<uint64_t>(i) * gap_ns_;
+    }
+    if (send_ts < now) send_ts = now;  // grid briefly behind the NIC clock: send now, never past-stamp
     // Closed-loop throttle (the gate-4 lesson): keep the in-flight schedule within the tx_pp window
     // so packets never become future_errors. A real-time sender is *meant* to wait here. Guarded by
     // an independent wall-clock cap so a now_ns() unit mismatch (// BRINGUP) surfaces as future_errors
@@ -179,9 +257,9 @@ void St2110TxOp::stop() {
   emit_live(true);  // final live snapshot for the daemon
   const auto s = backend_->stats();
   HOLOSCAN_LOG_INFO(
-      "st2110_tx stopped: frames={} packets={} | tx_pp jitter={}ns wander={}ns sync_lost={} "
-      "future_err={} past_err={}",
-      frames_sent_, packets_sent_, s.jitter_ns, s.wander_ns, s.sync_lost, s.future_errors,
+      "st2110_tx stopped: frames={} packets={} reanchors={} | tx_pp jitter={}ns wander={}ns "
+      "sync_lost={} future_err={} past_err={}",
+      frames_sent_, packets_sent_, reanchors_, s.jitter_ns, s.wander_ns, s.sync_lost, s.future_errors,
       s.past_errors);
   backend_->shutdown();
   backend_.reset();
