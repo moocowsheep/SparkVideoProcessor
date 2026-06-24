@@ -32,6 +32,18 @@ struct VideoFormat {
   static constexpr uint32_t kPixelsPerPgroup = 2;
   uint32_t octets_per_pgroup() const { return sampling == Sampling::YCbCr422_8 ? 4u : 5u; }
 
+  // SMPTE total raster lines (active + vertical blanking) for the progressive formats we emit. ST
+  // 2110-21 narrow pacing spreads a frame's packets over the ACTIVE period only (T_frame × height/total),
+  // because the receiver drains at the raster line rate and the V-blanking lines carry no packets. The
+  // 1125-line family: 1080p=1125, 2160p=2250 (2×1125); 720p=750. Unknown sizes fall back to no blanking.
+  uint32_t total_lines() const {
+    if (height == 1080) return 1125;
+    if (height == 2160) return 2250;
+    if (height == 720) return 750;
+    return height;
+  }
+  double active_ratio() const { return total_lines() ? static_cast<double>(height) / total_lines() : 1.0; }
+
   uint32_t pgroups_per_line() const { return width / kPixelsPerPgroup; }
   uint32_t octets_per_line() const { return pgroups_per_line() * octets_per_pgroup(); }
   uint64_t octets_per_frame() const {

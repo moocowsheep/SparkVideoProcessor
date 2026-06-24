@@ -170,6 +170,30 @@ void apply_ip10_video(nmos::sdp_parameters& sdp) {
   out.emplace_back(U("TP"), U("2110TPN"));
   out.emplace_back(U("scheme"), U("10:8"));
   sdp.fmtp = std::move(out);
+
+  // Declare b=AS (application-specific bandwidth). Blackmagic's own IP10 SDP carries it (e.g. b=AS:8262000
+  // for 2160p59.94) and a receiver may size its buffer from it; without it BiDirect can under-allocate and
+  // drop the frame tail (bottom-of-frame). Compute from the 8-bit IP10 geometry: (w/2)*h*4 octets/frame
+  // × 8 × fps, + ~4% header overhead, in kbps.
+  const auto fval = [&](const utility::string_t& k) -> utility::string_t {
+    const auto it = std::find_if(sdp.fmtp.begin(), sdp.fmtp.end(),
+                                 [&](const std::pair<utility::string_t, utility::string_t>& p) { return p.first == k; });
+    return it != sdp.fmtp.end() ? it->second : utility::string_t{};
+  };
+  const auto num = [](const utility::string_t& s) -> double {
+    const std::string v = utility::us2s(s);
+    const auto sl = v.find('/');
+    try {
+      if (sl == std::string::npos) return std::stod(v);
+      const double n = std::stod(v.substr(0, sl)), d = std::stod(v.substr(sl + 1));
+      return d != 0.0 ? n / d : 0.0;
+    } catch (...) { return 0.0; }
+  };
+  const double w = num(fval(U("width"))), h = num(fval(U("height"))), fps = num(fval(U("exactframerate")));
+  if (w > 0 && h > 0 && fps > 0) {
+    const uint64_t kbps = static_cast<uint64_t>((w / 2.0) * h * 4.0 * 8.0 * fps / 1000.0 * 1.04);
+    sdp.bandwidth = nmos::sdp_parameters::bandwidth_t{ sdp::bandwidth_types::application_specific, kbps };
+  }
 }
 
 // Build an ST 2110 SDP transport file for a sender from its CURRENT node/source/flow + resolved
