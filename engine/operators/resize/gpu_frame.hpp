@@ -27,6 +27,9 @@ struct GpuFrame {
   // Latency probe: steady_clock ns stamped when the frame enters the GPU graph (unpack), propagated
   // through frc/resize, read at pack egress. 0 = unset (host-only; device kernels never touch it).
   uint64_t t_ingest_ns = 0;
+  // Source frame timing (the RX's capture_ts_ns, from the sender's RTP clock), propagated unpack->pack
+  // so the TX can genlock its send schedule to the source instead of a free-running grid. 0 = unset.
+  uint64_t capture_ts_ns = 0;
 
   GpuFrame() = default;
   GpuFrame(uint32_t w, uint32_t h) { alloc(w, h); }

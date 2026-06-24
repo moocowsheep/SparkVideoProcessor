@@ -41,6 +41,10 @@ bool plan_one(const VideoFormat& fmt, uint32_t max_payload, Cursor& c, PacketPla
       c.octet = 0;
       ++c.line;
     }
+    // Blackmagic IP10 packetizes line-aligned — one SRD per packet, never spanning a line boundary
+    // (measured: 6 packets/line of 1280 octets). Match it for IP10 (8-bit) so our packet structure equals
+    // the BMD reference; raw 10-bit keeps multi-SRD spanning (its prior, validated behaviour).
+    if (fmt.sampling == Sampling::YCbCr422_8) break;
   }
 
   uint32_t data = 0;

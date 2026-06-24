@@ -102,7 +102,26 @@ class St2110Pipeline : public holoscan::Application {
         "st2110_tx", Arg("pci_addr", tx_pci), Arg("manage_eal", false), Arg("udp_port", tx_port),
         Arg("src_ip", tx_src), Arg("dst_ip", tx_multicast ? tx_mcast : std::string("239.0.0.1")),
         Arg("dst_mac", tx_multicast ? std::string("00:00:00:00:00:00") : dst_mac),
-        Arg("pacing_fill", tx_fill));
+        Arg("pacing_fill", tx_fill),
+        // IP10: 1300-octet UDP payload -> 1280 pixel octets -> exactly 6 packets per 2160p line, matching
+        // the Blackmagic reference (line-aligned). Raw keeps the ~1420 budget.
+        Arg("payload_size", ip10 ? uint32_t(1300) : uint32_t(1420)),
+        // IP10 HW pacing: a 2160p frame is ~12960 packets, so give the ring room for a whole frame and a
+        // horizon that lets compute() submit it all at once with only a small schedule lead. The NIC
+        // tx_pp then HW-paces the frame while compute() returns in ~ms — ~a frame of slack absorbs
+        // pipeline jitter so the cadence grid never lags (no past-errors / re-anchors / dropped frames).
+        // IP10 pacing. The throttle spin (horizon 8ms) is kept: it both HW-paces (submits each packet
+        // ~8ms ahead for tx_pp) AND backpressures the compute() rate to one frame per interval, so the tx
+        // never drains the RX queue in bursts (which collapses frame spacing). The bounded-lead re-anchor
+        // (reanchor_lead) then holds the schedule a stable 8ms ahead of the NIC clock: the spin keeps the
+        // lead steady frame-to-frame, so the band only trips on real drift — no per-frame slip (drops) and
+        // no eroded lead (unpaced past-error bursts -> colored lines). txd gives the 8ms horizon headroom.
+        Arg("txd", ip10 ? uint32_t(16384) : uint32_t(8192)),
+        // IP10: horizon 8ms gives the throttle strong backpressure (keeps the RX queue shallow -> ~no
+        // drops). The genlock anchors the send base to the source's clean capture_ts with an 8ms lead, so
+        // the base is source-locked and smooth; it only re-centers on a real >6ms latency spike.
+        Arg("pacing_horizon_ns", uint32_t(8000000)),
+        Arg("reanchor_lead_ns", ip10 ? uint32_t(8000000) : uint32_t(0)));
     add_flow(rx, unpack);
     // FRC runs BEFORE resize so optical flow + interpolation happen at NATIVE input resolution: pixel
     // displacements stay inside the NVOFA search range (they would double on 2160p-upscaled frames and

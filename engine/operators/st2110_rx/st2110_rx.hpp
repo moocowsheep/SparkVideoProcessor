@@ -88,6 +88,15 @@ class St2110RxOp : public holoscan::Operator {
   std::deque<spark::st2110::VideoFrame> frame_q_;
   uint64_t q_dropped_ = 0;  // frames dropped at the queue when TX can't keep up (poll-thread only)
 
+  // --- packet-schedule capture (debug): SPARK_RX_CAPTURE=N dumps N packets' HW timestamps + line
+  // numbers to /tmp/spark_rx_capture.csv, to measure a sender's ST 2110-21 pacing (e.g. a BMD IP10 ref).
+  struct CapPkt { uint64_t t_ns; uint16_t line; uint8_t nsrd; uint8_t marker; uint16_t len; };
+  void cap_record(const spark::st2110::RxPacketInfo& info, const spark::net::RxPacket& pkt);
+  uint32_t cap_target_ = 0;
+  uint64_t cap_t0_ = 0;
+  bool cap_done_ = false;
+  std::vector<CapPkt> cap_;
+
   uint64_t packets_ = 0, frames_ = 0, lost_ = 0, bad_ = 0;
   uint32_t last_seq_ = 0;
   bool have_last_ = false;
