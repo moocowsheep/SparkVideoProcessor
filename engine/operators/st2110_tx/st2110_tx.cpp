@@ -52,6 +52,9 @@ void St2110TxOp::setup(holoscan::OperatorSpec& spec) {
   // bottom-of-frame breakup at high rates (e.g. 2160p59.94 IP10). Keep fill above (avg rate / link rate)
   // so the higher instantaneous rate stays under the receiver's link (e.g. 8.5/10G ⇒ fill ≥ ~0.9).
   spec.param(pacing_fill_, "pacing_fill", "Pacing fill", "fraction of the frame interval to pace over (<=1.0)", 1.0);
+  spec.param(tx_wide_, "tx_wide", "Wide shaping",
+             "ST 2110-21 Wide (2110TPW): pace evenly over the full frame instead of Narrow active-period gapped",
+             false);
   spec.param(manage_eal_, "manage_eal", "Manage EAL",
              "true: own rte_eal_init; false: shared DpdkEal already up", true);
   spec.param(warmup_ms_, "warmup_ms", "Warmup ms",
@@ -94,24 +97,28 @@ void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
                                                       ssrc_.get());
   const uint32_t ppf = pktz_->packets_per_frame();
   frame_interval_ns_ = static_cast<uint64_t>(1e9 / fmt.fps);
-  // ST 2110-21 narrow pacing: spread the frame's packets over the ACTIVE period (T_frame × active/total
-  // lines), the rate a narrow receiver drains at. Pacing faster (the whole frame, or less) sends ahead
-  // of that drain and overflows its small buffer (tail drop); slower delivers the bottom late. `fill` is
-  // a fine-tune on top (default 1.0 = exact active-period rate).
-  const double active = fmt.active_ratio();
+  const bool wide = tx_wide_.get();
+  // ST 2110-21 pacing window. Narrow (2110TPN) spreads the frame's packets over the ACTIVE period only
+  // (T_frame × active/total lines) — the rate a narrow receiver drains at; pacing faster overflows its
+  // small buffer (tail drop), slower delivers the bottom late. Wide (2110TPW) spreads them EVENLY over
+  // the FULL frame interval: the lowest peak rate, and the receiver's larger wide buffer absorbs the
+  // tx_pp/pipeline jitter that narrow's tight buffer turned into dips to black. `fill` fine-tunes on top.
+  const double active = wide ? 1.0 : fmt.active_ratio();
   double fill = pacing_fill_.get();
   if (!(fill > 0.0) || fill > 1.0) fill = 1.0;
   gap_ns_ = ppf ? static_cast<uint64_t>(frame_interval_ns_ * active * fill) / ppf : 0;
-  HOLOSCAN_LOG_INFO("st2110_tx: {}x{}@{:.3f}fps -> {} pkts/frame, gap {} ns (~{} pps, active {:.3f} fill {:.2f})",
+  HOLOSCAN_LOG_INFO("st2110_tx: {}x{}@{:.3f}fps -> {} pkts/frame, gap {} ns (~{} pps, {} active {:.3f} fill {:.2f})",
                     fmt.width, fmt.height, fmt.fps, ppf, gap_ns_,
-                    static_cast<uint64_t>(ppf * fmt.fps), active, fill);
+                    static_cast<uint64_t>(ppf * fmt.fps), wide ? "WIDE" : "NARROW", active, fill);
 
   // Gapped (2110TPN) pacing for IP10: deliver each line's packets bunched early in its line slot, then
   // idle — exactly how the Blackmagic reference paces (measured: ~6 pkts/line at ~1082 ns spacing, then
-  // a ~2 us gap to the next line). Even pacing puts a line's LAST packet at the slot end, too late for
-  // the receiver's per-line drain -> tail-of-line drop, which IP10's per-line context then smears into
-  // colored line corruption. Raw 10-bit stays on the even gap_ns_ schedule (validated).
-  pace_gapped_ = (fmt.sampling == spark::st2110::Sampling::YCbCr422_8) && fmt.height > 0;
+  // a ~2 us gap to the next line). This is the validated IP10 path: per-PACKET send timestamps with an
+  // intra-line gap. Raw 2160p does NOT use it — at 15120 pkts/frame the per-packet send-on-timestamp WQEs
+  // cost ~25ms/frame (capping compute() at the frame budget). Raw 2160p (narrow AND wide) instead uses
+  // pace_line_burst_ below (one timestamp per line, rest back-to-back ≈ the BMD's ~1082ns intra-line).
+  const bool ip10_sampling = (fmt.sampling == spark::st2110::Sampling::YCbCr422_8);
+  pace_gapped_ = !wide && ip10_sampling && fmt.height > 0;
   if (pace_gapped_) {
     t_line_ns_ = static_cast<uint64_t>(frame_interval_ns_ * active * fill) / fmt.height;
     const uint32_t pix_per_pkt = payload_size_.get() > 20 ? payload_size_.get() - 20 : 1;
@@ -122,6 +129,41 @@ void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
     HOLOSCAN_LOG_INFO("st2110_tx: gapped pacing — T_line {} ns, {} pkts/line, intra-gap {} ns", t_line_ns_,
                       ppl, intra_gap_ns_);
   }
+
+  // Per-line-burst pacing for RAW 2160p (narrow AND wide): HW-timestamp only the FIRST packet of each line
+  // (the NIC waits to the line's slot, then sends that line's ~7 packets back-to-back at ~line rate, close
+  // to the BMD reference's ~1082ns intra-line spacing). Per-PACKET send-on-timestamp costs ~1.7us/pkt of
+  // mlx5 WQE build (~25ms for a 15120-pkt 2160p frame) — that alone capped compute() at the frame budget,
+  // so the RX frame queue overflowed and BD2 dipped. One stamp/line cuts that ~7x. The per-line slot
+  // (T_line = frame_interval * active * fill / height) sets the average pace: narrow uses active=0.96
+  // (finishes within the active period, matching the BMD), wide uses 1.0; tx_fill tunes BD2 buffer
+  // headroom on top. IP10 keeps its validated per-packet gapped path (pace_gapped_) untouched.
+  pace_line_burst_ = !ip10_sampling && fmt.height >= 2160 && fmt.height > 0;
+  if (pace_line_burst_) {
+    t_line_ns_ = static_cast<uint64_t>(frame_interval_ns_ * active * fill) / fmt.height;
+    HOLOSCAN_LOG_INFO("st2110_tx: per-line-burst pacing — T_line {} ns ({} active {:.3f} fill {:.2f}, "
+                      "1 HW timestamp/line)", t_line_ns_, wide ? "WIDE" : "NARROW", active, fill);
+  }
+
+  // Effective throttle horizon. The compute() spin runs until the last packet is within `horizon` of the
+  // clock, i.e. compute wall ~ lead + T_active - horizon. The 8ms default is right for 59.94 (T_active
+  // 16ms), but at lower frame rates T_active grows (32ms at 29.97), so an 8ms horizon makes the spin eat
+  // almost the whole frame budget and the TX falls behind (dropped frames / wrong cadence). Scale the
+  // horizon up with the frame interval — submit further ahead, spin less — so compute() keeps real slack.
+  // Capped at 17ms (within the tx_pp future window) and never below the configured value, so 59.94 is
+  // unchanged. The genlock send-timestamps still pace the wire, so the reduced spin doesn't burst.
+  eff_horizon_ns_ = pacing_horizon_ns_.get();
+  // Low frame rates (<=~50fps) have a long active period (32ms at 29.97), so the default 8ms horizon
+  // leaves the throttle spinning most of the frame and compute() can't return inside the budget -> TX
+  // falls behind -> queue overflow -> black. Submit nearly the whole active period ahead so the NIC
+  // tx_pp hardware-paces it and compute() returns with slack; the genlock send-stamps still pace the
+  // wire, so the reduced spin doesn't burst. 59.94/60 (frame_interval < 20ms) keep the validated horizon.
+  if (frame_interval_ns_ > 20000000) {
+    const uint64_t big = frame_interval_ns_ - 4000000;  // ~T_active minus a small submit margin
+    if (big > eff_horizon_ns_) eff_horizon_ns_ = big;
+  }
+  HOLOSCAN_LOG_INFO("st2110_tx: throttle horizon {} ns (configured {} ns)", eff_horizon_ns_,
+                    pacing_horizon_ns_.get());
 }
 
 void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext&,
@@ -208,7 +250,19 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
   uint32_t pace_line = 0xffffffffu, pace_intra = 0;
   for (spark::st2110::PacketPlan p; pktz_->next(p); ++i) {
     uint64_t send_ts;
-    if (pace_gapped_) {
+    if (pace_line_burst_) {
+      // Per-line burst: HW-timestamp the FIRST packet of each line at its slot (base + line*T_line); the
+      // rest of the line send back-to-back via the send_ts=0 sentinel (no per-packet timestamp WQE). The
+      // NIC waits to the slot, then bursts the line at line rate. ~7x fewer send-on-timestamp WQEs.
+      const uint32_t line = (p.nsrd > 0) ? p.srd[0].line_no : 0;
+      if (line != pace_line) {
+        pace_line = line;
+        send_ts = base + static_cast<uint64_t>(line) * t_line_ns_;
+        if (send_ts < now) send_ts = now;  // grid briefly behind the NIC clock: send now, never past-stamp
+      } else {
+        send_ts = 0;  // back-to-back after this line's first packet (no HW timestamp)
+      }
+    } else if (pace_gapped_) {
       // Per-line slot: line L's packets fire at L*T_line + k*intra_gap (k = packet index within line L),
       // an early burst then idle — matching the BMD reference. Lines arrive in order, so send_ts is
       // monotonic and the closed-loop throttle below still applies cleanly.
@@ -221,23 +275,34 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
       }
       send_ts = base + static_cast<uint64_t>(line) * t_line_ns_ +
                 static_cast<uint64_t>(pace_intra) * intra_gap_ns_;
+      if (send_ts < now) send_ts = now;  // grid briefly behind the NIC clock: send now, never past-stamp
     } else {
       send_ts = base + static_cast<uint64_t>(i) * gap_ns_;
+      if (send_ts < now) send_ts = now;  // grid briefly behind the NIC clock: send now, never past-stamp
     }
-    if (send_ts < now) send_ts = now;  // grid briefly behind the NIC clock: send now, never past-stamp
     // Closed-loop throttle (the gate-4 lesson): keep the in-flight schedule within the tx_pp window
     // so packets never become future_errors. A real-time sender is *meant* to wait here. Guarded by
     // an independent wall-clock cap so a now_ns() unit mismatch (// BRINGUP) surfaces as future_errors
     // in the xstats rather than hanging a root process.
     if (pace && throttle_enabled_) {
       const auto t0 = std::chrono::steady_clock::now();
-      while (send_ts > backend_->now_ns() + pacing_horizon_ns_) {
+      while (send_ts > backend_->now_ns() + eff_horizon_ns_) {
         if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(50)) {
           HOLOSCAN_LOG_WARN(
               "st2110_tx: pacing throttle hit 50ms cap — disabling self-throttle (check now_ns() "
               "units / pacing_horizon_ns); NIC tx_pp still active");
           throttle_enabled_ = false;
           break;
+        }
+        // Per-line-burst path: sleep the bulk of the wait instead of busy-spinning. The throttle's only
+        // job is to not submit too far ahead of the NIC clock; the actual wire timing is the per-packet
+        // send timestamp the NIC paces on, NOT when software submits. So a sleep-based (less precise)
+        // submit is fine given the large horizon — and it stops the throttle pegging a core, which under
+        // load starved the RX poll thread (rx packet loss). IP10/others keep the validated tight spin.
+        if (pace_line_burst_) {
+          const int64_t wait_ns =
+              static_cast<int64_t>(send_ts) - static_cast<int64_t>(backend_->now_ns() + eff_horizon_ns_);
+          if (wait_ns > 200000) std::this_thread::sleep_for(std::chrono::nanoseconds(wait_ns - 100000));
         }
       }
     }
