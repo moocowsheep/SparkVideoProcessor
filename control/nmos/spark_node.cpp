@@ -16,6 +16,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -142,6 +143,16 @@ bst::optional<int> ptp_domain_setting(const nmos::settings& s) {
                                             : bst::nullopt;
 }
 
+// ST 2110-21 sender compliance profile advertised in the SDP (TP=). Default Narrow (2110TPN) matches
+// our active-period gapped pacing; SPARK_TX_TP=wide advertises Wide (2110TPW) so the receiver sizes its
+// (larger) wide buffer — must match the engine's SPARK_TX_TP, which switches the actual wire pacing.
+inline bool sdp_tp_wide() {
+  const char* v = std::getenv("SPARK_TX_TP");
+  if (!v) return false;
+  const std::string s(v);
+  return s == "wide" || s == "W" || s == "2110TPW";
+}
+
 // Rewrite a raw-video SDP into Blackmagic IP10 (10:8) form. We reuse nmos-cpp's raw-video SDP for the
 // ts-refclk/mediaclk/framerate/components, then swap the codec signalling per the published IP10 spec:
 // encoding name "vnd.blackmagicdesign.ip10", SSN=ST2110-22:2022, TP=2110TPN, and the Blackmagic
@@ -167,7 +178,7 @@ void apply_ip10_video(nmos::sdp_parameters& sdp) {
   carry(U("exactframerate"));
   carry(U("colorimetry"));
   out.emplace_back(U("SSN"), U("ST2110-22:2022"));
-  out.emplace_back(U("TP"), U("2110TPN"));
+  out.emplace_back(U("TP"), sdp_tp_wide() ? U("2110TPW") : U("2110TPN"));
   out.emplace_back(U("scheme"), U("10:8"));
   sdp.fmtp = std::move(out);
 
@@ -217,9 +228,10 @@ value build_sender_transportfile(const nmos::resources& node_resources, const Id
 
   const std::vector<utility::string_t> mids{ U("PRIMARY") };  // single-path (no ST 2022-7 in v1)
   const nmos::format format{ nmos::fields::format(flow->data) };
+  const auto tp = sdp_tp_wide() ? sdp::type_parameters::type_W : sdp::type_parameters::type_N;
   auto sdp_params = (nmos::formats::video == format)
       ? nmos::make_video_sdp_parameters(node->data, source->data, flow->data, sender.data,
-                                        nmos::details::payload_type_video_default, mids, ptp_domain, sdp::type_parameters::type_N)
+                                        nmos::details::payload_type_video_default, mids, ptp_domain, tp)
       : nmos::make_audio_sdp_parameters(node->data, source->data, flow->data, sender.data,
                                         nmos::details::payload_type_audio_default, mids, ptp_domain, 1.0 /*ptime ms*/);
   if (ip10 && nmos::formats::video == format) apply_ip10_video(sdp_params);  // raw 10-bit -> IP10 10:8

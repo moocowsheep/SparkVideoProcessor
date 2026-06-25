@@ -56,6 +56,12 @@ class St2110TxOp : public holoscan::Operator {
   holoscan::Parameter<std::string> eal_cores_;
   holoscan::Parameter<bool> pacing_;
   holoscan::Parameter<double> pacing_fill_;  // spread a frame over fill×interval (<1 finishes early)
+  // ST 2110-21 sender compliance profile. false = Narrow (2110TPN): pace over the ACTIVE period with
+  // per-line gapped bursts (matches the Blackmagic reference; validated for 2160p59.94 IP10). true =
+  // Wide (2110TPW): pace EVENLY over the full frame interval — lower peak rate, no gaps — for receivers
+  // (e.g. BiDirect-2) whose larger wide buffer absorbs tx_pp/pipeline jitter that narrow's tight buffer
+  // couldn't (the 29.97 dips). Keep this in sync with the SDP's TP= (NMOS node reads the same SPARK_TX_TP).
+  holoscan::Parameter<bool> tx_wide_;
   holoscan::Parameter<bool> manage_eal_;   // false in multi-backend processes (shared DpdkEal)
   holoscan::Parameter<uint32_t> warmup_ms_;  // one-time delay before first send (let RX start first)
 
@@ -66,9 +72,14 @@ class St2110TxOp : public holoscan::Operator {
   // Gapped (2110TPN) pacing for IP10: each line's packets burst early in its line slot then idle,
   // matching the Blackmagic reference. pace_gapped_ enables it; else even gap_ns_ is used.
   bool pace_gapped_ = false;
+  // Per-line-burst pacing (wide 2160p): HW-timestamp only the first packet of each line; the rest send
+  // back-to-back (send_ts=0). Cuts mlx5 send-on-timestamp WQEs ~7x vs per-packet (which cost ~25ms/frame
+  // and capped compute() at the frame budget). The wide receiver buffer absorbs the intra-line burst.
+  bool pace_line_burst_ = false;
   uint64_t t_line_ns_ = 0;          // duration of one raster line slot (T_active / active_lines)
   uint64_t intra_gap_ns_ = 0;       // spacing between a line's packets (bunched within the slot)
   uint64_t frame_interval_ns_ = 0;  // 1e9 / fps
+  uint64_t eff_horizon_ns_ = 0;     // throttle horizon, scaled up at low frame rates so compute() keeps up
   uint64_t schedule_base_ns_ = 0;   // send time of the current frame's first packet
   uint64_t media_ts_ns_ = 0;        // monotonic RTP media clock (anchored once; +interval per frame)
   uint64_t frames_sent_ = 0;

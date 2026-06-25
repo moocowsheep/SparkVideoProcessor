@@ -62,6 +62,12 @@ class St2110Pipeline : public holoscan::Application {
     // Pacing fill: fine-tune on top of the ST 2110-21 active-period rate (the TX paces over T_active by
     // default now). 1.0 = exact narrow rate; lower only if a receiver needs the tail even earlier.
     const double tx_fill = std::atof(env("SPARK_TX_FILL", "1.0").c_str());
+    // ST 2110-21 sender compliance: "narrow" (default, 2110TPN) paces over the active period with
+    // per-line gapped bursts; "wide" (2110TPW) paces evenly over the full frame. Set SPARK_TX_TP=wide
+    // for receivers (e.g. BiDirect-2) whose wide buffer tolerates looser timing. The NMOS node reads the
+    // SAME env var for the SDP's TP= field, so set it for both processes to keep wire + SDP in sync.
+    const std::string tx_tp = env("SPARK_TX_TP", "narrow");
+    const bool tx_wide = tx_tp == "wide" || tx_tp == "W" || tx_tp == "2110TPW";
     // Source format from the SDP (SPARK_IN_*; the NMOS bridge fills these from the sender's fmtp). The
     // real input rate must reach the TX pacer — FRC here is 1:1, so the output rate == the input rate.
     auto parse_rate = [](const std::string& s) -> double {
@@ -116,12 +122,24 @@ class St2110Pipeline : public holoscan::Application {
         // (reanchor_lead) then holds the schedule a stable 8ms ahead of the NIC clock: the spin keeps the
         // lead steady frame-to-frame, so the band only trips on real drift — no per-frame slip (drops) and
         // no eroded lead (unpaced past-error bursts -> colored lines). txd gives the 8ms horizon headroom.
-        Arg("txd", ip10 ? uint32_t(16384) : uint32_t(8192)),
-        // IP10: horizon 8ms gives the throttle strong backpressure (keeps the RX queue shallow -> ~no
-        // drops). The genlock anchors the send base to the source's clean capture_ts with an 8ms lead, so
-        // the base is source-locked and smooth; it only re-centers on a real >6ms latency spike.
+        // Raw 2160p is even denser than IP10 (line-aligned => ~15120 pkts/frame), so it needs a full-frame
+        // ring too. Without it the TX ring (8192) fills mid-frame and the backend busy-spins on a full ring
+        // (drain_pending), capping throughput below the source rate -> RX frame-queue overflow -> dips to
+        // black. 16384 is the mlx5 hardware max (WQEBB limit; 32768 is rejected at queue setup) and still
+        // holds the whole 15120-pkt frame: compute() dumps it and returns, the NIC tx_pp HW-paces it out,
+        // and the scaled throttle horizon keeps frame-overlap ring occupancy under 16384. 1080p raw keeps
+        // the small ring (its frame easily fits 8192).
+        Arg("txd", ip10 ? uint32_t(16384) : (oh >= 2160 ? uint32_t(16384) : uint32_t(8192))),
+        // Genlock (BOTH codecs): anchor the send base to the source's clean capture_ts with an 8ms lead,
+        // so the base is source-locked and smooth (no dips/drops from chasing the jittery local clock); it
+        // only re-centers on a real >6ms latency spike. horizon 8ms gives the throttle strong backpressure
+        // (shallow RX queue -> ~no drops). IP10 adds gapped/line-aligned packetization on top; raw keeps
+        // even ST 2110-21 narrow pacing (no per-line context, so even is correct there).
         Arg("pacing_horizon_ns", uint32_t(8000000)),
-        Arg("reanchor_lead_ns", ip10 ? uint32_t(8000000) : uint32_t(0)));
+        Arg("reanchor_lead_ns", uint32_t(8000000)),
+        // Wide (2110TPW) when SPARK_TX_TP=wide: even full-frame pacing, no per-line gaps. The receiver's
+        // wide buffer absorbs tx_pp jitter (fixes the narrow dips); keep the SDP TP= in sync via the NMOS node.
+        Arg("tx_wide", tx_wide));
     add_flow(rx, unpack);
     // FRC runs BEFORE resize so optical flow + interpolation happen at NATIVE input resolution: pixel
     // displacements stay inside the NVOFA search range (they would double on 2160p-upscaled frames and

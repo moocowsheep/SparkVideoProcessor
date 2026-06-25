@@ -48,7 +48,9 @@ uint16_t find_port_by_pci(const std::string& pci) {
 
 constexpr uint32_t kL2L3L4Hdr = sizeof(rte_ether_hdr) + sizeof(rte_ipv4_hdr) + sizeof(rte_udp_hdr);
 constexpr uint16_t kBurst = 32;        // packets queued to the NIC per tx_burst
-constexpr uint32_t kMbufCount = 16384;
+// Must exceed the TX ring depth so a full dense frame in-ring (e.g. 2160p raw ~15120 pkts, txd 32768)
+// plus the next frame being built never exhausts the pool (reserve_packet dies on exhaustion).
+constexpr uint32_t kMbufCount = 65536;
 
 [[noreturn]] void die(const std::string& msg) {
   throw std::runtime_error("dpdk_tx_backend: " + msg);
@@ -126,9 +128,12 @@ class DpdkTxBackend final : public ISt2110TxBackend {
     udp->dgram_cksum = 0;  // UDP checksum optional over IPv4
   }
 
+  // send_ts_ns == 0 is a sentinel: "send this packet back-to-back, no HW timestamp". The TX op uses it
+  // for the non-first packets of a line (per-line-burst pacing) so the mlx5 SQ only builds one expensive
+  // send-on-timestamp WQE per line instead of per packet (~7x fewer at 2160p).
   void submit(const TxBuf& buf, uint64_t send_ts_ns) override {
     auto* m = static_cast<rte_mbuf*>(buf.opaque);
-    if (cfg_.pacing && have_ts_) {
+    if (cfg_.pacing && have_ts_ && send_ts_ns != 0) {
       *RTE_MBUF_DYNFIELD(m, ts_field_off_, uint64_t*) = send_ts_ns;
       m->ol_flags |= ts_flag_;
     }

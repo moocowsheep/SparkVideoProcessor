@@ -41,10 +41,10 @@ bool plan_one(const VideoFormat& fmt, uint32_t max_payload, Cursor& c, PacketPla
       c.octet = 0;
       ++c.line;
     }
-    // Blackmagic IP10 packetizes line-aligned — one SRD per packet, never spanning a line boundary
-    // (measured: 6 packets/line of 1280 octets). Match it for IP10 (8-bit) so our packet structure equals
-    // the BMD reference; raw 10-bit keeps multi-SRD spanning (its prior, validated behaviour).
-    if (fmt.sampling == Sampling::YCbCr422_8) break;
+    // Blackmagic receivers want line-aligned packets (one SRD/packet, never spanning a line) at 2160p:
+    // IP10 always (matches the BMD's own ~6-pkt/line sender), and 2160p RAW too — its 2160p receiver
+    // drops spanning packets (black frames / heavy loss). 1080p raw keeps multi-SRD spanning (prior path).
+    if (fmt.sampling == Sampling::YCbCr422_8 || fmt.height >= 2160) break;
   }
 
   uint32_t data = 0;
