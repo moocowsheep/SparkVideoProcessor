@@ -11,10 +11,11 @@ namespace {
 // (see the aliasing note in resize.cpp) so a transiently-full queue can never lap a slot in use.
 constexpr size_t kPool = 10;
 
-// Shared setup shape for a GpuFrame->GpuFrame filter stage: input queue sized to the largest
-// upstream emit burst (2 under FRC up-convert), one frame per compute.
-void filter_io(holoscan::OperatorSpec& spec) {
-  const auto cap = static_cast<uint64_t>(spark::pipeline_emit_burst());
+// Shared setup shape for a GpuFrame->GpuFrame filter stage: input queue burst-deep only when this
+// op directly receives FRC's multi-frame burst (SPARK_BURST_SINK), else 1-deep (1:1 hop; capacity
+// == standing latency behind the paced TX). One frame per compute.
+void filter_io(holoscan::OperatorSpec& spec, const std::string& op_name) {
+  const auto cap = static_cast<uint64_t>(spark::pipeline_queue_cap(op_name));
   spec.input<spark::gpu::GpuFramePtr>("in")
       .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer, holoscan::Arg("capacity", cap),
                  holoscan::Arg("policy", static_cast<uint64_t>(2)))
@@ -26,7 +27,7 @@ void filter_io(holoscan::OperatorSpec& spec) {
 
 // ---- ProcAmpOp ----
 void ProcAmpOp::setup(holoscan::OperatorSpec& spec) {
-  filter_io(spec);
+  filter_io(spec, name());
   spec.param(brightness_, "brightness", "Brightness", "black-level offset (±1 = ±full swing)", 0.0);
   spec.param(contrast_, "contrast", "Contrast", "video gain about black; 1 = unity", 1.0);
   spec.param(saturation_, "saturation", "Saturation", "chroma gain; 1 = unity", 1.0);
@@ -73,7 +74,7 @@ void ProcAmpOp::stop() {
 
 // ---- SharpenOp ----
 void SharpenOp::setup(holoscan::OperatorSpec& spec) {
-  filter_io(spec);
+  filter_io(spec, name());
   spec.param(amount_, "amount", "Amount", "unsharp gain (0 = identity)", 1.0);
 }
 

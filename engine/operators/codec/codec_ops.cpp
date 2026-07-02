@@ -146,11 +146,10 @@ void UnpackOp::stop() {
 
 // ---- PackOp: GpuFrame (device planar) -> VideoFrame (host packed) ----
 void PackOp::setup(holoscan::OperatorSpec& spec) {
-  // Resize feeds one frame per compute and pack drains one. Size to the emit burst (2 under FRC
-  // up-convert, where resize processes the pair back-to-back and two frames can land before the paced
-  // TX drains one; else 1). min_size 1 runs pack once per frame (one D2H + emit). Capacity == standing
-  // latency floor here, so passthrough/retime sit 1-deep.
-  const auto cap = static_cast<uint64_t>(spark::pipeline_emit_burst());
+  // Burst-deep ONLY when pack directly receives FRC's multi-frame burst (frc last in the chain,
+  // SPARK_BURST_SINK); otherwise the upstream feeds 1:1 and this sits 1-deep. min_size 1 runs pack
+  // once per frame (one D2H + emit). Capacity == standing latency floor here.
+  const auto cap = static_cast<uint64_t>(spark::pipeline_queue_cap(name()));
   spec.input<spark::gpu::GpuFramePtr>("in")
       .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
                  holoscan::Arg("capacity", cap),
@@ -221,13 +220,30 @@ void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& 
   if (!zerocopy_)
     cuda_check(cudaMemcpyAsync(host->data(), dpacked_, dpacked_bytes_, cudaMemcpyDeviceToHost, stream_),
                "D2H packed");
+  const auto t_sync0 = std::chrono::steady_clock::now();
   cuda_check(cudaStreamSynchronize(stream_), "pack sync");
+  const int64_t sync_us =
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                            t_sync0)
+          .count();
 
   // Latency probe: unpack stamped t_ingest_ns when the frame entered the GPU graph; the host buffer is
   // ready for TX now, so (now - ingest) is the unpack->frc->resize->pack latency incl. the inter-op
   // queues — the trimmable part. (RX assembly upstream and TX pacing horizon downstream are extra.)
   if (src.t_ingest_ns) {
     const uint64_t lat = now_ns() - src.t_ingest_ns;
+    // Stall localization (the M8 determinism hunt): a long GPU fence right here = the CUDA chain
+    // itself stalled (NVOF/warp/scale/pack kernels or GPU contention); a long chain latency with a
+    // SHORT fence = the frame sat in inter-op queues / scheduler / an upstream CPU block. Warns are
+    // rate-limited to 1/s; grep "pipe stall" and read the split.
+    const double tw =
+        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if ((sync_us > 25000 || lat > 250000000ULL) && tw - last_stall_s_ >= 1.0) {
+      last_stall_s_ = tw;
+      HOLOSCAN_LOG_WARN("pipe stall: chain latency {} ms, GPU fence {} ms -> {}", lat / 1000000,
+                        sync_us / 1000,
+                        sync_us > 25000 ? "GPU-side stall" : "queue/scheduler/CPU-side stall");
+    }
     lat_sum_ += lat;
     ++lat_n_;
     if (lat < lat_min_) lat_min_ = lat;

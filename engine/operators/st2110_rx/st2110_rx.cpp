@@ -1,5 +1,6 @@
 #include "st2110_rx.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -81,6 +82,7 @@ void St2110RxOp::start() {
     cap_target_ = static_cast<uint32_t>(std::atoll(c));
     if (cap_target_) cap_.reserve(cap_target_);
   }
+  if (const char* d = std::getenv("SPARK_RX_DRAIN")) drain_enabled_ = d[0] == '1';
   HOLOSCAN_LOG_INFO("st2110_rx started: RX {} udp:{} group={} profile={} emit_frames={}{}{}", cfg.pci_addr,
                     cfg.udp_port, cfg.mcast_group.empty() ? "(none)" : cfg.mcast_group, profile_.get(),
                     emit_frames_.get(), ip10_.get() ? " IP10" : "",
@@ -198,6 +200,24 @@ void St2110RxOp::poll_loop() {
         f.frame_number = frames_++;
         {
           std::lock_guard<std::mutex> lk(q_mu_);
+          // Standing-queue drain governor (see header): if the queue never dipped below 2 for a
+          // whole 32-push window (~1s), that depth is dead latency no steady-state process can
+          // remove (production == consumption). Shed the OLDEST frame — bounded to 1/window — and
+          // let the TX trim servo reclaim the freed time from the genlock offset.
+          if (drain_enabled_) {
+            q_win_min_ = std::min(q_win_min_, frame_q_.size());
+            if (++q_win_count_ >= 32) {
+              if (q_win_min_ >= 2 && !frame_q_.empty()) {
+                frame_q_.pop_front();
+                ++q_drained_;
+                HOLOSCAN_LOG_INFO(
+                    "st2110_rx: standing queue (floor {} over 32 frames) — drained oldest ({} total)",
+                    q_win_min_, q_drained_);
+              }
+              q_win_count_ = 0;
+              q_win_min_ = SIZE_MAX;
+            }
+          }
           if (frame_q_.size() < kMaxQ)
             frame_q_.push_back(std::move(f));
           else {
