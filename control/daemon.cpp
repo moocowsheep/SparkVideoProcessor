@@ -2,15 +2,20 @@
 // Exposes the pipeline control as gRPC (SparkControl) AND HTTP/JSON + static web (libmicrohttpd) so
 // the vanilla web dashboard can drive it with fetch() — no gRPC-web proxy. Manages the
 // st2110_pipeline process (env from config) and parses its final stats. No DPDK/Holoscan deps.
+#include <arpa/inet.h>
 #include <fcntl.h>
 #include <microhttpd.h>
+#include <netdb.h>
+#include <netinet/in.h>
 #include <signal.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -50,9 +55,11 @@ struct State {
     config.set_profile("1080p");
     config.set_out_width(3840);
     config.set_out_height(2160);
-    config.set_interp("cubic");
+    config.set_interp("auto");  // supersampling on downscale, cubic on upscale, 1:1 passthrough
     config.set_frc(true);
     config.set_frc_mode(1);  // 1=retime; web UI / NMOS can pick 2=up-convert (30->60)
+    config.set_pa_contrast(1.0);    // proc amp neutral (0 would read as "unset" -> 1.0 anyway)
+    config.set_pa_saturation(1.0);
     config.set_rx_pci("0000:01:00.1");
     config.set_tx_pci("0002:01:00.1");  // up port on this rig (.0 is the down link)
     config.set_dst_mac("00:00:5e:00:53:30");
@@ -163,6 +170,14 @@ bool start_locked(State& s, std::string& msg) {
     setenv("SPARK_FRC", std::to_string(frc_mode).c_str(), 1);
     setenv("SPARK_IP10", c.ip10() ? "1" : "0", 1);  // Blackmagic IP10 10:8 output (for 2160p60 to BMD)
     setenv("SPARK_IN_IP10", c.in_ip10() ? "1" : "0", 1);  // source is IP10 (decode on RX)
+    // Filter chain (M9): sharpen amount, proc amp params (0 contrast/saturation = unset -> the engine
+    // treats them as neutral 1.0), and the optional explicit chain-order override.
+    setenv("SPARK_SHARPEN", std::to_string(c.sharpen()).c_str(), 1);
+    setenv("SPARK_PA_BRIGHT", std::to_string(c.pa_brightness()).c_str(), 1);
+    setenv("SPARK_PA_CONTRAST", std::to_string(c.pa_contrast()).c_str(), 1);
+    setenv("SPARK_PA_SAT", std::to_string(c.pa_saturation()).c_str(), 1);
+    setenv("SPARK_PA_HUE", std::to_string(c.pa_hue_deg()).c_str(), 1);
+    setenv("SPARK_FILTERS", c.filters().c_str(), 1);
     setenv("SPARK_RX_PCI", c.rx_pci().c_str(), 1);
     setenv("SPARK_TX_PCI", c.tx_pci().c_str(), 1);
     setenv("SPARK_DST_MAC", c.dst_mac().c_str(), 1);
@@ -313,6 +328,158 @@ MHD_Result reply(struct MHD_Connection* c, int code, const std::string& body, co
   return ret;
 }
 
+// ---------------- /api/nmos — same-origin proxy for NMOS control traffic ----------------
+// The dashboard must fetch SDPs from, and PATCH IS-05 connection APIs on, OTHER nodes (e.g. the
+// Blackmagic BiDirects) to route this processor's inputs AND outputs. Those nodes don't serve CORS
+// headers, so the browser can't reach them directly — but the dashboard is served from THIS daemon,
+// so a tiny same-origin forwarder removes the whole problem. Locked down to what NMOS control needs:
+// plain http, hosts that resolve to private/loopback ranges, and NMOS-shaped paths only.
+
+// Allow only NMOS API paths: IS-04/IS-05 live under /x-nmos/, nmos-cpp serves sender manifests
+// (SDPs) under /x-manifest/, and the mDNS proxy bridges non-CORS manifests at /manifest.
+bool nmos_path_ok(const std::string& path) {
+  return path.rfind("/x-nmos/", 0) == 0 || path.rfind("/x-manifest/", 0) == 0 ||
+         path.rfind("/manifest", 0) == 0;
+}
+
+bool sockaddr_is_private(const sockaddr* sa) {
+  if (sa->sa_family == AF_INET) {
+    const uint32_t a = ntohl(reinterpret_cast<const sockaddr_in*>(sa)->sin_addr.s_addr);
+    return (a >> 24) == 10 || (a >> 24) == 127 || (a >> 20) == 0xAC1 /*172.16/12*/ ||
+           (a >> 16) == 0xC0A8 /*192.168/16*/ || (a >> 16) == 0xA9FE /*169.254/16 link-local*/;
+  }
+  if (sa->sa_family == AF_INET6) {
+    const auto* a6 = reinterpret_cast<const sockaddr_in6*>(sa);
+    return IN6_IS_ADDR_LOOPBACK(&a6->sin6_addr) || IN6_IS_ADDR_LINKLOCAL(&a6->sin6_addr) ||
+           (a6->sin6_addr.s6_addr[0] & 0xfe) == 0xfc /*ULA fc00::/7*/;
+  }
+  return false;
+}
+
+// http://host[:port]/path -> parts. Returns false for anything but plain http.
+bool parse_http_url(const std::string& url, std::string& host, std::string& port, std::string& path) {
+  if (url.rfind("http://", 0) != 0) return false;
+  const auto hp = url.substr(7);
+  const auto slash = hp.find('/');
+  if (slash == std::string::npos) return false;
+  path = hp.substr(slash);
+  auto authority = hp.substr(0, slash);
+  const auto colon = authority.rfind(':');
+  if (colon != std::string::npos) {
+    host = authority.substr(0, colon);
+    port = authority.substr(colon + 1);
+  } else {
+    host = authority;
+    port = "80";
+  }
+  return !host.empty();
+}
+
+// Minimal blocking HTTP client (Connection: close), enough for LAN NMOS control-plane calls.
+// Returns the upstream status code, or 0 on transport failure (err describes it). Handles chunked
+// transfer-encoding; follows one level of GET redirect (some nodes 30x their manifest URLs).
+int http_request(const std::string& method, const std::string& url, const std::string& body,
+                 std::string& resp_body, std::string& resp_ctype, std::string& err, int redirects = 2) {
+  std::string host, port, path;
+  if (!parse_http_url(url, host, port, path)) { err = "unsupported url (plain http only)"; return 0; }
+  if (!nmos_path_ok(path)) { err = "path not allowed (NMOS APIs only)"; return 0; }
+
+  addrinfo hints{}, *res = nullptr;
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0 || !res) { err = "resolve failed"; return 0; }
+  std::unique_ptr<addrinfo, void (*)(addrinfo*)> res_guard(res, freeaddrinfo);
+  if (!sockaddr_is_private(res->ai_addr)) { err = "host not on a private network"; return 0; }
+
+  const int fd = socket(res->ai_family, SOCK_STREAM, 0);
+  if (fd < 0) { err = "socket failed"; return 0; }
+  timeval tv{4, 0};  // covers connect (SO_SNDTIMEO) and each read (SO_RCVTIMEO)
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+  if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) { close(fd); err = "connect failed"; return 0; }
+
+  std::string req = method + " " + path + " HTTP/1.1\r\nHost: " + host + ":" + port +
+                    "\r\nConnection: close\r\nAccept: */*\r\n";
+  if (!body.empty())
+    req += "Content-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
+  req += "\r\n" + body;
+  for (size_t off = 0; off < req.size();) {
+    const ssize_t n = send(fd, req.data() + off, req.size() - off, MSG_NOSIGNAL);
+    if (n <= 0) { close(fd); err = "send failed"; return 0; }
+    off += static_cast<size_t>(n);
+  }
+
+  std::string raw;
+  char buf[8192];
+  for (;;) {
+    const ssize_t n = recv(fd, buf, sizeof buf, 0);
+    if (n < 0) { close(fd); err = "read failed/timeout"; return 0; }
+    if (n == 0) break;
+    raw.append(buf, static_cast<size_t>(n));
+    if (raw.size() > (16u << 20)) break;  // 16 MB cap — an SDP/JSON reply is KBs
+  }
+  close(fd);
+
+  const auto hdr_end = raw.find("\r\n\r\n");
+  if (hdr_end == std::string::npos) { err = "malformed response"; return 0; }
+  const std::string head = raw.substr(0, hdr_end);
+  resp_body = raw.substr(hdr_end + 4);
+  const int status = std::atoi(head.c_str() + head.find(' ') + 1);
+
+  // headers we care about (case-insensitive): Content-Type, Transfer-Encoding, Location
+  const auto header = [&](const char* name) -> std::string {
+    std::string lower = head;
+    for (auto& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    const auto p = lower.find(std::string("\r\n") + name + ":");
+    if (p == std::string::npos) return {};
+    const auto v0 = head.find(':', p + 2) + 1;
+    const auto v1 = head.find("\r\n", v0);
+    auto v = head.substr(v0, v1 - v0);
+    v.erase(0, v.find_first_not_of(" \t"));
+    return v;
+  };
+  resp_ctype = header("content-type");
+  if (resp_ctype.empty()) resp_ctype = "application/octet-stream";
+
+  if (header("transfer-encoding").find("chunked") != std::string::npos) {  // de-chunk
+    std::string out;
+    size_t p = 0;
+    while (p < resp_body.size()) {
+      const auto eol = resp_body.find("\r\n", p);
+      if (eol == std::string::npos) break;
+      const size_t len = std::strtoul(resp_body.c_str() + p, nullptr, 16);
+      if (len == 0) break;
+      out.append(resp_body, eol + 2, len);
+      p = eol + 2 + len + 2;
+    }
+    resp_body = std::move(out);
+  }
+
+  if (status >= 301 && status <= 308 && method == "GET" && redirects > 0) {
+    const auto loc = header("location");
+    if (!loc.empty())
+      return http_request(method, loc, body, resp_body, resp_ctype, err, redirects - 1);
+  }
+  return status;
+}
+
+// GET /api/nmos?u=<url>  |  POST /api/nmos?u=<url>&m=PATCH (body forwarded) — upstream status/body
+// pass straight through so the dashboard treats it like a plain fetch.
+MHD_Result nmos_proxy(struct MHD_Connection* conn, const char* method_override,
+                      const std::string& body) {
+  const char* u = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "u");
+  if (!u || !*u) return reply(conn, 400, "{\"error\":\"missing u=<url>\"}", "application/json");
+  const char* m = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "m");
+  const std::string method = method_override ? method_override : (m && *m ? m : "GET");
+  if (method != "GET" && method != "PATCH")
+    return reply(conn, 400, "{\"error\":\"method must be GET or PATCH\"}", "application/json");
+  std::string resp, ctype, err;
+  const int status = http_request(method, u, body, resp, ctype, err);
+  if (status == 0)
+    return reply(conn, 502, "{\"error\":\"" + err + "\"}", "application/json");
+  return reply(conn, status, resp, ctype.c_str());
+}
+
 MHD_Result http_handler(void*, struct MHD_Connection* conn, const char* url, const char* method,
                         const char*, const char* upload_data, size_t* upload_size, void** con_cls) {
   const std::string u = url, m = method;
@@ -331,6 +498,8 @@ MHD_Result http_handler(void*, struct MHD_Connection* conn, const char* url, con
     }
     std::unique_ptr<std::string> owned(body);
     *con_cls = nullptr;
+    // NMOS proxy first — it must not hold (or wait on) the state lock while talking to other nodes.
+    if (u == "/api/nmos") return nmos_proxy(conn, nullptr, *owned);
     Ack ack;
     std::lock_guard<std::mutex> lk(g_state.mu);
     std::string msg;
@@ -363,6 +532,7 @@ MHD_Result http_handler(void*, struct MHD_Connection* conn, const char* url, con
   }
 
   // GET
+  if (u == "/api/nmos") return nmos_proxy(conn, "GET", "");
   if (u == "/api/status") {
     std::lock_guard<std::mutex> lk(g_state.mu);
     return reply(conn, 200, json_of(build_status_locked(g_state)), "application/json");
@@ -405,8 +575,11 @@ int main(int argc, char** argv) {
   b.RegisterService(&svc);
   std::unique_ptr<grpc::Server> server(b.BuildAndStart());
 
-  struct MHD_Daemon* http = MHD_start_daemon(MHD_USE_INTERNAL_POLLING_THREAD, http_port, nullptr,
-                                             nullptr, &http_handler, nullptr, MHD_OPTION_END);
+  // Thread-per-connection: /api/nmos blocks for up to ~4 s talking to another node; on the single
+  // polling thread that would freeze every status poll (and the UI) for the duration.
+  struct MHD_Daemon* http =
+      MHD_start_daemon(MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_THREAD_PER_CONNECTION, http_port,
+                       nullptr, nullptr, &http_handler, nullptr, MHD_OPTION_END);
   if (!http) {
     std::fprintf(stderr, "failed to start HTTP on :%d\n", http_port);
     return 1;
