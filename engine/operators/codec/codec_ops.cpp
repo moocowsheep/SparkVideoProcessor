@@ -1,7 +1,9 @@
 #include "codec_ops.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <stdexcept>
+#include <string>
 
 #include <cuda_runtime.h>
 
@@ -21,6 +23,30 @@ uint64_t now_ns() {
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
 }
+
+// Zero-copy host access: on GB10 (Grace Blackwell, cache-coherent unified LPDDR5x) the GPU can read/
+// write ordinary malloc'd host memory directly (pageableMemoryAccess), so the packed-frame staging
+// copies (H2D in unpack, D2H in pack) are pure overhead — the kernels touch each octet exactly once
+// anyway. SPARK_ZEROCOPY=0 forces the copy path (A/B or fallback), =1 forces zero-copy (testing);
+// unset auto-detects. Decided once, logged once.
+bool host_zerocopy() {
+  static const bool on = [] {
+    bool v = false;
+    const char* e = std::getenv("SPARK_ZEROCOPY");
+    if (e && *e) {
+      v = std::string(e) != "0";
+    } else {
+      cudaDeviceProp prop{};
+      int dev = 0;
+      if (cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&prop, dev) == cudaSuccess)
+        v = prop.pageableMemoryAccess != 0;
+    }
+    HOLOSCAN_LOG_INFO("codec_ops: host zero-copy {} ({})", v ? "ON" : "OFF",
+                      e && *e ? "SPARK_ZEROCOPY" : "auto: pageableMemoryAccess");
+    return v;
+  }();
+  return on;
+}
 }  // namespace
 
 // ---- UnpackOp: VideoFrame (host packed) -> GpuFrame (device planar) ----
@@ -35,12 +61,27 @@ void UnpackOp::ensure(uint32_t width, uint32_t height, bool ip10) {
   // (10-bit Y/Cb/Cr) is identical either way — only the device staging buffer size differs.
   const size_t octets = static_cast<size_t>(width / 2) * height * (ip10 ? 4 : 5);
   if (dpacked_bytes_ == octets && !pool_.empty()) return;
+  zerocopy_ = host_zerocopy();
   if (dpacked_) cudaFree(dpacked_);
-  cuda_check(cudaMalloc(reinterpret_cast<void**>(&dpacked_), octets), "cudaMalloc packed");
+  if (!zerocopy_)  // zero-copy reads the RX host buffer in place; no device staging needed
+    cuda_check(cudaMalloc(reinterpret_cast<void**>(&dpacked_), octets), "cudaMalloc packed");
   dpacked_bytes_ = octets;
   pool_.assign(kRing, nullptr);
   for (auto& f : pool_) f = std::make_shared<spark::gpu::GpuFrame>(width, height);
-  HOLOSCAN_LOG_INFO("unpack: {}x{} ({} octets, {})", width, height, octets, ip10 ? "IP10 10:8" : "raw 10-bit");
+  HOLOSCAN_LOG_INFO("unpack: {}x{} ({} octets, {}{})", width, height, octets,
+                    ip10 ? "IP10 10:8" : "raw 10-bit", zerocopy_ ? ", zero-copy" : "");
+}
+
+// Pop inflight entries whose GPU read finished, returning their RX buffers (and events) to the pools.
+// wait=true (stop path) blocks on stragglers so no buffer outlives the op while a kernel reads it.
+void UnpackOp::drain_inflight(bool wait) {
+  while (!inflight_.empty()) {
+    const cudaError_t st = wait ? cudaEventSynchronize(inflight_.front().first)
+                                : cudaEventQuery(inflight_.front().first);
+    if (st == cudaErrorNotReady) break;
+    ev_pool_.push_back(inflight_.front().first);
+    inflight_.pop_front();
+  }
 }
 
 void UnpackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
@@ -51,21 +92,38 @@ void UnpackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext
   const auto& fmt = vf.format;
   const bool ip10 = fmt.sampling == spark::st2110::Sampling::YCbCr422_8;
   ensure(fmt.width, fmt.height, ip10);
+  drain_inflight(false);
 
-  // Host packed -> device, then unpack to the planar GpuFrame, all on our stream (async H2D is host-
-  // synchronous for pageable memory but stays off the default stream, so it doesn't serialize the
-  // other operators). The unpack kernel is stream-ordered after the upload; dpacked_ reuse across
-  // frames is safe for the same reason.
-  cuda_check(cudaMemcpyAsync(dpacked_, vf.data->data(), dpacked_bytes_, cudaMemcpyHostToDevice,
-                             stream_),
-             "H2D packed");
+  // Feed the unpack kernel. Zero-copy (GB10 coherent memory): the kernel reads the RX ring buffer in
+  // place — no staging copy, but the buffer must stay referenced until the read completes (the RX
+  // reuses any ring slot whose use_count drops to 1), so park the shared_ptr in inflight_ behind a
+  // completion event. Copy path (non-coherent platforms): host packed -> device staging on our stream
+  // (async H2D is host-synchronous for pageable memory, so the buffer is free on return), then unpack;
+  // dpacked_ reuse across frames is safe because the copy and kernel are stream-ordered.
+  const uint8_t* src = vf.data->data();
+  if (!zerocopy_) {
+    cuda_check(cudaMemcpyAsync(dpacked_, src, dpacked_bytes_, cudaMemcpyHostToDevice, stream_),
+               "H2D packed");
+    src = dpacked_;
+  }
   auto dst = pool_[idx_];
   idx_ = (idx_ + 1) % pool_.size();
   if (ip10)
-    spark::codec::ip10::ip10_unpack_422(dpacked_, dst->y, dst->cb, dst->cr, fmt.width, fmt.height, stream_);
+    spark::codec::ip10::ip10_unpack_422(src, dst->y, dst->cb, dst->cr, fmt.width, fmt.height, stream_);
   else
-    spark::codec::unpack_422_10(dpacked_, dst->y, dst->cb, dst->cr, fmt.width, fmt.height, stream_);
+    spark::codec::unpack_422_10(src, dst->y, dst->cb, dst->cr, fmt.width, fmt.height, stream_);
   cuda_check(cudaEventRecord(dst->ready, stream_), "unpack record");  // consumers wait on this
+  if (zerocopy_) {
+    cudaEvent_t ev;
+    if (!ev_pool_.empty()) {
+      ev = ev_pool_.back();
+      ev_pool_.pop_back();
+    } else {
+      cuda_check(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "inflight event");
+    }
+    cuda_check(cudaEventRecord(ev, stream_), "inflight record");
+    inflight_.emplace_back(ev, vf.data);
+  }
   dst->t_ingest_ns = now_ns();  // frame enters the GPU graph here; pack reads this for the latency probe
   dst->capture_ts_ns = vf.capture_ts_ns;  // carry the source frame timing through for TX genlock
   op_output.emit(dst, "out");
@@ -77,6 +135,9 @@ void UnpackOp::stop() {
     cudaStreamDestroy(stream_);
     stream_ = nullptr;
   }
+  drain_inflight(true);
+  for (cudaEvent_t ev : ev_pool_) cudaEventDestroy(ev);
+  ev_pool_.clear();
   if (dpacked_) {
     cudaFree(dpacked_);
     dpacked_ = nullptr;
@@ -108,13 +169,16 @@ void PackOp::ensure(uint32_t width, uint32_t height) {
       ip10_.get() ? spark::st2110::Sampling::YCbCr422_8 : spark::st2110::Sampling::YCbCr422_10;
   const size_t octets = static_cast<size_t>(width / 2) * height * (ip10_.get() ? 4 : 5);
   if (dpacked_bytes_ == octets && !host_pool_.empty()) return;
+  zerocopy_ = host_zerocopy();
   if (dpacked_) cudaFree(dpacked_);
-  cuda_check(cudaMalloc(reinterpret_cast<void**>(&dpacked_), octets), "cudaMalloc packed");
+  if (!zerocopy_)  // zero-copy packs straight into the TX host buffer; no device staging needed
+    cuda_check(cudaMalloc(reinterpret_cast<void**>(&dpacked_), octets), "cudaMalloc packed");
   dpacked_bytes_ = octets;
   fmt_ = spark::st2110::VideoFormat{width, height, out_fps_.get(), sampling};
   host_pool_.assign(kRing, nullptr);
   for (auto& b : host_pool_) b = std::make_shared<std::vector<uint8_t>>(octets);
-  HOLOSCAN_LOG_INFO("pack: {}x{} ({} octets, {})", width, height, octets, ip10_.get() ? "IP10 10:8" : "raw 10-bit");
+  HOLOSCAN_LOG_INFO("pack: {}x{} ({} octets, {}{})", width, height, octets,
+                    ip10_.get() ? "IP10 10:8" : "raw 10-bit", zerocopy_ ? ", zero-copy" : "");
 }
 
 void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
@@ -124,20 +188,13 @@ void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& 
   const auto& src = *in.value();
   ensure(src.width, src.height);
 
-  // Order our stream behind whoever produced this frame (resize, on its own stream), then pack + D2H
-  // on our stream. The blocking stream sync (not the default stream) waits only our work, so the host
-  // buffer is valid before TX reads it without serializing the other operators.
-  cuda_check(cudaStreamWaitEvent(stream_, src.ready, 0), "pack wait input");
-  if (ip10_.get())
-    spark::codec::ip10::ip10_pack_422(dpacked_, src.y, src.cb, src.cr, src.width, src.height, stream_);
-  else
-    spark::codec::pack_422_10(dpacked_, src.y, src.cb, src.cr, src.width, src.height, stream_);
   // Pick a host buffer the TX has finished transmitting. The TX holds the emitted shared_ptr for the
   // whole ~frame-long send, so use_count()==1 means only the pool still references it (TX released it).
   // A blind round-robin can lap the in-flight TX buffer under FRC up-convert + motion-driven GPU
   // latency spikes (pipeline runs many frames deep) and overwrite the frame mid-send — corrupting the
   // last-sent (bottom) lines (the bottom-tear, worse with motion). If every buffer is still in flight,
   // grow the pool rather than clobber one; it settles at the working depth and stops growing.
+  // (Chosen before the kernel launch: the zero-copy path packs straight into it.)
   std::shared_ptr<std::vector<uint8_t>> host;
   for (size_t n = 0; n < host_pool_.size(); ++n) {
     auto& cand = host_pool_[idx_];
@@ -149,9 +206,22 @@ void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& 
     host_pool_.push_back(host);
     HOLOSCAN_LOG_INFO("pack: grew host pool to {} buffers (TX holding the rest in flight)", host_pool_.size());
   }
-  cuda_check(cudaMemcpyAsync(host->data(), dpacked_, dpacked_bytes_, cudaMemcpyDeviceToHost, stream_),
-             "D2H packed");
-  cuda_check(cudaStreamSynchronize(stream_), "pack D2H sync");
+
+  // Order our stream behind whoever produced this frame (resize, on its own stream), then pack on our
+  // stream. Zero-copy: the kernel writes the TX host buffer directly over the coherent fabric (no D2H
+  // staging); copy path: pack to device staging then D2H. Either way the blocking stream sync (not the
+  // default stream) waits only our chain, so the host buffer is valid before TX reads it without
+  // serializing the other operators.
+  cuda_check(cudaStreamWaitEvent(stream_, src.ready, 0), "pack wait input");
+  uint8_t* packed = zerocopy_ ? host->data() : dpacked_;
+  if (ip10_.get())
+    spark::codec::ip10::ip10_pack_422(packed, src.y, src.cb, src.cr, src.width, src.height, stream_);
+  else
+    spark::codec::pack_422_10(packed, src.y, src.cb, src.cr, src.width, src.height, stream_);
+  if (!zerocopy_)
+    cuda_check(cudaMemcpyAsync(host->data(), dpacked_, dpacked_bytes_, cudaMemcpyDeviceToHost, stream_),
+               "D2H packed");
+  cuda_check(cudaStreamSynchronize(stream_), "pack sync");
 
   // Latency probe: unpack stamped t_ingest_ns when the frame entered the GPU graph; the host buffer is
   // ready for TX now, so (now - ingest) is the unpack->frc->resize->pack latency incl. the inter-op

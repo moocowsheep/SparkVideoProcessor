@@ -6,7 +6,9 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include <holoscan/holoscan.hpp>
@@ -27,11 +29,17 @@ class UnpackOp : public holoscan::Operator {
 
  private:
   void ensure(uint32_t width, uint32_t height, bool ip10);
+  void drain_inflight(bool wait);  // release RX buffers whose async GPU read has completed
   cudaStream_t stream_ = nullptr;  // own CUDA stream (H2D + unpack kernel), pipelined vs other ops
-  uint8_t* dpacked_ = nullptr;  // device staging for the packed frame
+  uint8_t* dpacked_ = nullptr;  // device staging for the packed frame (copy path only)
   size_t dpacked_bytes_ = 0;
+  bool zerocopy_ = false;  // GB10 coherent memory: kernel reads the RX host buffer directly (no H2D)
   std::vector<spark::gpu::GpuFramePtr> pool_;  // output ring
   size_t idx_ = 0;
+  // Zero-copy lifetime: the unpack kernel reads the RX ring buffer ASYNCHRONOUSLY, but the RX reuses
+  // any buffer whose use_count drops to 1 — so hold the shared_ptr here until the read completed.
+  std::deque<std::pair<cudaEvent_t, std::shared_ptr<std::vector<uint8_t>>>> inflight_;
+  std::vector<cudaEvent_t> ev_pool_;  // recycled completion events for inflight_
 };
 
 class PackOp : public holoscan::Operator {
@@ -48,8 +56,9 @@ class PackOp : public holoscan::Operator {
   holoscan::Parameter<double> out_fps_;  // output RTP media rate (drives TX pacing); from the source SDP
   holoscan::Parameter<bool> ip10_;  // Blackmagic IP10 10:8 output (8-bit pgroups) instead of raw 10-bit
   cudaStream_t stream_ = nullptr;  // own CUDA stream (pack kernel + D2H), pipelined vs other ops
-  uint8_t* dpacked_ = nullptr;  // device staging for the packed frame
+  uint8_t* dpacked_ = nullptr;  // device staging for the packed frame (copy path only)
   size_t dpacked_bytes_ = 0;
+  bool zerocopy_ = false;  // GB10 coherent memory: kernel writes the TX host buffer directly (no D2H)
   spark::st2110::VideoFormat fmt_{};
   std::vector<std::shared_ptr<std::vector<uint8_t>>> host_pool_;  // output ring (host packed)
   size_t idx_ = 0;

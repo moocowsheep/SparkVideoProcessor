@@ -64,6 +64,10 @@ class St2110TxOp : public holoscan::Operator {
   holoscan::Parameter<bool> tx_wide_;
   holoscan::Parameter<bool> manage_eal_;   // false in multi-backend processes (shared DpdkEal)
   holoscan::Parameter<uint32_t> warmup_ms_;  // one-time delay before first send (let RX start first)
+  // Latency trim: max ns/frame the genlock base (and the RTP media clock with it) may slew toward the
+  // target lead. Converges end-to-end latency to (steady pipeline delay + reanchor_lead) after startup
+  // transients instead of freezing whatever the cold first frame baked in. 0 = off (legacy behavior).
+  holoscan::Parameter<uint32_t> trim_ns_;
 
   // --- runtime state ---
   std::unique_ptr<spark::net::ISt2110TxBackend> backend_;
@@ -89,6 +93,12 @@ class St2110TxOp : public holoscan::Operator {
   bool throttle_enabled_ = true;  // self-disables if the spin caps out (likely now_ns() unit issue)
   bool warmed_ = false;
   double last_live_s_ = 0;
+  // Latency telemetry (1 Hz spark_live line + a trim servo): lead = schedule base over the NIC clock
+  // at compute time (the TX-side jitter margin AND queue+GPU slack — end-to-end latency rides on it);
+  // trim_total = how much the servo has pulled out of the baked-in genlock offset so far.
+  int64_t last_lead_ns_ = 0;
+  uint64_t trim_total_ns_ = 0;
+  bool genlocked_ = false;  // last frame used the capture_ts genlock path (media clock may slew)
 };
 
 }  // namespace spark::ops
