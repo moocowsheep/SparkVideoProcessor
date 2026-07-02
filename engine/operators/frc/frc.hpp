@@ -10,6 +10,14 @@
 //     so interpolation does genuine work and artifacts land only on alternate (mid) frames. This
 //     emits two messages per compute on "out", so the downstream pack input is sized to buffer them
 //     and the TX runs at out_fps = 2x in_fps (see st2110_pipeline + the tx_pp shock-absorber ring).
+// Plus a timing variant (out_interval_ns > 0, SPARK_FRC=3): UNIFORM-GRID up-convert. Modes 1/2 are
+//   source-locked — output capture_ts inherits every wobble of the source's frame spacing, so an
+//   erratic source (e.g. a BMD with a bad reference) shows as motion wobble on air. Uniform mode
+//   lays a rigid nominal output grid over the capture timeline and emits one frame per grid tick,
+//   interpolated at the tick's TRUE phase between the actual capture times of the bracketing source
+//   frames (real frames pass through when a tick lands on one). Output cadence is exactly nominal
+//   regardless of source wobble; a source stall freezes output for the gap instead of synthesizing
+//   fictitious motion. See frc_grid.hpp for the tick math.
 #pragma once
 
 #include <cstdint>
@@ -19,6 +27,7 @@
 #include <holoscan/holoscan.hpp>
 
 #include "../resize/gpu_frame.hpp"
+#include "frc_grid.hpp"
 #include "nvof_flow.hpp"
 
 namespace spark::ops {
@@ -35,11 +44,18 @@ class FrcOp : public holoscan::Operator {
  private:
   void ensure(uint32_t width, uint32_t height);
   void emit_live(bool force = false);  // periodic "spark_live frc_interpolated" line (1 Hz)
+  void run_flow(const spark::gpu::GpuFramePtr& cur);  // NVOF prev_<->cur on stream_ (async)
+  void compute_uniform(const spark::gpu::GpuFramePtr& cur, holoscan::OutputContext& op_output);
 
   holoscan::Parameter<double> phase_;        // interpolation t in [0,1] (0.5 = midpoint)
   holoscan::Parameter<uint32_t> grid_size_;  // NVOF output grid (1|2|4; 1 = finest = best quality)
   holoscan::Parameter<uint32_t> rate_mult_;  // 1 = retime (1:1), 2 = up-convert (real + mid -> 2x)
+  holoscan::Parameter<uint64_t> out_interval_ns_;  // >0 = uniform-grid mode at this output interval
 
+  spark::frc::UniformGrid grid_;   // uniform-mode tick state (anchored on the first bracket)
+  uint64_t src_prev_ts_ = 0;       // prev_'s ORIGINAL capture_ts (prev_ itself may be re-stamped)
+  uint64_t grid_dropped_ = 0;      // ticks dropped (stall jumps / over-burst brackets)
+  uint32_t burst_ = 1;             // max emits per compute (== pipeline_emit_burst(), cached)
   spark::frc::NvofFlow flow_;
   bool inited_ = false;
   cudaStream_t stream_ = nullptr;  // FRC's own CUDA stream (NVOF + interpolate); pipelined vs other ops
