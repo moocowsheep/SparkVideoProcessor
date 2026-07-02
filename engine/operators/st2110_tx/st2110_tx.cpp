@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <thread>
 
 namespace spark::ops {
@@ -107,9 +108,9 @@ void St2110TxOp::emit_live(bool force) {
   const uint64_t e2e_us = genlock_offset_ ? (genlock_offset_ % kRtpWrapNs) / 1000 : 0;
   HOLOSCAN_LOG_INFO(
       "spark_live tx_frames={} tx_packets={} tx_future_err={} tx_past_err={} tx_reanchors={} "
-      "tx_lead_us={} tx_e2e_us={} tx_trim_ms={}",
-      frames_sent_, packets_sent_, s.future_errors, s.past_errors, reanchors_, last_lead_ns_ / 1000,
-      e2e_us, trim_total_ns_ / 1000000);
+      "tx_skipped={} tx_lead_us={} tx_e2e_us={} tx_trim_ms={}",
+      frames_sent_, packets_sent_, s.future_errors, s.past_errors, reanchors_, skipped_late_,
+      last_lead_ns_ / 1000, e2e_us, trim_total_ns_ / 1000000);
 }
 
 void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
@@ -139,7 +140,16 @@ void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
   // cost ~25ms/frame (capping compute() at the frame budget). Raw 2160p (narrow AND wide) instead uses
   // pace_line_burst_ below (one timestamp per line, rest back-to-back ≈ the BMD's ~1082ns intra-line).
   const bool ip10_sampling = (fmt.sampling == spark::st2110::Sampling::YCbCr422_8);
-  pace_gapped_ = !wide && ip10_sampling && fmt.height > 0;
+  // IP10 at >=~50fps can't pay per-packet send-on-timestamp: ~1.7us of mlx5 WQE build x 12960
+  // pkts/frame (2160p) is ~22ms against the 16.7ms 59.94 budget — TX caps ~45fps. Use per-line-burst
+  // instead: one stamp/line and the NIC sends the line's remaining packets back-to-back, which at 10G
+  // is ~1.06us/pkt for IP10's 1300-byte payloads — wire-identical to the validated ~1082ns intra-line
+  // gap. Lower rates keep the hardware-validated per-packet gapped path (2160p29.97 IP10). The lead
+  // no longer drifts into ring overflow (the M8 trim servo holds it at target), which is what blocked
+  // this before. SPARK_TX_IP10_BURST=1/0 forces it on/off for A/B on the rig.
+  bool ip10_burst = ip10_sampling && frame_interval_ns_ < 20000000;
+  if (const char* e = std::getenv("SPARK_TX_IP10_BURST")) ip10_burst = ip10_sampling && e[0] == '1';
+  pace_gapped_ = !wide && ip10_sampling && !ip10_burst && fmt.height > 0;
   if (pace_gapped_) {
     t_line_ns_ = static_cast<uint64_t>(frame_interval_ns_ * active * fill) / fmt.height;
     const uint32_t pix_per_pkt = payload_size_.get() > 20 ? payload_size_.get() - 20 : 1;
@@ -158,12 +168,14 @@ void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
   // so the RX frame queue overflowed and BD2 dipped. One stamp/line cuts that ~7x. The per-line slot
   // (T_line = frame_interval * active * fill / height) sets the average pace: narrow uses active=0.96
   // (finishes within the active period, matching the BMD), wide uses 1.0; tx_fill tunes BD2 buffer
-  // headroom on top. IP10 keeps its validated per-packet gapped path (pace_gapped_) untouched.
-  pace_line_burst_ = !ip10_sampling && fmt.height >= 2160 && fmt.height > 0;
+  // headroom on top. IP10 <=~50fps keeps its validated per-packet gapped path (pace_gapped_);
+  // IP10 at higher rates joins this path (ip10_burst above) — per-packet WQEs don't fit the budget.
+  pace_line_burst_ = ((!ip10_sampling && fmt.height >= 2160) || ip10_burst) && fmt.height > 0;
   if (pace_line_burst_) {
     t_line_ns_ = static_cast<uint64_t>(frame_interval_ns_ * active * fill) / fmt.height;
     HOLOSCAN_LOG_INFO("st2110_tx: per-line-burst pacing — T_line {} ns ({} active {:.3f} fill {:.2f}, "
-                      "1 HW timestamp/line)", t_line_ns_, wide ? "WIDE" : "NARROW", active, fill);
+                      "1 HW timestamp/line{})", t_line_ns_, wide ? "WIDE" : "NARROW", active, fill,
+                      ip10_burst ? ", IP10" : "");
   }
 
   // Effective throttle horizon. The compute() spin runs until the last packet is within `horizon` of the
@@ -181,6 +193,16 @@ void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
   // wire, so the reduced spin doesn't burst. 59.94/60 (frame_interval < 20ms) keep the validated horizon.
   if (frame_interval_ns_ > 20000000) {
     const uint64_t big = frame_interval_ns_ - 4000000;  // ~T_active minus a small submit margin
+    if (big > eff_horizon_ns_) eff_horizon_ns_ = big;
+  } else if (pace_line_burst_) {
+    // 59.94/60 line-burst: FRC pair-burst frames have bases 16.7ms apart, and each compute() blocks
+    // until T_active - horizon past its base — at the 8ms horizon a pair is busy ~32.7ms of its
+    // 33.4ms period (<1ms slack). Jitter then accumulates into queue growth -> RX drops -> capture_ts
+    // jumps -> genlock re-anchor oscillation (~34fps drain, seen on the rig 2026-07-02). Submit
+    // further ahead (same trick as the low-rate branch): ~12.7ms horizon cuts pair busy to ~28ms,
+    // and in-flight (~10k pkts at 59.94) still fits txd 16384. The NIC send-stamps pace the wire,
+    // so the earlier hand-off doesn't burst.
+    const uint64_t big = frame_interval_ns_ - 4000000;
     if (big > eff_horizon_ns_) eff_horizon_ns_ = big;
   }
   HOLOSCAN_LOG_INFO("st2110_tx: throttle horizon {} ns (configured {} ns)", eff_horizon_ns_,
@@ -226,24 +248,101 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
     if (genlock_offset_ == 0) genlock_offset_ = (now + tgt) - frame.capture_ts_ns;
     int64_t gbase = static_cast<int64_t>(frame.capture_ts_ns) + static_cast<int64_t>(genlock_offset_);
     int64_t lead = gbase - static_cast<int64_t>(now);
+    // Skip-rate window (two rotating 64-frame buckets) for the chronic-clipping guard below.
+    // NOTE (rig lessons, 2026-07-02): lead-based trim servos CANNOT work here. While any upstream
+    // queue stands, a frame arrives at TX the moment TX finishes the previous one, so the measured
+    // lead is set by the pipeline cycle time and is INVARIANT to the offset: a min-lead shave gate
+    // reads noise and never fires, and a reverse trim (raise on low min-lead) only slows TX, grows
+    // the queues by exactly the raise, and ratchets forever (-51/-77/-123ms observed). The only
+    // signals that truly measure the schedule vs the floor are SKIPS (below) — so latency trim is
+    // skip-gated (AIMD), and the offset is otherwise left alone.
+    const bool shallow = lead > -static_cast<int64_t>(frame_interval_ns_);
+    if (++win_count_ >= 64) {
+      win_skips_prev_ = win_skips_;
+      win_skips_ = 0;
+      win_count_ = 0;
+    }
+    // Chronic-clipping guard: shallow-late skips are the designed drain mechanism for a standing
+    // queue (each one sheds a queue slot; occasional repeats on air while converging). But if a
+    // SUSTAINED fraction of frames (>25% of the last 64-128) is being clipped, the latency floor
+    // has genuinely risen — fall through to the re-anchor below and accept it ONCE (a step), which
+    // is what the removed reverse-trim servo got wrong: it ratcheted the offset continuously
+    // because a standing queue is indistinguishable per-frame from a higher floor (-77ms trim seen
+    // on the rig 2026-07-02).
+    const bool chronic_clip = (win_skips_ + win_skips_prev_) > 32;
+    if (lead < static_cast<int64_t>(tgt) / 4 && skip_streak_ < 32 && !chronic_clip) {
+      // Late frame (lead below the safe-send floor): skip it UNSENT, offset untouched. Re-anchoring
+      // here — the old behavior — bakes the lateness into e2e latency (offset grows by the backlog,
+      // and the trim servo takes minutes to shed it) while the queue behind stays full, so upstream
+      // keeps dropping and the capture gaps punch idle holes in the schedule: the ~34-44fps limit
+      // cycle + past-error bursts seen on the rig 2026-07-02. Skipping purges a standing backlog at
+      // compute speed and fresh frames come back inside the band at the ORIGINAL calibrated latency.
+      // The receiver sees a brief frame gap (repeat), not a base jump (dip) or thin-lead colored
+      // lines. The streak cap handles a genuinely higher new latency floor: if ~32 consecutive frames
+      // are all late this is not a purgeable backlog, so fall through once to the re-anchor below and
+      // accept the new offset.
+      ++skip_streak_;
+      ++skipped_late_;
+      if (shallow) ++win_skips_;
+      // AIMD floor probe (see trim below): a skip after a long clean run means the shave just
+      // touched the true latency floor. MULTIPLICATIVE decrease: give back HALF of everything
+      // shaved since the last probe (floor at 4ms), so the resting margin self-scales to the
+      // pipeline's real jitter (~70ms observed at 4K60 FRC — a fixed 4ms back-off sat inside the
+      // jitter band and skip-stormed). Each probe also doubles the re-arm delay, so probes decay
+      // geometrically once settled. A skip during a purge/burst (short clean run) is backlog, not
+      // a probe: no back-off, no ratchet.
+      if (trim_ns_.get() > 0 && frames_since_skip_ > trim_arm_frames_) {
+        // Tail-referenced back-off: the probe fires on the jitter TAIL (the worst frame of the
+        // window), so restore THAT frame's would-be lead to ~2x target — parking the tail ~tgt
+        // above the skip floor and the typical frame well clear. A flat few-ms back-off sat inside
+        // the jitter band and churned thin-lead past-errors between probes (42/s observed).
+        const int64_t back =
+            std::max<int64_t>({2 * static_cast<int64_t>(tgt) - lead,
+                               shaved_since_probe_ / 2, int64_t(4000000)});
+        genlock_offset_ += static_cast<uint64_t>(back);
+        trim_total_ns_ -= back;
+        shaved_since_probe_ = 0;
+        trim_arm_frames_ = std::min<uint32_t>(trim_arm_frames_ * 2, 8192);
+        HOLOSCAN_LOG_INFO(
+            "st2110_tx: trim probe hit the floor (lead {} us) — backing off {} us, re-arm {} frames",
+            lead / 1000, back / 1000, trim_arm_frames_);
+      }
+      frames_since_skip_ = 0;
+      if ((skipped_late_ & 31) == 1)
+        HOLOSCAN_LOG_INFO("st2110_tx: skipping late frame (lead {} us) — purging backlog ({} skipped)",
+                          lead / 1000, skipped_late_);
+      if (media_ts_ns_ != 0) media_ts_ns_ += frame_interval_ns_;
+      return;
+    }
     if (lead < static_cast<int64_t>(tgt) / 4 || lead > 2 * static_cast<int64_t>(frame_interval_ns_)) {
       genlock_offset_ = (now + tgt) - frame.capture_ts_ns;  // re-center the lead (rare)
       gbase = static_cast<int64_t>(now) + static_cast<int64_t>(tgt);
-      HOLOSCAN_LOG_INFO("st2110_tx: genlock re-anchor #{} — lead was {} us, re-centered to {} us",
-                        reanchors_ + 1, lead / 1000, static_cast<int64_t>(tgt) / 1000);
+      HOLOSCAN_LOG_INFO("st2110_tx: genlock re-anchor #{} — lead was {} us, re-centered to {} us{}",
+                        reanchors_ + 1, lead / 1000, static_cast<int64_t>(tgt) / 1000,
+                        chronic_clip ? " (chronic clipping: latency floor rose)" : "");
       lead = static_cast<int64_t>(tgt);
       ++reanchors_;
-    } else if (trim_ns_.get() > 0 && lead > static_cast<int64_t>(tgt) + 500000) {
-      // Latency trim servo: the lead above target is dead latency (the frame just waits longer in the
-      // NIC schedule). Shave a bounded step per frame off the offset so the base — still perfectly
-      // smooth, source-locked — drifts down until lead == tgt. Deadband 500 us so a settled pipeline
-      // never dithers. The media clock slews in lockstep below, keeping RTP ts == wire schedule.
-      const int64_t step = std::min<int64_t>(trim_ns_.get(), lead - static_cast<int64_t>(tgt));
-      genlock_offset_ -= static_cast<uint64_t>(step);
-      gbase -= step;
-      lead -= step;
-      trim_total_ns_ += static_cast<uint64_t>(step);
+      win_skips_ = win_skips_prev_ = 0;  // fresh offset: don't re-trigger on the old window
+      win_count_ = 0;
+      frames_since_skip_ = 0;    // and re-approach the floor gently from the new offset
+      trim_arm_frames_ = 512;
+      shaved_since_probe_ = 0;
+    } else if (trim_ns_.get() > 0 && frames_since_skip_ > trim_arm_frames_) {
+      // Skip-gated latency trim (AIMD): after a clean run (starts at ~512 sends = ~8.5s, doubles
+      // per floor probe), shave the offset a bounded step per frame. Unlike a lead-gated shave
+      // this genuinely drains the standing queues — every departure moves earlier, so queue wait
+      // shrinks 1:1 — and it keeps shaving until the schedule actually probes the pipeline floor,
+      // which announces itself as ONE skipped frame; the skip branch then gives back half of what
+      // was shaved (jitter-scaled margin) and doubles the re-arm delay. Immune to the
+      // offset-invariance trap that sank the min-lead servos (see the window comment above).
+      genlock_offset_ -= trim_ns_.get();
+      gbase -= static_cast<int64_t>(trim_ns_.get());
+      lead -= static_cast<int64_t>(trim_ns_.get());
+      trim_total_ns_ += static_cast<int64_t>(trim_ns_.get());
+      shaved_since_probe_ += static_cast<int64_t>(trim_ns_.get());
     }
+    ++frames_since_skip_;
+    skip_streak_ = 0;  // this frame sends — any late streak is over
     schedule_base_ns_ = static_cast<uint64_t>(gbase);
     last_lead_ns_ = lead;
     genlocked_ = true;
@@ -372,10 +471,10 @@ void St2110TxOp::stop() {
   emit_live(true);  // final live snapshot for the daemon
   const auto s = backend_->stats();
   HOLOSCAN_LOG_INFO(
-      "st2110_tx stopped: frames={} packets={} reanchors={} | tx_pp jitter={}ns wander={}ns "
-      "sync_lost={} future_err={} past_err={} | final lead {} us, latency trimmed {} ms",
-      frames_sent_, packets_sent_, reanchors_, s.jitter_ns, s.wander_ns, s.sync_lost, s.future_errors,
-      s.past_errors, last_lead_ns_ / 1000, trim_total_ns_ / 1000000);
+      "st2110_tx stopped: frames={} packets={} reanchors={} skipped_late={} | tx_pp jitter={}ns "
+      "wander={}ns sync_lost={} future_err={} past_err={} | final lead {} us, latency trimmed {} ms",
+      frames_sent_, packets_sent_, reanchors_, skipped_late_, s.jitter_ns, s.wander_ns, s.sync_lost,
+      s.future_errors, s.past_errors, last_lead_ns_ / 1000, trim_total_ns_ / 1000000);
   backend_->shutdown();
   backend_.reset();
 }
