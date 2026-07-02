@@ -63,6 +63,9 @@ void NvofFlow::init(uint32_t width, uint32_t height, uint32_t grid_size) {
   Impl& im = *p_;
   im.width = width;
   im.height = height;
+  // NVOF outputs one vector per 1|2|4 px only; grid_enum() maps anything else to 4, so the grid
+  // used to size grid_w/grid_h buffers must match or the output buffer is undersized.
+  if (grid_size != 1 && grid_size != 2) grid_size = 4;
   im.grid_size = grid_size;
 
   cu_check(cuInit(0), "cuInit");

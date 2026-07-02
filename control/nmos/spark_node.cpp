@@ -332,9 +332,9 @@ class EngineController {
       value c = current_config();
       // Hard fallbacks so a real launch never gets empty PCI even if /api/status was unreachable.
       if (!c.has_field(U("rxPci")) || c.at(U("rxPci")).as_string().empty())
-        c[U("rxPci")] = value::string(U("0000:01:00.1"));
+        c[U("rxPci")] = value::string(U("0000:01:00.0"));
       if (!c.has_field(U("txPci")) || c.at(U("txPci")).as_string().empty())
-        c[U("txPci")] = value::string(U("0002:01:00.1"));
+        c[U("txPci")] = value::string(U("0002:01:00.0"));
       // RX video source (from the activated sender's transport params + SDP):
       c[U("rxMcastGroup")] = value::string(vrx.group);
       c[U("rxSrcIp")] = value::string(vrx.src);
@@ -771,8 +771,8 @@ class NodeStateSync {
     return {};
   }
 
-  // out rate mirrors the engine (st2110_pipeline): up-convert (frc_mode 2) doubles the source rate,
-  // else 1:1; fall back to 59.94 when no source is connected (the engine's base_fps default).
+  // out rate mirrors the engine (st2110_pipeline): up-convert (frc_mode 2 or 3-uniform) doubles the
+  // source rate, else 1:1; fall back to 59.94 when no source is connected (engine base_fps default).
   static nmos::rational output_rate(const utility::string_t& in_fps, uint32_t frc_mode) {
     nmos::rational base = nmos::rates::rate59_94;
     const auto s = utility::us2s(in_fps);
@@ -784,7 +784,9 @@ class NodeStateSync {
         if (num > 0 && den > 0) base = nmos::rational(num, den);
       } catch (...) {}
     }
-    return 2 == frc_mode ? nmos::rational(base.numerator() * 2, base.denominator()) : base;
+    return (2 == frc_mode || 3 == frc_mode)
+               ? nmos::rational(base.numerator() * 2, base.denominator())
+               : base;
   }
 
   static bool sender_resolved(const nmos::resource& connection_sender) {
