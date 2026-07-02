@@ -15,6 +15,7 @@
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_ether.h>
+#include <rte_flow.h>
 #include <rte_ip.h>
 #include <rte_mbuf.h>
 #include <rte_mbuf_dyn.h>
@@ -59,28 +60,42 @@ class DpdkRxBackend final : public ISt2110RxBackend {
     create_pool();
     port_ = find_port_by_pci(cfg_.pci_addr);
     if (port_ == RTE_MAX_ETHPORTS) die("no DPDK port matches PCI " + cfg_.pci_addr);
+    // Flow isolation, requested BEFORE the port is configured: this mlx5 port function can host the
+    // kernel's management netdev (SSH/ARP) and ptp4l. Non-isolated, dev_start steers all unicast for
+    // the shared MAC into the DPDK queue — and the legacy no-group path adds promiscuous on top — so
+    // the kernel netdev goes deaf the moment the engine starts (observed as SSH sessions dropping).
+    // Isolated, the NIC delivers ONLY explicitly created flows to DPDK; the rest stays kernel-side.
+    rte_flow_error ferr{};
+    isolated_ = rte_flow_isolate(port_, 1, &ferr) == 0;
+    if (!isolated_)
+      std::printf("[st2110_rx] WARN: flow isolation unavailable on %s (%s) — legacy steering will "
+                  "disrupt kernel traffic (SSH/PTP) sharing this port\n",
+                  cfg_.pci_addr.c_str(), ferr.message ? ferr.message : "?");
     setup_port();
     lookup_rx_timestamp();
     if (rte_eth_dev_start(port_) < 0) die("rte_eth_dev_start failed");
-    if (group_be_) {
-      // Accept ONLY the 2110 group's multicast MAC — NOT all multicast. This mlx5 port is shared with
-      // the kernel netdev that runs ptp4l; rte_eth_allmulticast_enable() also sweeps up the
-      // grandmaster's PTP multicast, starving ptp4l so it drops the GM and promotes the local clock.
-      // A specific mc-addr filter leaves PTP (and other multicast) to the kernel. Fall back to
-      // allmulticast only if the PMD can't program the filter (so RX still works).
+    if (isolated_) {
+      install_flow_rule();  // steer exactly our UDP flow to queue 0; kernel keeps everything else
+      if (group_be_) send_igmp_join();     // make the switch's IGMP snooping forward the group to us
+    } else if (group_be_) {
+      // Legacy fallback. Accept ONLY the 2110 group's multicast MAC — NOT all multicast. This mlx5
+      // port is shared with the kernel netdev that runs ptp4l; rte_eth_allmulticast_enable() also
+      // sweeps up the grandmaster's PTP multicast, starving ptp4l so it drops the GM and promotes
+      // the local clock. A specific mc-addr filter leaves PTP (and other multicast) to the kernel.
+      // Fall back to allmulticast only if the PMD can't program the filter (so RX still works).
       rte_ether_addr mc{};
       spark::net::multicast_mac(rte_be_to_cpu_32(group_be_), mc.addr_bytes);
       if (rte_eth_dev_set_mc_addr_list(port_, &mc, 1) != 0) {
         std::printf("[st2110_rx] WARN: set_mc_addr_list unsupported; using allmulticast (may disturb PTP)\n");
         rte_eth_allmulticast_enable(port_);
       }
-      send_igmp_join();                    // make the switch's IGMP snooping forward the group to us
+      send_igmp_join();
     } else {
       rte_eth_promiscuous_enable(port_);   // legacy loopback: accept all, filter by dst port only
     }
-    std::printf("[st2110_rx] port %u up: udp_port=%u group=%s rxd=%u rx_timestamp=%d\n", port_,
-                cfg_.udp_port, cfg_.mcast_group.empty() ? "(none)" : cfg_.mcast_group.c_str(),
-                cfg_.rxd, have_ts_);
+    std::printf("[st2110_rx] port %u up: udp_port=%u group=%s rxd=%u rx_timestamp=%d isolated=%d\n",
+                port_, cfg_.udp_port, cfg_.mcast_group.empty() ? "(none)" : cfg_.mcast_group.c_str(),
+                cfg_.rxd, have_ts_, isolated_);
   }
 
   uint16_t receive(RxPacket* out, uint16_t max) override {
@@ -139,6 +154,10 @@ class DpdkRxBackend final : public ISt2110RxBackend {
 
   void shutdown() override {
     if (port_ != RTE_MAX_ETHPORTS) {
+      if (isolated_) {
+        rte_flow_error e{};
+        rte_flow_flush(port_, &e);
+      }
       rte_eth_dev_stop(port_);
       rte_eth_dev_close(port_);
       port_ = RTE_MAX_ETHPORTS;
@@ -191,6 +210,50 @@ class DpdkRxBackend final : public ISt2110RxBackend {
       if (inet_pton(AF_INET, cfg_.iface_ip.c_str(), &be) != 1) die("bad iface_ip " + cfg_.iface_ip);
       iface_ip_host_ = rte_be_to_cpu_32(be);
     }
+  }
+
+  // Isolated-mode steering: one rule sending exactly our stream — IPv4/UDP on our dst port, narrowed
+  // to the multicast group and SSM source when configured — to DPDK queue 0. Everything else (SSH,
+  // ARP, PTP, other groups) keeps flowing to the kernel netdev that shares this port function.
+  void install_flow_rule() {
+    rte_flow_attr attr{};
+    attr.ingress = 1;
+
+    rte_flow_item_ipv4 ip_spec{}, ip_mask{};
+    if (group_be_) {
+      ip_spec.hdr.dst_addr = group_be_;
+      ip_mask.hdr.dst_addr = UINT32_MAX;
+    }
+    if (ssm_src_be_) {
+      ip_spec.hdr.src_addr = ssm_src_be_;
+      ip_mask.hdr.src_addr = UINT32_MAX;
+    }
+    rte_flow_item_udp udp_spec{}, udp_mask{};
+    udp_spec.hdr.dst_port = udp_port_be_;
+    udp_mask.hdr.dst_port = UINT16_MAX;
+
+    rte_flow_item pattern[4]{};
+    pattern[0].type = RTE_FLOW_ITEM_TYPE_ETH;
+    pattern[1].type = RTE_FLOW_ITEM_TYPE_IPV4;
+    if (group_be_ || ssm_src_be_) {
+      pattern[1].spec = &ip_spec;
+      pattern[1].mask = &ip_mask;
+    }
+    pattern[2].type = RTE_FLOW_ITEM_TYPE_UDP;
+    pattern[2].spec = &udp_spec;
+    pattern[2].mask = &udp_mask;
+    pattern[3].type = RTE_FLOW_ITEM_TYPE_END;
+
+    rte_flow_action_queue queue{};
+    queue.index = 0;
+    rte_flow_action actions[2]{};
+    actions[0].type = RTE_FLOW_ACTION_TYPE_QUEUE;
+    actions[0].conf = &queue;
+    actions[1].type = RTE_FLOW_ACTION_TYPE_END;
+
+    rte_flow_error ferr{};
+    if (!rte_flow_create(port_, &attr, pattern, actions, &ferr))
+      die(std::string("rte_flow_create failed: ") + (ferr.message ? ferr.message : "unknown"));
   }
 
   // Emit an IGMPv3 Membership Report out the RX port so the fabric forwards the group to us. Sent
@@ -272,6 +335,7 @@ class DpdkRxBackend final : public ISt2110RxBackend {
 
   RxBackendConfig cfg_;
   bool eal_inited_ = false;
+  bool isolated_ = false;  // flow-isolated port: DPDK sees only install_flow_rule()'s traffic
   uint16_t port_ = RTE_MAX_ETHPORTS;
   rte_mempool* pool_ = nullptr;
   uint16_t udp_port_be_ = 0;
