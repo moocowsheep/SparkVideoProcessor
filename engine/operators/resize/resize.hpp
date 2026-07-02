@@ -41,6 +41,7 @@ class ResizeOp : public holoscan::Operator {
 
   uint64_t frames_ = 0;
   double ms_sum_ = 0.0, ms_min_ = 1e30, ms_max_ = 0.0;
+  bool identity_logged_ = false;  // one-shot log when the 1:1 passthrough engages
 };
 
 // Synthetic GPU frame source: emits a gradient-filled GpuFrame at the input resolution each compute().
