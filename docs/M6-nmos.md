@@ -154,3 +154,36 @@ IS-05 callbacks: `on_resolve_auto` (source/destination/interface IP; output mult
 - v1 scope: **single-path** (ST 2022-7 dual-path deferred), **video + audio** (ANC/data later).
 - nmos-cpp + Avahi logs noisy `DNSServiceCreateConnection ... -65544` warnings — non-fatal; advertise
   and browse both work through the Avahi compat layer.
+
+## Dashboard routing — inputs AND outputs (2026-07-01)
+
+The Discover card routes both directions:
+
+- **Sources → processor input** (as before): pick an external sender; the dashboard fetches its SDP
+  (`manifest_href`) and PATCHes OUR receiver's IS-05 `staged` with `sender_id` + `transport_file`.
+- **Processor output → destinations** (new): every external RTP receiver in the registry (e.g. the
+  BiDirects' decoder inputs) is listed with a **Send** button. Send fetches OUR sender's live SDP
+  from the node's manifest (`/x-manifest/senders/<id>/manifest` — regenerated with the current
+  resolution/IP10/gmid by NodeStateSync) and PATCHes it into the TARGET node's own Connection API,
+  resolved from its device's `urn:x-nmos:control:sr-ctrl` control (highest version wins). Release
+  PATCHes `master_enable:false`. Receivers already routed to another sender show "routed elsewhere".
+
+### Why everything rides `/api/nmos` (the daemon proxy)
+
+Blackmagic nodes serve **no CORS headers**, so the browser can neither fetch their manifests
+(registry mode used to fail exactly there — and worse, a 404 body or empty string was PATCHed as
+the "SDP") nor PATCH their connection APIs (cross-origin PATCH always preflights). The dashboard is
+served by the control daemon, so all NMOS traffic now goes through a same-origin forwarder:
+
+- `GET /api/nmos?u=<url>` — proxied GET; `POST /api/nmos?u=<url>&m=PATCH` — proxied PATCH (body
+  forwarded as `application/json`). Upstream status/body/content-type pass straight through.
+- Locked down: plain `http://` only; host must resolve to a private/loopback range; path must be
+  `/x-nmos/...`, `/x-manifest/...` (nmos-cpp manifests), or `/manifest` (the mDNS proxy's bridge).
+- The daemon now runs libmicrohttpd **thread-per-connection** so a slow peer (4 s timeout) can't
+  stall `/api/status` polling.
+- The dashboard also validates every fetched SDP (`v=` prefix) before PATCHing, and never sends an
+  empty `transport_file`.
+
+Validated end-to-end on-box (registry GETs, guard rejections, manifest SDP fetch, IS-05 PATCH with
+activation confirmed via `active.master_enable`) against a scratch daemon + node instance; the BMDs
+were offline, so the first live BiDirect "Send" is the remaining acceptance check.

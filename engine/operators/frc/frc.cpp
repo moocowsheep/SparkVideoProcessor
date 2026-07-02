@@ -87,7 +87,13 @@ void FrcOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& o
                           flow_.grid_size(), *mid, wmap_, static_cast<float>(phase_.get()), stream_);
   cudaEventRecord(mid->ready, stream_);  // mid is ready once interpolate completes on stream_
   mid->t_ingest_ns = cur->t_ingest_ns;   // mid rides cur's ingest time for the latency probe
-  mid->capture_ts_ns = cur->capture_ts_ns;  // carry source frame timing (genlock is IP10-only; FRC off there)
+  // The mid is the temporal MIDPOINT of (prev, cur), so stamp it halfway between their capture times.
+  // Stamping it cur's time (as before) made the up-convert pair (mid, cur) carry IDENTICAL capture_ts,
+  // so the genlock TX scheduled both on the same base — the second frame of every pair past-stamped
+  // into an unpaced burst. Midpoint stamping spaces the pair exactly one output interval apart; for
+  // retime (mid only) it's a constant half-frame shift the genlock calibration absorbs.
+  const uint64_t pc = prev_->capture_ts_ns, cc = cur->capture_ts_ns;
+  mid->capture_ts_ns = (pc != 0 && cc > pc) ? cc - (cc - pc) / 2 : cc;
   ++frames_;
   prev_ = cur;
 
