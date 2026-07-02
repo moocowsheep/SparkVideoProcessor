@@ -15,6 +15,10 @@ const CAMEL = { out_width: 'outWidth', out_height: 'outHeight', frc_mode: 'frcMo
 // float-valued config (proc amp / sharpen) — parseInt would truncate 0.85 to 0
 const FLOAT = new Set(['sharpen', 'pa_brightness', 'pa_contrast', 'pa_saturation', 'pa_hue_deg']);
 let formLoaded = false;
+// Last full config from /api/status. The form covers only the processing knobs, but /api/config
+// REPLACES the daemon's whole config — posting the bare form would wipe the NMOS/SDP-derived
+// routing fields (rxMcastGroup, rxSrcIp, in* format, tx*...), so Save overlays the form onto this.
+let lastConfig = null;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -67,6 +71,7 @@ async function poll() {
   $('uptime').textContent = Math.round(st.uptimeS || 0);
   $('msg').textContent = st.message || '';
   if (st.stats) renderStats(st.stats);
+  if (st.config) lastConfig = st.config;
   if (st.config && (!formLoaded || running)) { fillForm(st.config); formLoaded = true; }
   for (const id of CFG) $(id).disabled = running;
   $('save').disabled = running;
@@ -75,7 +80,7 @@ async function poll() {
 }
 
 $('save').onclick = async () => {
-  const a = await api('/api/config', { method: 'POST', body: JSON.stringify(readForm()) });
+  const a = await api('/api/config', { method: 'POST', body: JSON.stringify({ ...(lastConfig || {}), ...readForm() }) });
   $('msg').textContent = a.message || '';
   poll();
 };
