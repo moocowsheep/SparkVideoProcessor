@@ -5,12 +5,19 @@
 // one EAL across both ports. Validate with a generator feeding the RX port (see st2110_passthrough).
 //
 //   sudo -n SPARK_PROFILE=1080p SPARK_OUT_W=3840 SPARK_OUT_H=2160 ./engine/build/st2110_pipeline
+#include <algorithm>
 #include <cstdlib>
+#include <map>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include <holoscan/holoscan.hpp>
 
 #include "operators/codec/codec_ops.hpp"
 #include "operators/common/dpdk_eal.hpp"
+#include "operators/filters/filters.hpp"
 #include "operators/frc/frc.hpp"
 #include "operators/resize/resize.hpp"
 #include "operators/st2110_rx/st2110_rx.hpp"
@@ -27,7 +34,8 @@ class St2110Pipeline : public holoscan::Application {
       return std::string(v ? v : d);
     };
     const std::string profile = env("SPARK_PROFILE", "1080p");  // input resolution
-    const std::string interp = env("SPARK_INTERP", "cubic");
+    // "auto": supersampling for downscales (anti-aliased), cubic for upscales, passthrough at 1:1.
+    const std::string interp = env("SPARK_INTERP", "auto");
     // FRC mode: 0 = off, 1 = retime (1:1 motion-comp), 2 = up-convert (real + mid -> 2x rate).
     const std::string frc_mode = env("SPARK_FRC", "1");
     const bool with_frc = frc_mode != "0";
@@ -68,6 +76,15 @@ class St2110Pipeline : public holoscan::Application {
     // SAME env var for the SDP's TP= field, so set it for both processes to keep wire + SDP in sync.
     const std::string tx_tp = env("SPARK_TX_TP", "narrow");
     const bool tx_wide = tx_tp == "wide" || tx_tp == "W" || tx_tp == "2110TPW";
+    // Latency knobs (docs/M8-latency.md). SPARK_TX_LEAD_NS: how far ahead of the NIC clock the genlock
+    // schedules each frame — every ns of lead is a ns of end-to-end latency, but it's also the pipeline
+    // jitter shock-absorber; lower it only while watching tx_past_err stay 0. SPARK_TX_TRIM_NS: max
+    // ns/frame the TX slews the send base + RTP clock down toward the lead target, reclaiming the
+    // startup transient the one-shot genlock calibration would otherwise bake in forever (0 = off).
+    const uint32_t tx_lead =
+        static_cast<uint32_t>(std::atoll(env("SPARK_TX_LEAD_NS", "8000000").c_str()));
+    const uint32_t tx_trim =
+        static_cast<uint32_t>(std::atoll(env("SPARK_TX_TRIM_NS", "5000").c_str()));
     // Source format from the SDP (SPARK_IN_*; the NMOS bridge fills these from the sender's fmtp). The
     // real input rate must reach the TX pacer — FRC here is 1:1, so the output rate == the input rate.
     auto parse_rate = [](const std::string& s) -> double {
@@ -88,6 +105,31 @@ class St2110Pipeline : public holoscan::Application {
     eal.add_device(rx_pci, "");
     eal.init("0-11", "spark_pipe");
 
+    // --- modular filter chain (M9) ---
+    // Optional GPU stages between unpack and pack, each enabled by its own parameters:
+    //   sharpen: luma unsharp amount (SPARK_SHARPEN, 0 = off)
+    //   procamp: brightness/contrast/saturation/hue (SPARK_PA_BRIGHT/CONTRAST/SAT/HUE; neutral = off)
+    // Default order frc,scale,sharpen,procamp — flow estimation at native input resolution, sharpen
+    // at the delivery resolution, levels trimmed last. SPARK_FILTERS overrides the set/order
+    // explicitly (comma list of frc|scale|sharpen|procamp; unpack/pack/tx stay implicit).
+    const double sharpen_amt = std::atof(env("SPARK_SHARPEN", "0").c_str());
+    const double pa_bright = std::atof(env("SPARK_PA_BRIGHT", "0").c_str());
+    // 0/negative contrast+saturation read as "unset" -> neutral: a proto3/JSON config that omits the
+    // field arrives as 0, and silently forcing every frame to black would be a rude default.
+    double pa_contrast = std::atof(env("SPARK_PA_CONTRAST", "1").c_str());
+    if (pa_contrast <= 0.0) pa_contrast = 1.0;
+    double pa_sat = std::atof(env("SPARK_PA_SAT", "1").c_str());
+    if (pa_sat <= 0.0) pa_sat = 1.0;
+    const double pa_hue = std::atof(env("SPARK_PA_HUE", "0").c_str());
+    const bool with_procamp =
+        pa_bright != 0.0 || pa_contrast != 1.0 || pa_sat != 1.0 || pa_hue != 0.0;
+    std::string filters = env("SPARK_FILTERS", "");
+    if (filters.empty()) {
+      filters = with_frc ? "frc,scale" : "scale";
+      if (sharpen_amt > 0.0) filters += ",sharpen";
+      if (with_procamp) filters += ",procamp";
+    }
+
     auto rx = make_operator<ops::St2110RxOp>("st2110_rx", Arg("pci_addr", rx_pci),
                                              Arg("profile", profile), Arg("manage_eal", false),
                                              Arg("emit_frames", true), Arg("udp_port", rx_port),
@@ -100,8 +142,6 @@ class St2110Pipeline : public holoscan::Application {
     // gate the RX to zero compute() calls, so the graph emitted nothing and exited at startup.
     if (frames > 0) rx->add_arg(make_condition<CountCondition>(frames));
     auto unpack = make_operator<ops::UnpackOp>("unpack");
-    auto resize = make_operator<ops::ResizeOp>("resize", Arg("out_width", ow), Arg("out_height", oh),
-                                               Arg("interp", interp));
     auto pack = make_operator<ops::PackOp>("pack", Arg("out_fps", out_fps), Arg("ip10", ip10));
     // Multicast egress: pass the group as dst_ip and zero the MAC so the backend derives it (RFC 1112).
     auto tx = make_operator<ops::St2110TxOp>(
@@ -135,27 +175,54 @@ class St2110Pipeline : public holoscan::Application {
         // only re-centers on a real >6ms latency spike. horizon 8ms gives the throttle strong backpressure
         // (shallow RX queue -> ~no drops). IP10 adds gapped/line-aligned packetization on top; raw keeps
         // even ST 2110-21 narrow pacing (no per-line context, so even is correct there).
-        Arg("pacing_horizon_ns", uint32_t(8000000)),
-        Arg("reanchor_lead_ns", uint32_t(8000000)),
+        Arg("pacing_horizon_ns", std::max(tx_lead, uint32_t(8000000))),
+        Arg("reanchor_lead_ns", tx_lead), Arg("trim_ns", tx_trim),
         // Wide (2110TPW) when SPARK_TX_TP=wide: even full-frame pacing, no per-line gaps. The receiver's
         // wide buffer absorbs tx_pp jitter (fixes the narrow dips); keep the SDP TP= in sync via the NMOS node.
         Arg("tx_wide", tx_wide));
-    add_flow(rx, unpack);
-    // FRC runs BEFORE resize so optical flow + interpolation happen at NATIVE input resolution: pixel
-    // displacements stay inside the NVOFA search range (they would double on 2160p-upscaled frames and
-    // exceed it -> torn warps) and the flow field is 1/4 the size (less GPU, lower jitter). The resize
-    // then upscales the real + mid frames identically, so there's no sharpness flicker between them.
-    if (with_frc) {
-      // motion-compensated interpolation (OFA): rate_mult 2 inserts a real+mid pair -> 2x output rate.
-      auto frc = make_operator<ops::FrcOp>("frc", Arg("rate_mult", frc_2x ? 2u : 1u),
-                                           Arg("grid_size", frc_grid));
-      add_flow(unpack, frc);
-      add_flow(frc, resize);
-    } else {
-      add_flow(unpack, resize);
+    // Compose the GpuFrame chain unpack -> [filters...] -> pack from the `filters` token list. Every
+    // filter is a GpuFrame->GpuFrame operator (own stream, ready-event ordered, out-of-place pool),
+    // so any subset in any order wires the same way. Default order rationale: FRC BEFORE scale so
+    // optical flow + interpolation run at NATIVE input resolution (pixel displacements stay inside
+    // the NVOFA search range — they'd double on 2160p-upscaled frames and exceed it -> torn warps —
+    // and the flow field is 1/4 the size); sharpen AFTER scale so it counters interpolation softness
+    // at the delivery resolution; procamp last as the final levels trim.
+    std::vector<std::shared_ptr<Operator>> chain{unpack};
+    std::string composed = "rx -> unpack";
+    std::stringstream toks(filters);
+    std::map<std::string, int> seen;  // operator names must be unique; "procamp,procamp" is legal
+    for (std::string tok; std::getline(toks, tok, ',');) {
+      if (tok.empty()) continue;
+      const int nth = seen[tok]++;
+      const std::string name = nth ? tok + std::to_string(nth + 1) : tok;
+      if (tok == "frc") {
+        if (!with_frc) {  // frc listed but SPARK_FRC=0: mode governs behavior, so skip it
+          HOLOSCAN_LOG_WARN("chain: 'frc' listed in SPARK_FILTERS but SPARK_FRC=0 — skipping");
+          continue;
+        }
+        // motion-compensated interpolation (OFA): rate_mult 2 inserts a real+mid pair -> 2x rate.
+        chain.push_back(make_operator<ops::FrcOp>(name, Arg("rate_mult", frc_2x ? 2u : 1u),
+                                                  Arg("grid_size", frc_grid)));
+      } else if (tok == "scale") {
+        chain.push_back(make_operator<ops::ResizeOp>(name, Arg("out_width", ow),
+                                                     Arg("out_height", oh), Arg("interp", interp)));
+      } else if (tok == "sharpen") {
+        chain.push_back(make_operator<ops::SharpenOp>(name, Arg("amount", sharpen_amt)));
+      } else if (tok == "procamp") {
+        chain.push_back(make_operator<ops::ProcAmpOp>(
+            name, Arg("brightness", pa_bright), Arg("contrast", pa_contrast),
+            Arg("saturation", pa_sat), Arg("hue_deg", pa_hue)));
+      } else {
+        HOLOSCAN_LOG_WARN("chain: unknown filter '{}' in SPARK_FILTERS — skipping", tok);
+        continue;
+      }
+      composed += " -> " + name;
     }
-    add_flow(resize, pack);
+    chain.push_back(pack);
+    add_flow(rx, unpack);
+    for (size_t i = 0; i + 1 < chain.size(); ++i) add_flow(chain[i], chain[i + 1]);
     add_flow(pack, tx);
+    HOLOSCAN_LOG_INFO("chain: {} -> pack -> tx", composed);
   }
 };
 
@@ -168,11 +235,27 @@ int main() {
   // SPARK_MAX_MS>0 to bound a test run. Holoscan needs a finite value, so 0 maps to ~1 week.
   const char* ms = std::getenv("SPARK_MAX_MS");
   const int64_t max_ms = (ms && std::atoll(ms) > 0) ? std::atoll(ms) : 7LL * 24 * 3600 * 1000;
-  app->scheduler(app->make_scheduler<holoscan::MultiThreadScheduler>(
-      "mts", holoscan::Arg("worker_thread_number", static_cast<int64_t>(6)),
-      holoscan::Arg("stop_on_deadlock", true),
-      holoscan::Arg("stop_on_deadlock_timeout", static_cast<int64_t>(3000)),
-      holoscan::Arg("max_duration_ms", max_ms)));
+  // Scheduler (SPARK_SCHED): "event" (default) = EventBasedScheduler — operators are dispatched the
+  // moment an upstream emit readies them. "mts" = the legacy MultiThreadScheduler, whose polling
+  // thread sleeps check_recession_period_ms (default 5 ms!) whenever a pass finds nothing ready, so
+  // EVERY operator hop can eat up to 5 ms of pure scheduler latency — across this graph's 5 hops
+  // that's the single largest avoidable latency term. Keep "mts" as the fallback escape hatch.
+  const char* sched = std::getenv("SPARK_SCHED");
+  if (sched && std::string(sched) == "mts") {
+    HOLOSCAN_LOG_INFO("scheduler: MultiThreadScheduler (SPARK_SCHED=mts fallback)");
+    app->scheduler(app->make_scheduler<holoscan::MultiThreadScheduler>(
+        "mts", holoscan::Arg("worker_thread_number", static_cast<int64_t>(6)),
+        holoscan::Arg("stop_on_deadlock", true),
+        holoscan::Arg("stop_on_deadlock_timeout", static_cast<int64_t>(3000)),
+        holoscan::Arg("max_duration_ms", max_ms)));
+  } else {
+    HOLOSCAN_LOG_INFO("scheduler: EventBasedScheduler (low-latency; SPARK_SCHED=mts to fall back)");
+    app->scheduler(app->make_scheduler<holoscan::EventBasedScheduler>(
+        "ebs", holoscan::Arg("worker_thread_number", static_cast<int64_t>(6)),
+        holoscan::Arg("stop_on_deadlock", true),
+        holoscan::Arg("stop_on_deadlock_timeout", static_cast<int64_t>(3000)),
+        holoscan::Arg("max_duration_ms", max_ms)));
+  }
   app->run();
   return 0;
 }

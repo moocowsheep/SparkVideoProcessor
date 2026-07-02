@@ -68,6 +68,14 @@ add_library(spark_codec STATIC
 target_include_directories(spark_codec PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(spark_codec PUBLIC holoscan::core spark_resize CUDA::cudart)
 
+# --- video filters: proc amp + unsharp sharpen (CUDA) — modular GpuFrame chain stages -------------
+add_library(spark_filters STATIC
+  operators/filters/filter_kernels.cu
+  operators/filters/filters.cpp
+)
+target_include_directories(spark_filters PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(spark_filters PUBLIC holoscan::core spark_resize CUDA::cudart)
+
 # --- FRC: NVOF optical flow + motion-compensated interpolation (CUDA) -----------------------------
 # Raw NVOF (libnvidia-opticalflow, driver API) — NvOFFRUC isn't available on aarch64, so FRC is
 # hand-rolled on the flow field. SDK headers are vendored under spike/third_party (M0).
@@ -136,10 +144,10 @@ target_link_libraries(resize_smoke PRIVATE spark_resize holoscan::core)
 add_executable(frc_smoke apps/frc_smoke.cpp)
 target_link_libraries(frc_smoke PRIVATE spark_frc)
 
-# full processing pipeline: rx -> unpack -> resize -> frc -> pack -> tx (shared EAL)
+# full processing pipeline: rx -> unpack -> [filter chain] -> pack -> tx (shared EAL)
 add_executable(st2110_pipeline apps/st2110_pipeline.cpp)
 target_link_libraries(st2110_pipeline
-  PRIVATE spark_operators spark_codec spark_resize spark_frc holoscan::core)
+  PRIVATE spark_operators spark_codec spark_resize spark_frc spark_filters holoscan::core)
 
 # --- tests (framing round-trip; pure CPU, runs without NIC/root) -----------------------------------
 enable_testing()
@@ -161,6 +169,14 @@ add_test(NAME ip10_codec COMMAND test_ip10_codec)
 # ST 2110 multicast addressing (RFC 1112 MAC + IGMPv3 join); header-only, no DPDK
 add_executable(test_net_addr operators/common/test/test_net_addr.cpp)
 add_test(NAME net_addr COMMAND test_net_addr)
+
+# video filter kernels (proc amp / unsharp) vs CPU references — GPU, no NIC/root/Holoscan
+add_executable(test_filters
+  operators/filters/test/test_filters.cpp
+  operators/filters/filter_kernels.cu)
+target_include_directories(test_filters PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_filters PRIVATE CUDA::cudart)
+add_test(NAME filters COMMAND test_filters)
 
 # ST 2110-30 audio framing round-trip + lip-sync delay (pure CPU, no NIC)
 add_executable(test_audio_st2110 operators/audio/test/test_audio_st2110.cpp)

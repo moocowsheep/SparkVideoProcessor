@@ -10,9 +10,15 @@
 namespace spark::ops {
 namespace {
 
+// "auto" resolves per-frame in compute(): supersampling for a downscale (cubic/lanczos on a
+// downscale alias — they only interpolate, they don't prefilter), cubic for an upscale.
+constexpr int kAutoInterp = -1;
+
 int interp_code(const std::string& s) {
+  if (s == "auto") return kAutoInterp;
   if (s == "cubic") return NPPI_INTER_CUBIC;
   if (s == "lanczos") return NPPI_INTER_LANCZOS;
+  if (s == "super") return NPPI_INTER_SUPER;
   return NPPI_INTER_LINEAR;
 }
 
@@ -66,7 +72,8 @@ void ResizeOp::setup(holoscan::OperatorSpec& spec) {
   spec.output<spark::gpu::GpuFramePtr>("out");
   spec.param(out_width_, "out_width", "Out width", "target width", 3840u);
   spec.param(out_height_, "out_height", "Out height", "target height", 2160u);
-  spec.param(interp_, "interp", "Interpolation", "linear | cubic | lanczos", std::string("cubic"));
+  spec.param(interp_, "interp", "Interpolation", "auto | linear | cubic | lanczos | super",
+             std::string("cubic"));
   spec.param(measure_, "measure", "Measure", "per-frame GPU timing (benchmark only; adds a sync)",
              false);
 }
@@ -94,19 +101,40 @@ void ResizeOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext
   auto in = op_input.receive<spark::gpu::GpuFramePtr>("in");
   if (!in || !in.value()) return;
   const auto& src = *in.value();
+  // 1:1 passthrough: same geometry in and out (e.g. 2160p -> 2160p IP10 transcode) means the NPP
+  // resample would only burn GPU time and a pool buffer to produce an identical image — forward the
+  // input frame instead (its ready event and timing metadata travel with it). Skipped when measuring
+  // (the benchmark wants the kernel).
+  if (src.width == out_width_.get() && src.height == out_height_.get() && !measure_.get()) {
+    if (!identity_logged_) {
+      identity_logged_ = true;
+      HOLOSCAN_LOG_INFO("resize: {}x{} == target — 1:1 passthrough (NPP skipped)", src.width, src.height);
+    }
+    ++frames_;
+    op_output.emit(in.value(), "out");
+    return;
+  }
   cudaStreamWaitEvent(stream_, src.ready, 0);  // order behind the producer's writes (cross-stream)
   auto dst = pool_[pool_idx_];
   pool_idx_ = (pool_idx_ + 1) % pool_.size();
+
+  // Resolve the kernel for this direction. NPP's SUPER (supersampling) is the proper anti-aliased
+  // DOWNSCALE and is downscale-only — it errors when a dimension grows — so "auto" picks it for
+  // shrinks and cubic otherwise, and an explicit "super" falls back to cubic on a non-shrink.
+  const bool down = dst->width < src.width && dst->height < src.height;
+  int interp = interp_code_;
+  if (interp == kAutoInterp) interp = down ? NPPI_INTER_SUPER : NPPI_INTER_CUBIC;
+  else if (interp == NPPI_INTER_SUPER && !down) interp = NPPI_INTER_CUBIC;
 
   const bool measure = measure_.get();
   auto a = static_cast<cudaEvent_t>(ev_start_);
   auto b = static_cast<cudaEvent_t>(ev_stop_);
   if (measure) cudaEventRecord(a);
-  resize_plane(src.y, src.width, src.height, dst->y, dst->width, dst->height, interp_code_, npp_ctx_);
+  resize_plane(src.y, src.width, src.height, dst->y, dst->width, dst->height, interp, npp_ctx_);
   resize_plane(src.cb, src.chroma_width(), src.height, dst->cb, dst->chroma_width(), dst->height,
-               interp_code_, npp_ctx_);
+               interp, npp_ctx_);
   resize_plane(src.cr, src.chroma_width(), src.height, dst->cr, dst->chroma_width(), dst->height,
-               interp_code_, npp_ctx_);
+               interp, npp_ctx_);
   if (measure) {  // benchmark path: a full GPU sync per frame. Off in the pipeline (stream-ordered).
     cudaEventRecord(b);
     cudaEventSynchronize(b);
