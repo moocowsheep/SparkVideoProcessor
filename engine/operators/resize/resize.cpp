@@ -58,11 +58,10 @@ void resize_plane(const uint16_t* src, uint32_t sw, uint32_t sh, uint16_t* dst, 
 
 // ---- ResizeOp ----
 void ResizeOp::setup(holoscan::OperatorSpec& spec) {
-  // Sized to the producer's per-compute emit burst: 2 under FRC up-convert (real + mid arrive together),
-  // else 1 (retime / passthrough — unpack or retiming FRC feed one frame per tick). min_size 1 keeps
-  // resize upscaling one frame per compute. This is the latency floor — capacity == standing latency
-  // behind the paced TX, so passthrough/retime run 1-deep here instead of 2.
-  const auto cap = static_cast<uint64_t>(spark::pipeline_emit_burst());
+  // Burst-deep ONLY when this op directly receives FRC's multi-frame burst (SPARK_BURST_SINK);
+  // every other placement is 1:1 and sits 1-deep. min_size 1 keeps resize upscaling one frame per
+  // compute. This is the latency floor — capacity == standing latency behind the paced TX.
+  const auto cap = static_cast<uint64_t>(spark::pipeline_queue_cap(name()));
   spec.input<spark::gpu::GpuFramePtr>("in")
       .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
                  holoscan::Arg("capacity", cap),
