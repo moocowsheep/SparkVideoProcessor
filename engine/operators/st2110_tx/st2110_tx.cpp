@@ -1,5 +1,6 @@
 #include "st2110_tx.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdio>
@@ -59,6 +60,15 @@ void St2110TxOp::setup(holoscan::OperatorSpec& spec) {
              "true: own rte_eal_init; false: shared DpdkEal already up", true);
   spec.param(warmup_ms_, "warmup_ms", "Warmup ms",
              "one-time delay before the first frame (let an RX peer start polling first)", 0u);
+  // Latency trim rate. The genlock offset is calibrated on the FIRST frame through a cold pipeline
+  // (CUDA pools, NVOF init, startup queue backlog), so without trim the stream carries that transient
+  // forever — anywhere up to the 2-frame re-anchor band (~33 ms at 59.94) above the achievable floor.
+  // The servo shaves at most this many ns per frame off the base whenever the lead sits above target,
+  // and the RTP media clock slews with it, so wire time and timestamps stay glued — a bounded ~300 ppm
+  // (at 5 us/frame, 59.94) rate offset while converging, no jumps. 0 disables (exact legacy timing).
+  spec.param(trim_ns_, "trim_ns", "Trim ns/frame",
+             "max ns/frame to slew the send base (and media clock) toward the target lead; 0 = off",
+             uint32_t(5000));
 }
 
 void St2110TxOp::start() {
@@ -87,8 +97,19 @@ void St2110TxOp::emit_live(bool force) {
   if (!force && t - last_live_s_ < 1.0) return;
   last_live_s_ = t;
   const spark::net::TxStats s = backend_ ? backend_->stats() : spark::net::TxStats{};
-  HOLOSCAN_LOG_INFO("spark_live tx_frames={} tx_packets={} tx_future_err={} tx_past_err={} tx_reanchors={}",
-                    frames_sent_, packets_sent_, s.future_errors, s.past_errors, reanchors_);
+  // tx_e2e_us: capture -> first-bit-out latency estimate, i.e. the genlock offset modulo the 32-bit
+  // 90 kHz RTP wrap (~13.25 h). Exact when the source stamps RTP on the PTP epoch (ST 2110-10 — the
+  // BMDs do); for a free-running source the absolute value is meaningless but its CHANGES are real.
+  // tx_lead_us is always real: schedule base over the NIC clock at compute time (target = reanchor
+  // lead; anything persistently above target is trimmable latency). tx_trim_ms totals what the servo
+  // has reclaimed.
+  constexpr uint64_t kRtpWrapNs = 4294967296ULL * 100000ULL / 9ULL;  // 2^32 ticks @90 kHz, in ns
+  const uint64_t e2e_us = genlock_offset_ ? (genlock_offset_ % kRtpWrapNs) / 1000 : 0;
+  HOLOSCAN_LOG_INFO(
+      "spark_live tx_frames={} tx_packets={} tx_future_err={} tx_past_err={} tx_reanchors={} "
+      "tx_lead_us={} tx_e2e_us={} tx_trim_ms={}",
+      frames_sent_, packets_sent_, s.future_errors, s.past_errors, reanchors_, last_lead_ns_ / 1000,
+      e2e_us, trim_total_ns_ / 1000000);
 }
 
 void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
@@ -204,13 +225,28 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
     // stay at zero.
     if (genlock_offset_ == 0) genlock_offset_ = (now + tgt) - frame.capture_ts_ns;
     int64_t gbase = static_cast<int64_t>(frame.capture_ts_ns) + static_cast<int64_t>(genlock_offset_);
-    const int64_t lead = gbase - static_cast<int64_t>(now);
+    int64_t lead = gbase - static_cast<int64_t>(now);
     if (lead < static_cast<int64_t>(tgt) / 4 || lead > 2 * static_cast<int64_t>(frame_interval_ns_)) {
       genlock_offset_ = (now + tgt) - frame.capture_ts_ns;  // re-center the lead (rare)
       gbase = static_cast<int64_t>(now) + static_cast<int64_t>(tgt);
+      HOLOSCAN_LOG_INFO("st2110_tx: genlock re-anchor #{} — lead was {} us, re-centered to {} us",
+                        reanchors_ + 1, lead / 1000, static_cast<int64_t>(tgt) / 1000);
+      lead = static_cast<int64_t>(tgt);
       ++reanchors_;
+    } else if (trim_ns_.get() > 0 && lead > static_cast<int64_t>(tgt) + 500000) {
+      // Latency trim servo: the lead above target is dead latency (the frame just waits longer in the
+      // NIC schedule). Shave a bounded step per frame off the offset so the base — still perfectly
+      // smooth, source-locked — drifts down until lead == tgt. Deadband 500 us so a settled pipeline
+      // never dithers. The media clock slews in lockstep below, keeping RTP ts == wire schedule.
+      const int64_t step = std::min<int64_t>(trim_ns_.get(), lead - static_cast<int64_t>(tgt));
+      genlock_offset_ -= static_cast<uint64_t>(step);
+      gbase -= step;
+      lead -= step;
+      trim_total_ns_ += static_cast<uint64_t>(step);
     }
     schedule_base_ns_ = static_cast<uint64_t>(gbase);
+    last_lead_ns_ = lead;
+    genlocked_ = true;
   } else if (tgt > 0) {
     // Fallback (capture_ts unavailable): smooth bounded-lead servo on the compute clock — hold the
     // schedule ~tgt ahead, nudging a fraction of the error per frame; hard-resync only on a gross stall.
@@ -226,25 +262,39 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
         schedule_base_ns_ += err / 8;
       }
     }
+    last_lead_ns_ = static_cast<int64_t>(schedule_base_ns_) - static_cast<int64_t>(now);
+    genlocked_ = false;
   } else {
     // Legacy fixed grid (raw path): re-anchor only on a genuine >1-frame stall.
     if (schedule_base_ns_ == 0 || now > schedule_base_ns_ + frame_interval_ns_) {
       if (schedule_base_ns_ != 0) ++reanchors_;
       schedule_base_ns_ = now + pacing_horizon_ns_;
     }
+    last_lead_ns_ = static_cast<int64_t>(schedule_base_ns_) - static_cast<int64_t>(now);
+    genlocked_ = false;
   }
   const uint64_t base = schedule_base_ns_;
   const bool pace = pacing_.get();
 
-  // RTP media timestamp from a MONOTONIC clock anchored once to the GM-locked egress and advanced by
-  // exactly one frame interval per frame. (frame.capture_ts_ns doesn't survive the GPU path — planar
-  // GpuFrames carry no timestamp, so it arrives 0; and a processor's output media time is the locked
-  // send time anyway.) Decoupling it from schedule_base_ns_ matters: the pacer may re-anchor base
-  // (when it slips), and a timestamp that jumped with it would break a downstream receiver's clock
-  // recovery — the monotonic clock never jumps, so BMD-class receivers hold a solid lock.
+  // RTP media timestamp from a MONOTONIC clock anchored once to the GM-locked egress. Decoupling it
+  // from schedule_base_ns_ matters: the pacer may re-anchor base (jump), and a timestamp that jumped
+  // with it would break a downstream receiver's clock recovery — the monotonic clock never jumps, so
+  // BMD-class receivers hold a solid lock. It does SLEW (bounded, below) toward base in genlock mode
+  // so the two stay glued across trims and re-anchors without ever stepping.
   if (media_ts_ns_ == 0) media_ts_ns_ = base;
   pktz_->start_frame(spark::st2110::rtp_timestamp_90k(media_ts_ns_));
-  media_ts_ns_ += frame_interval_ns_;
+  // Advance the media clock one frame — plus, in genlock mode, a bounded slew toward the wire base.
+  // Without the slew, any base re-anchor or trim leaves the RTP timestamps permanently offset from
+  // the wire schedule, and a timestamp-driven receiver keeps playing at the OLD latency: the trimmed
+  // wire time buys nothing. Slewing at the same trim rate keeps ts == schedule (both receiver models
+  // see the latency drop) while staying smooth and monotonic (|slew| < frame interval by orders).
+  int64_t media_adj = 0;
+  if (genlocked_ && trim_ns_.get() > 0) {
+    const int64_t skew = static_cast<int64_t>(base) - static_cast<int64_t>(media_ts_ns_);
+    const int64_t lim = static_cast<int64_t>(trim_ns_.get());
+    media_adj = skew > lim ? lim : (skew < -lim ? -lim : skew);
+  }
+  media_ts_ns_ += frame_interval_ns_ + media_adj;
 
   uint32_t i = 0;
   uint32_t pace_line = 0xffffffffu, pace_intra = 0;
@@ -323,9 +373,9 @@ void St2110TxOp::stop() {
   const auto s = backend_->stats();
   HOLOSCAN_LOG_INFO(
       "st2110_tx stopped: frames={} packets={} reanchors={} | tx_pp jitter={}ns wander={}ns "
-      "sync_lost={} future_err={} past_err={}",
+      "sync_lost={} future_err={} past_err={} | final lead {} us, latency trimmed {} ms",
       frames_sent_, packets_sent_, reanchors_, s.jitter_ns, s.wander_ns, s.sync_lost, s.future_errors,
-      s.past_errors);
+      s.past_errors, last_lead_ns_ / 1000, trim_total_ns_ / 1000000);
   backend_->shutdown();
   backend_.reset();
 }

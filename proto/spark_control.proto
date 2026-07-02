@@ -64,6 +64,22 @@ message PipelineConfig {
   // frame early so its tail reaches a narrow (2110TPN) receiver before its deadline — fixes bottom-of-
   // frame breakup at high rates. 0 ⇒ engine default (0.9). Maps to SPARK_TX_FILL. JSON: txFill
   double tx_fill = 30;
+
+  // --- modular filter chain (M9). Each stage is inserted only when its parameters are non-neutral;
+  // `filters` overrides the set/order explicitly. Scaling (up OR down — downscales use anti-aliased
+  // supersampling when interp is "auto") remains out_width/out_height + interp above. ---
+  // Luma unsharp-mask sharpening gain. 0 ⇒ stage off. Maps to SPARK_SHARPEN. JSON: sharpen
+  double sharpen = 31;
+  // Proc amp (classic video corrector, native 10-bit YCbCr). Neutral = (0, 1, 1, 0). For contrast &
+  // saturation, 0 ⇒ unset ⇒ neutral 1.0 (proto3 zero-default safety — near-zero values like 0.01 give
+  // an effective zero). JSON: paBrightness paContrast paSaturation paHueDeg
+  double pa_brightness = 32;  // black-level offset, ±1.0 = ±full Y swing
+  double pa_contrast = 33;    // video gain about black; 1 = unity
+  double pa_saturation = 34;  // chroma gain; 1 = unity
+  double pa_hue_deg = 35;     // chroma phase rotation, degrees
+  // Explicit chain order override, comma list of frc|scale|sharpen|procamp (advanced; "" = automatic
+  // order frc,scale,sharpen,procamp with per-stage activation). Maps to SPARK_FILTERS. JSON: filters
+  string filters = 36;
 }
 
 enum PipelineState {

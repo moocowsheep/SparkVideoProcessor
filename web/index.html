@@ -25,13 +25,16 @@
         <button id="nmos_refresh" class="btn">Refresh</button>
       </div>
       <div id="nmos_status" class="nmos-status">…</div>
+      <h3 class="subhead">Sources → processor input</h3>
       <div id="sources" class="sources"></div>
-      <p class="hint" id="nmos_hint">Pick a discovered sender to route it to this processor — no PCIe/MAC needed.</p>
+      <h3 class="subhead">Processor output → destinations</h3>
+      <div id="dests" class="sources"></div>
+      <p class="hint" id="nmos_hint">Connect a sender to feed this processor; Send pushes our output's SDP to a destination receiver (IS-05). No PCIe/MAC needed.</p>
     </section>
 
     <section class="card">
       <h2>Pipeline</h2>
-      <p class="sub">st2110_rx → unpack → resize → frc → pack → st2110_tx</p>
+      <p class="sub">st2110_rx → unpack → [frc · scale · sharpen · procamp] → pack → st2110_tx</p>
       <div class="row">
         <button id="start" class="btn go">Start</button>
         <button id="stop" class="btn stop">Stop</button>
@@ -46,7 +49,7 @@
         <label>Input profile
           <select id="profile"><option>1080p</option><option>2160p</option></select></label>
         <label>Interpolation
-          <select id="interp"><option>cubic</option><option>linear</option><option>lanczos</option></select></label>
+          <select id="interp"><option>auto</option><option>cubic</option><option>linear</option><option>lanczos</option><option>super</option></select></label>
         <label>Out width <input id="out_width" type="number"></label>
         <label>Out height <input id="out_height" type="number"></label>
         <label>FRC (motion-comp)
@@ -54,6 +57,16 @@
         <label>Frames (0 = continuous) <input id="frames" type="number"></label>
         <label class="chk" title="Blackmagic IP10 10:8 (ST 2110-22). Required for Blackmagic receivers to accept 2160p59.94/60 over 10G — uncompressed 4K60 won't fit.">
           <input id="ip10" type="checkbox"> Blackmagic IP10 codec <span class="sub">(2160p59.94/60)</span></label>
+        <label title="Luma unsharp mask, applied after scaling. 0 disables the stage.">Sharpen (0 = off)
+          <input id="sharpen" type="number" step="0.1" min="0" max="4"></label>
+        <label title="Proc amp black-level offset; ±1 = ±full swing. 0 = neutral.">Brightness
+          <input id="pa_brightness" type="number" step="0.01" min="-1" max="1"></label>
+        <label title="Proc amp video gain about black. 1 = neutral (0 also reads as neutral).">Contrast
+          <input id="pa_contrast" type="number" step="0.05" min="0" max="4"></label>
+        <label title="Chroma gain. 1 = neutral (0 also reads as neutral; use 0.01 for mono).">Saturation
+          <input id="pa_saturation" type="number" step="0.05" min="0" max="4"></label>
+        <label title="Chroma phase rotation in degrees. 0 = neutral.">Hue (°)
+          <input id="pa_hue_deg" type="number" step="1" min="-180" max="180"></label>
       </div>
       <details class="advanced">
         <summary>Advanced — manual transport (overridden by NMOS routing)</summary>
@@ -63,6 +76,8 @@
           <label>Dest MAC <input id="dst_mac" type="text"></label>
           <label class="chk" title="Source stream is Blackmagic IP10 (decode on RX). Auto-detected from the SDP when routed via NMOS; set manually for direct transport.">
             <input id="in_ip10" type="checkbox"> Source is IP10</label>
+          <label title="Explicit filter-chain order (comma list of frc,scale,sharpen,procamp). Empty = automatic: each stage activates from its own parameters, in that order.">
+            Filter order <input id="filters" type="text" placeholder="auto"></label>
         </div>
       </details>
       <div class="row">
