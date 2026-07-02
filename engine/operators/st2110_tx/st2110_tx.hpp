@@ -89,6 +89,19 @@ class St2110TxOp : public holoscan::Operator {
   uint64_t frames_sent_ = 0;
   uint64_t packets_sent_ = 0;
   uint64_t reanchors_ = 0;  // grid resyncs (should be near-zero; high = a real upstream stall)
+  uint64_t skipped_late_ = 0;  // late frames dropped unsent to purge queue backlog (genlock catch-up)
+  uint32_t skip_streak_ = 0;   // consecutive late-skips; caps at ~32 then re-anchors (new latency floor)
+  // Skip-rate window (two 64-frame buckets) for the chronic-clipping guard, and the AIMD trim
+  // state. Lead-based trim servos were tried and removed: with standing upstream queues the
+  // measured lead is offset-INVARIANT (frames arrive when TX frees up), so min-lead gates read
+  // noise and reverse trim ratchets. Trim is skip-gated instead: shave after a long clean run,
+  // back off 4ms on the skip that probes the floor.
+  uint32_t win_count_ = 0;
+  uint32_t win_skips_ = 0;         // shallow-late skips this window (chronic-clipping guard input)
+  uint32_t win_skips_prev_ = 0;    // previous bucket; >25% over both windows -> re-anchor once
+  uint32_t frames_since_skip_ = 0;   // consecutive clean sends; > trim_arm_frames_ arms the shave
+  uint32_t trim_arm_frames_ = 512;   // AIMD re-arm delay; doubles per floor probe (cap 8192)
+  int64_t shaved_since_probe_ = 0;   // shave total since last probe; half is given back on probe
   uint64_t genlock_offset_ = 0;  // send_base = source capture_ts + this (calibrated once; GM-locked => const)
   bool throttle_enabled_ = true;  // self-disables if the spin caps out (likely now_ns() unit issue)
   bool warmed_ = false;
@@ -97,7 +110,7 @@ class St2110TxOp : public holoscan::Operator {
   // at compute time (the TX-side jitter margin AND queue+GPU slack — end-to-end latency rides on it);
   // trim_total = how much the servo has pulled out of the baked-in genlock offset so far.
   int64_t last_lead_ns_ = 0;
-  uint64_t trim_total_ns_ = 0;
+  int64_t trim_total_ns_ = 0;  // net latency trimmed (signed: reverse trim subtracts)
   bool genlocked_ = false;  // last frame used the capture_ts genlock path (media clock may slew)
 };
 
