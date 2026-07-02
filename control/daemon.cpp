@@ -57,13 +57,14 @@ struct State {
     config.set_out_height(2160);
     config.set_interp("auto");  // supersampling on downscale, cubic on upscale, 1:1 passthrough
     config.set_frc(true);
-    config.set_frc_mode(1);  // 1=retime; web UI / NMOS can pick 2=up-convert (30->60)
+    config.set_frc_mode(1);  // 1=retime; web UI / NMOS can pick 2=up-convert (30->60) or
+                             // 3=uniform-grid up-convert (2x on a rigid grid; erratic-source-proof)
     config.set_pa_contrast(1.0);    // proc amp neutral (0 would read as "unset" -> 1.0 anyway)
     config.set_pa_saturation(1.0);
-    config.set_rx_pci("0000:01:00.1");
-    config.set_tx_pci("0002:01:00.1");  // up port on this rig (.0 is the down link)
+    config.set_rx_pci("0000:01:00.0");
+    config.set_tx_pci("0002:01:00.0");  // up port on this rig (re-cabled 2026-07: .1 is the down link)
     config.set_dst_mac("00:00:5e:00:53:30");
-    config.set_frames(300);
+    config.set_frames(0);  // 0 = continuous (live routing); bounded runs set an explicit count
   }
 };
 State g_state;
@@ -165,7 +166,8 @@ bool start_locked(State& s, std::string& msg) {
     setenv("SPARK_OUT_W", std::to_string(c.out_width()).c_str(), 1);
     setenv("SPARK_OUT_H", std::to_string(c.out_height()).c_str(), 1);
     setenv("SPARK_INTERP", c.interp().c_str(), 1);
-    // SPARK_FRC is a mode (0=off, 1=retime, 2=up-convert). frc_mode supersedes the legacy frc bool.
+    // SPARK_FRC is a mode (0=off, 1=retime, 2=up-convert, 3=uniform-grid up-convert). frc_mode
+    // supersedes the legacy frc bool.
     const int frc_mode = c.frc_mode() > 0 ? static_cast<int>(c.frc_mode()) : (c.frc() ? 1 : 0);
     setenv("SPARK_FRC", std::to_string(frc_mode).c_str(), 1);
     setenv("SPARK_IP10", c.ip10() ? "1" : "0", 1);  // Blackmagic IP10 10:8 output (for 2160p60 to BMD)
@@ -409,18 +411,42 @@ int http_request(const std::string& method, const std::string& url, const std::s
     off += static_cast<size_t>(n);
   }
 
+  // Read until the response is COMPLETE, not until EOF: some embedded servers (the Blackmagic
+  // BiDirects) ignore "Connection: close" and hold the socket open, so an EOF-delimited read eats
+  // the whole 4 s timeout and reports failure with the body already in hand. Completion = header
+  // seen AND (Content-Length satisfied | terminal chunk seen); EOF stays as the fallback delimiter.
   std::string raw;
   char buf[8192];
+  size_t hdr_end = std::string::npos;
+  long want_len = -1;  // from Content-Length; -1 = unknown (EOF-delimited)
+  bool is_chunked = false;
+  const auto complete = [&]() -> bool {
+    if (hdr_end == std::string::npos) return false;
+    if (is_chunked) return raw.find("\r\n0\r\n", hdr_end + 2) != std::string::npos;
+    if (want_len >= 0) return raw.size() - (hdr_end + 4) >= static_cast<size_t>(want_len);
+    return false;
+  };
   for (;;) {
     const ssize_t n = recv(fd, buf, sizeof buf, 0);
     if (n < 0) { close(fd); err = "read failed/timeout"; return 0; }
     if (n == 0) break;
     raw.append(buf, static_cast<size_t>(n));
+    if (hdr_end == std::string::npos) {
+      hdr_end = raw.find("\r\n\r\n");
+      if (hdr_end != std::string::npos) {
+        std::string lower = raw.substr(0, hdr_end);
+        for (auto& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        const auto cl = lower.find("\r\ncontent-length:");
+        if (cl != std::string::npos) want_len = std::atol(lower.c_str() + cl + 17);
+        const auto te = lower.find("\r\ntransfer-encoding:");
+        is_chunked = te != std::string::npos && lower.find("chunked", te) != std::string::npos;
+      }
+    }
+    if (complete()) break;
     if (raw.size() > (16u << 20)) break;  // 16 MB cap — an SDP/JSON reply is KBs
   }
   close(fd);
 
-  const auto hdr_end = raw.find("\r\n\r\n");
   if (hdr_end == std::string::npos) { err = "malformed response"; return 0; }
   const std::string head = raw.substr(0, hdr_end);
   resp_body = raw.substr(hdr_end + 4);
