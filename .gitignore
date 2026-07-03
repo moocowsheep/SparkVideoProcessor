@@ -50,3 +50,4 @@ secrets/
 *.log
 *.pcap
 captures/
+tools/sr_weights/cache/
