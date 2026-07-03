@@ -11,7 +11,8 @@ message PipelineConfig {
   string profile = 1;     // input resolution: "1080p" | "2160p" (fallback when in_* unset)
   uint32 out_width = 2;   // resize target width  (e.g. 3840)
   uint32 out_height = 3;  // resize target height (e.g. 2160)
-  string interp = 4;      // "linear" | "cubic" | "lanczos"
+  string interp = 4;      // "auto" | "linear" | "cubic" | "lanczos" | "super", or AI x2
+                          // super-resolution on luma: "fsrcnn" | "fsrcnn-s" | "espcn"
   bool frc = 5;           // motion-compensated frame interpolation on/off
   string rx_pci = 6;      // CX-7 RX port BDF (one-time media-interface map; see rx_iface_ip)
   string tx_pci = 7;      // CX-7 TX port BDF

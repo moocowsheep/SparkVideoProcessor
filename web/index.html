@@ -48,8 +48,8 @@
       <div class="grid">
         <label>Input profile
           <select id="profile"><option>1080p</option><option>2160p</option></select></label>
-        <label>Interpolation
-          <select id="interp"><option>auto</option><option>cubic</option><option>linear</option><option>lanczos</option><option>super</option></select></label>
+        <label title="fsrcnn / fsrcnn-s / espcn: AI super-resolution on luma — exact ×2 upscales only (1080p → 2160p); other geometries fall back to cubic. fsrcnn = best, fsrcnn-s = fastest.">Interpolation
+          <select id="interp"><option>auto</option><option>cubic</option><option>linear</option><option>lanczos</option><option>super</option><option value="fsrcnn">fsrcnn (AI ×2)</option><option value="fsrcnn-s">fsrcnn-s (AI ×2 fast)</option><option value="espcn">espcn (AI ×2)</option></select></label>
         <label>Out width <input id="out_width" type="number"></label>
         <label>Out height <input id="out_height" type="number"></label>
         <label>FRC (motion-comp)
