@@ -5,6 +5,9 @@
 // one EAL across both ports. Validate with a generator feeding the RX port (see st2110_passthrough).
 //
 //   sudo -n SPARK_PROFILE=1080p SPARK_OUT_W=3840 SPARK_OUT_H=2160 ./engine/build/st2110_pipeline
+#include <sys/mman.h>
+#include <sys/resource.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <map>
@@ -264,6 +267,39 @@ class St2110Pipeline : public holoscan::Application {
 
 int main() {
   HOLOSCAN_LOG_INFO("ST 2110 pipeline: rx -> unpack -> resize -> pack -> tx (1080p->2160p).");
+  // Shield the realtime pipeline from host CPU contention. The residual ~300ms pipe stalls were
+  // reproduced ON DEMAND with 16 CPU burners (GPU fence 1ms — pure CFS scheduling starvation of
+  // the RX poll / scheduler worker threads) and never occur on a quiet host. Linux nice is
+  // per-thread and INHERITED at thread creation, so set it first thing in main: every EAL lcore,
+  // Holoscan worker, and RX poll thread created below runs at this priority. -15 outweighs
+  // default-nice work ~29:1 without the starve-the-kernel risks of SCHED_FIFO. SPARK_NICE
+  // overrides (0 disables).
+  {
+    const char* n = std::getenv("SPARK_NICE");
+    const int prio = n ? std::atoi(n) : -15;
+    if (prio != 0) {
+      if (setpriority(PRIO_PROCESS, 0, prio) == 0)
+        HOLOSCAN_LOG_INFO("pipeline nice set to {} (inherited by all engine threads)", prio);
+      else
+        HOLOSCAN_LOG_WARN("setpriority({}) failed (not root?) — vulnerable to host CPU contention",
+                          prio);
+    }
+  }
+  // The perf autopsy of the induced ~250ms stall (2026-07-02) showed the worker thread inside
+  // cuLibraryLoadData (CUDA lazily loading an NPP resize kernel mid-run) plus kernel page-fault
+  // storms — host MEMORY pressure, not timeslice starvation (idle CPU existed; nice didn't help).
+  // Two shields, both env-overridable:
+  //  - eager CUDA module loading: every kernel loads at init instead of on first use, so the
+  //    driver never takes the module-load path mid-frame (costs startup time only);
+  //  - mlockall ONFAULT: engine + driver pages stay resident once touched, so external memory
+  //    churn can't evict them into reload/major-fault stalls.
+  if (!std::getenv("SPARK_CUDA_LAZY")) setenv("CUDA_MODULE_LOADING", "EAGER", 0);
+  if (!std::getenv("SPARK_NO_MLOCK")) {
+    if (mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) == 0)
+      HOLOSCAN_LOG_INFO("mlockall(ONFAULT) — engine pages pinned resident");
+    else
+      HOLOSCAN_LOG_WARN("mlockall failed — vulnerable to host memory pressure (page-fault stalls)");
+  }
   auto app = holoscan::make_application<spark::St2110Pipeline>();
   // max run time (ms). Default 0 = run until stopped (a live feed must not self-terminate); set
   // SPARK_MAX_MS>0 to bound a test run. Holoscan needs a finite value, so 0 maps to ~1 week.
