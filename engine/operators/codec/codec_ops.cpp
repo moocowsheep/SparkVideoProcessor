@@ -240,9 +240,11 @@ void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& 
         std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
     if ((sync_us > 25000 || lat > 250000000ULL) && tw - last_stall_s_ >= 1.0) {
       last_stall_s_ = tw;
-      HOLOSCAN_LOG_WARN("pipe stall: chain latency {} ms, GPU fence {} ms -> {}", lat / 1000000,
-                        sync_us / 1000,
-                        sync_us > 25000 ? "GPU-side stall" : "queue/scheduler/CPU-side stall");
+      // mono timestamp = CLOCK_MONOTONIC seconds, directly comparable to `perf record -k monotonic`
+      // trace times for off-CPU analysis of the episode.
+      HOLOSCAN_LOG_WARN("pipe stall: chain latency {} ms, GPU fence {} ms -> {} (mono {:.3f})",
+                        lat / 1000000, sync_us / 1000,
+                        sync_us > 25000 ? "GPU-side stall" : "queue/scheduler/CPU-side stall", tw);
     }
     lat_sum_ += lat;
     ++lat_n_;
