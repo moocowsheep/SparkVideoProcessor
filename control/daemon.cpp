@@ -109,6 +109,40 @@ std::string read_ptp_gmid() {
   return gmid;
 }
 
+// Lock the GPU SM clock to its rated max before the pipeline starts. The GB10's DVFS governor
+// never boosts under CUDA load (SM pinned ~513 MHz of 3003 at 95% util, docs/M9-filters.md), so
+// without this the compute-heavy stages (AI super-resolution, FRC) run ~6x slow — and locked
+// clocks are what a media box wants anyway: a DVFS ramp mid-stream reads as latency wobble.
+// Needs root (the daemon is). Idempotent, so re-locking on every start is free and self-heals a
+// manual `nvidia-smi -rgc`. SPARK_LOCK_GPU_CLOCKS=0 (daemon env) opts out. Failure is a warning,
+// not fatal: a box without nvidia-smi (or a future non-root daemon) still runs, just slower.
+void lock_gpu_clocks() {
+  const char* opt = std::getenv("SPARK_LOCK_GPU_CLOCKS");
+  if (opt && std::string(opt) == "0") return;
+  // absolute path like pmc above: a root daemon's PATH may be minimal
+  FILE* p = popen(
+      "/usr/bin/nvidia-smi --query-gpu=clocks.max.sm --format=csv,noheader,nounits 2>/dev/null",
+      "r");
+  char buf[64] = {};
+  const bool got = p && fgets(buf, sizeof buf, p) != nullptr;
+  if (p) pclose(p);
+  const int max_sm = got ? std::atoi(buf) : 0;
+  if (max_sm <= 0) {
+    std::fprintf(stderr, "gpu clocks: nvidia-smi unavailable — leaving DVFS alone\n");
+    return;
+  }
+  const std::string cmd =
+      "/usr/bin/nvidia-smi -lgc " + std::to_string(max_sm) + " >/dev/null 2>&1";
+  if (std::system(cmd.c_str()) == 0)
+    std::fprintf(stderr, "gpu clocks: SM locked to %d MHz for the pipeline (nvidia-smi -rgc undoes)\n",
+                 max_sm);
+  else
+    std::fprintf(stderr,
+                 "gpu clocks: WARNING lock failed (nvidia-smi -lgc %d; not root?) — GPU stages "
+                 "may run ~6x slow\n",
+                 max_sm);
+}
+
 void parse_stats(PipelineStats& st) {
   std::ifstream f(kLog, std::ios::binary | std::ios::ate);
   if (!f) return;
@@ -149,6 +183,7 @@ bool start_locked(State& s, std::string& msg) {
     msg = "already running";
     return false;
   }
+  lock_gpu_clocks();  // parent, pre-fork: popen/system are not fork-safe in a threaded process
   const pid_t pid = fork();
   if (pid < 0) {
     msg = "fork failed";
