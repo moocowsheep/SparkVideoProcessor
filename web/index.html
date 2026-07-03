@@ -48,12 +48,12 @@
       <div class="grid">
         <label>Input profile
           <select id="profile"><option>1080p</option><option>2160p</option></select></label>
-        <label>Interpolation
-          <select id="interp"><option>auto</option><option>cubic</option><option>linear</option><option>lanczos</option><option>super</option></select></label>
+        <label title="fsrcnn / fsrcnn-s / espcn: AI super-resolution on luma — exact ×2 upscales only (1080p → 2160p); other geometries fall back to cubic. fsrcnn = best, fsrcnn-s = fastest.">Interpolation
+          <select id="interp"><option>auto</option><option>cubic</option><option>linear</option><option>lanczos</option><option>super</option><option value="fsrcnn">fsrcnn (AI ×2)</option><option value="fsrcnn-s">fsrcnn-s (AI ×2 fast)</option><option value="espcn">espcn (AI ×2)</option></select></label>
         <label>Out width <input id="out_width" type="number"></label>
         <label>Out height <input id="out_height" type="number"></label>
         <label>FRC (motion-comp)
-          <select id="frc_mode"><option value="0">off</option><option value="1">retime (1:1)</option><option value="2">up-convert (2×)</option></select></label>
+          <select id="frc_mode"><option value="0">off</option><option value="1">retime (1:1)</option><option value="2">up-convert (2×)</option><option value="3" title="Interpolates onto a rigid nominal output grid using the true capture times — absorbs erratic source frame timing (motion wobble) at the cost of synthesizing most frames.">up-convert 2× (uniform grid)</option></select></label>
         <label>Frames (0 = continuous) <input id="frames" type="number"></label>
         <label class="chk" title="Blackmagic IP10 10:8 (ST 2110-22). Required for Blackmagic receivers to accept 2160p59.94/60 over 10G — uncompressed 4K60 won't fit.">
           <input id="ip10" type="checkbox"> Blackmagic IP10 codec <span class="sub">(2160p59.94/60)</span></label>

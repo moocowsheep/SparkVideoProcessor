@@ -64,6 +64,7 @@ class PackOp : public holoscan::Operator {
   size_t idx_ = 0;
   // unpack->pack pipeline latency (ns), from GpuFrame::t_ingest_ns; logged 1 Hz + a final summary.
   double last_live_s_ = 0;
+  double last_stall_s_ = 0;  // rate limit for the "pipe stall" localization warn
   uint64_t lat_min_ = UINT64_MAX, lat_max_ = 0, lat_sum_ = 0, lat_n_ = 0;
 };
 

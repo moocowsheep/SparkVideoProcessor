@@ -22,6 +22,10 @@ the daemon converts them to JSON with protobuf's JSON mapping for the browser.
 - Manages the pipeline as a child process: `Start` fork/execs `st2110_pipeline` with the config mapped
   to `SPARK_*` env vars and captures its output; `Stop` SIGTERMs it and parses the final stats
   (rx frames/lost, tx future/past_err, ingest latency, FRC count) from the captured log.
+- `Start` first locks the GPU SM clock to its rated max (`nvidia-smi -lgc`; needs the root the daemon
+  already has) — the GB10 DVFS governor never boosts under load, which starves AI SR/FRC ~6×
+  (docs/M9-filters.md). Opt out with `SPARK_LOCK_GPU_CLOCKS=0` in the daemon's env; undo by hand with
+  `nvidia-smi -rgc`.
 - No DPDK/Holoscan/CUDA deps — builds standalone (gRPC + protobuf + libmicrohttpd).
 
 ## Dashboard (`web/`)

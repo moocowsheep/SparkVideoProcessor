@@ -57,13 +57,14 @@ struct State {
     config.set_out_height(2160);
     config.set_interp("auto");  // supersampling on downscale, cubic on upscale, 1:1 passthrough
     config.set_frc(true);
-    config.set_frc_mode(1);  // 1=retime; web UI / NMOS can pick 2=up-convert (30->60)
+    config.set_frc_mode(1);  // 1=retime; web UI / NMOS can pick 2=up-convert (30->60) or
+                             // 3=uniform-grid up-convert (2x on a rigid grid; erratic-source-proof)
     config.set_pa_contrast(1.0);    // proc amp neutral (0 would read as "unset" -> 1.0 anyway)
     config.set_pa_saturation(1.0);
-    config.set_rx_pci("0000:01:00.1");
-    config.set_tx_pci("0002:01:00.1");  // up port on this rig (.0 is the down link)
+    config.set_rx_pci("0000:01:00.0");
+    config.set_tx_pci("0002:01:00.0");  // up port on this rig (re-cabled 2026-07: .1 is the down link)
     config.set_dst_mac("30:c5:99:3e:9d:30");
-    config.set_frames(300);
+    config.set_frames(0);  // 0 = continuous (live routing); bounded runs set an explicit count
   }
 };
 State g_state;
@@ -108,6 +109,40 @@ std::string read_ptp_gmid() {
   return gmid;
 }
 
+// Lock the GPU SM clock to its rated max before the pipeline starts. The GB10's DVFS governor
+// never boosts under CUDA load (SM pinned ~513 MHz of 3003 at 95% util, docs/M9-filters.md), so
+// without this the compute-heavy stages (AI super-resolution, FRC) run ~6x slow — and locked
+// clocks are what a media box wants anyway: a DVFS ramp mid-stream reads as latency wobble.
+// Needs root (the daemon is). Idempotent, so re-locking on every start is free and self-heals a
+// manual `nvidia-smi -rgc`. SPARK_LOCK_GPU_CLOCKS=0 (daemon env) opts out. Failure is a warning,
+// not fatal: a box without nvidia-smi (or a future non-root daemon) still runs, just slower.
+void lock_gpu_clocks() {
+  const char* opt = std::getenv("SPARK_LOCK_GPU_CLOCKS");
+  if (opt && std::string(opt) == "0") return;
+  // absolute path like pmc above: a root daemon's PATH may be minimal
+  FILE* p = popen(
+      "/usr/bin/nvidia-smi --query-gpu=clocks.max.sm --format=csv,noheader,nounits 2>/dev/null",
+      "r");
+  char buf[64] = {};
+  const bool got = p && fgets(buf, sizeof buf, p) != nullptr;
+  if (p) pclose(p);
+  const int max_sm = got ? std::atoi(buf) : 0;
+  if (max_sm <= 0) {
+    std::fprintf(stderr, "gpu clocks: nvidia-smi unavailable — leaving DVFS alone\n");
+    return;
+  }
+  const std::string cmd =
+      "/usr/bin/nvidia-smi -lgc " + std::to_string(max_sm) + " >/dev/null 2>&1";
+  if (std::system(cmd.c_str()) == 0)
+    std::fprintf(stderr, "gpu clocks: SM locked to %d MHz for the pipeline (nvidia-smi -rgc undoes)\n",
+                 max_sm);
+  else
+    std::fprintf(stderr,
+                 "gpu clocks: WARNING lock failed (nvidia-smi -lgc %d; not root?) — GPU stages "
+                 "may run ~6x slow\n",
+                 max_sm);
+}
+
 void parse_stats(PipelineStats& st) {
   std::ifstream f(kLog, std::ios::binary | std::ios::ate);
   if (!f) return;
@@ -148,6 +183,7 @@ bool start_locked(State& s, std::string& msg) {
     msg = "already running";
     return false;
   }
+  lock_gpu_clocks();  // parent, pre-fork: popen/system are not fork-safe in a threaded process
   const pid_t pid = fork();
   if (pid < 0) {
     msg = "fork failed";
@@ -165,7 +201,8 @@ bool start_locked(State& s, std::string& msg) {
     setenv("SPARK_OUT_W", std::to_string(c.out_width()).c_str(), 1);
     setenv("SPARK_OUT_H", std::to_string(c.out_height()).c_str(), 1);
     setenv("SPARK_INTERP", c.interp().c_str(), 1);
-    // SPARK_FRC is a mode (0=off, 1=retime, 2=up-convert). frc_mode supersedes the legacy frc bool.
+    // SPARK_FRC is a mode (0=off, 1=retime, 2=up-convert, 3=uniform-grid up-convert). frc_mode
+    // supersedes the legacy frc bool.
     const int frc_mode = c.frc_mode() > 0 ? static_cast<int>(c.frc_mode()) : (c.frc() ? 1 : 0);
     setenv("SPARK_FRC", std::to_string(frc_mode).c_str(), 1);
     setenv("SPARK_IP10", c.ip10() ? "1" : "0", 1);  // Blackmagic IP10 10:8 output (for 2160p60 to BMD)
@@ -409,18 +446,42 @@ int http_request(const std::string& method, const std::string& url, const std::s
     off += static_cast<size_t>(n);
   }
 
+  // Read until the response is COMPLETE, not until EOF: some embedded servers (the Blackmagic
+  // BiDirects) ignore "Connection: close" and hold the socket open, so an EOF-delimited read eats
+  // the whole 4 s timeout and reports failure with the body already in hand. Completion = header
+  // seen AND (Content-Length satisfied | terminal chunk seen); EOF stays as the fallback delimiter.
   std::string raw;
   char buf[8192];
+  size_t hdr_end = std::string::npos;
+  long want_len = -1;  // from Content-Length; -1 = unknown (EOF-delimited)
+  bool is_chunked = false;
+  const auto complete = [&]() -> bool {
+    if (hdr_end == std::string::npos) return false;
+    if (is_chunked) return raw.find("\r\n0\r\n", hdr_end + 2) != std::string::npos;
+    if (want_len >= 0) return raw.size() - (hdr_end + 4) >= static_cast<size_t>(want_len);
+    return false;
+  };
   for (;;) {
     const ssize_t n = recv(fd, buf, sizeof buf, 0);
     if (n < 0) { close(fd); err = "read failed/timeout"; return 0; }
     if (n == 0) break;
     raw.append(buf, static_cast<size_t>(n));
+    if (hdr_end == std::string::npos) {
+      hdr_end = raw.find("\r\n\r\n");
+      if (hdr_end != std::string::npos) {
+        std::string lower = raw.substr(0, hdr_end);
+        for (auto& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        const auto cl = lower.find("\r\ncontent-length:");
+        if (cl != std::string::npos) want_len = std::atol(lower.c_str() + cl + 17);
+        const auto te = lower.find("\r\ntransfer-encoding:");
+        is_chunked = te != std::string::npos && lower.find("chunked", te) != std::string::npos;
+      }
+    }
+    if (complete()) break;
     if (raw.size() > (16u << 20)) break;  // 16 MB cap — an SDP/JSON reply is KBs
   }
   close(fd);
 
-  const auto hdr_end = raw.find("\r\n\r\n");
   if (hdr_end == std::string::npos) { err = "malformed response"; return 0; }
   const std::string head = raw.substr(0, hdr_end);
   resp_body = raw.substr(hdr_end + 4);

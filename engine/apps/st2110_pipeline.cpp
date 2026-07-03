@@ -5,6 +5,9 @@
 // one EAL across both ports. Validate with a generator feeding the RX port (see st2110_passthrough).
 //
 //   sudo -n SPARK_PROFILE=1080p SPARK_OUT_W=3840 SPARK_OUT_H=2160 ./engine/build/st2110_pipeline
+#include <sys/mman.h>
+#include <sys/resource.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <map>
@@ -36,11 +39,16 @@ class St2110Pipeline : public holoscan::Application {
     const std::string profile = env("SPARK_PROFILE", "1080p");  // input resolution
     // "auto": supersampling for downscales (anti-aliased), cubic for upscales, passthrough at 1:1.
     const std::string interp = env("SPARK_INTERP", "auto");
-    // FRC mode: 0 = off, 1 = retime (1:1 motion-comp), 2 = up-convert (real + mid -> 2x rate).
+    // FRC mode: 0 = off, 1 = retime (1:1 motion-comp), 2 = up-convert (real + mid -> 2x rate),
+    // 3 = uniform-grid up-convert (2x rate on a rigid nominal grid, phase from true capture times —
+    // absorbs erratic source timing; see frc_grid.hpp).
     const std::string frc_mode = env("SPARK_FRC", "1");
     const bool with_frc = frc_mode != "0";
-    const bool frc_2x = frc_mode == "2";
-    const uint32_t frc_grid = static_cast<uint32_t>(std::atoll(env("SPARK_FRC_GRID", "1").c_str()));
+    const bool frc_2x = frc_mode == "2" || frc_mode == "3";
+    const bool frc_uniform = frc_mode == "3";
+    // NVOF flow grid: 1|2|4 px per output vector (hardware only supports those three; anything
+    // else falls back to 4 in NvofFlow). 4 is required for realtime — grid 1 caps at ~12 fps.
+    const uint32_t frc_grid = static_cast<uint32_t>(std::atoll(env("SPARK_FRC_GRID", "4").c_str()));
     const int64_t frames = std::atoll(env("SPARK_FRAMES", "300").c_str());
     const uint32_t ow = static_cast<uint32_t>(std::atoll(env("SPARK_OUT_W", "3840").c_str()));
     const uint32_t oh = static_cast<uint32_t>(std::atoll(env("SPARK_OUT_H", "2160").c_str()));
@@ -79,12 +87,15 @@ class St2110Pipeline : public holoscan::Application {
     // Latency knobs (docs/M8-latency.md). SPARK_TX_LEAD_NS: how far ahead of the NIC clock the genlock
     // schedules each frame — every ns of lead is a ns of end-to-end latency, but it's also the pipeline
     // jitter shock-absorber; lower it only while watching tx_past_err stay 0. SPARK_TX_TRIM_NS: max
-    // ns/frame the TX slews the send base + RTP clock down toward the lead target, reclaiming the
-    // startup transient the one-shot genlock calibration would otherwise bake in forever (0 = off).
+    // ns/frame the AIMD skip-gated shave (st2110_tx) slews the send base + RTP clock down while
+    // probing the latency floor (0 = off). The 2026-07-02 stall episodes that made any near-floor
+    // schedule skip-storm turned out to be driven by the burst-deep inter-op queues themselves;
+    // with per-hop capacities (pipeline_queue_cap) the chain is stall-free and the shave converges.
+    // 20us/frame = 0.12% momentary media-clock skew while converging (~1.2ms/s).
     const uint32_t tx_lead =
         static_cast<uint32_t>(std::atoll(env("SPARK_TX_LEAD_NS", "8000000").c_str()));
     const uint32_t tx_trim =
-        static_cast<uint32_t>(std::atoll(env("SPARK_TX_TRIM_NS", "5000").c_str()));
+        static_cast<uint32_t>(std::atoll(env("SPARK_TX_TRIM_NS", "20000").c_str()));
     // Source format from the SDP (SPARK_IN_*; the NMOS bridge fills these from the sender's fmtp). The
     // real input rate must reach the TX pacer — FRC here is 1:1, so the output rate == the input rate.
     auto parse_rate = [](const std::string& s) -> double {
@@ -130,6 +141,28 @@ class St2110Pipeline : public holoscan::Application {
       if (with_procamp) filters += ",procamp";
     }
 
+    // Announce which op receives FRC's multi-frame burst (the only hop that needs burst-deep input
+    // capacity; see pipeline_queue_cap). Must happen BEFORE any make_operator — setup() runs there.
+    {
+      std::string sink;
+      if (with_frc) {
+        std::stringstream pre(filters);
+        std::map<std::string, int> seen_pre;
+        bool after_frc = false;
+        for (std::string tok; std::getline(pre, tok, ',');) {
+          if (tok != "frc" && tok != "scale" && tok != "sharpen" && tok != "procamp") continue;
+          const int nth = seen_pre[tok]++;
+          const std::string name = nth ? tok + std::to_string(nth + 1) : tok;
+          if (after_frc) {
+            sink = name;
+            break;
+          }
+          if (tok == "frc") after_frc = true;
+        }
+        if (after_frc && sink.empty()) sink = "pack";  // frc is the last filter -> pack takes the burst
+      }
+      setenv("SPARK_BURST_SINK", sink.c_str(), 1);
+    }
     auto rx = make_operator<ops::St2110RxOp>("st2110_rx", Arg("pci_addr", rx_pci),
                                              Arg("profile", profile), Arg("manage_eal", false),
                                              Arg("emit_frames", true), Arg("udp_port", rx_port),
@@ -200,9 +233,13 @@ class St2110Pipeline : public holoscan::Application {
           HOLOSCAN_LOG_WARN("chain: 'frc' listed in SPARK_FILTERS but SPARK_FRC=0 — skipping");
           continue;
         }
-        // motion-compensated interpolation (OFA): rate_mult 2 inserts a real+mid pair -> 2x rate.
-        chain.push_back(make_operator<ops::FrcOp>(name, Arg("rate_mult", frc_2x ? 2u : 1u),
-                                                  Arg("grid_size", frc_grid)));
+        // motion-compensated interpolation (OFA): rate_mult 2 inserts a real+mid pair -> 2x rate;
+        // mode 3 hands FRC the nominal output interval and it emits on that rigid grid instead
+        // (phase from true capture times — erratic source timing becomes phase error, not cadence).
+        chain.push_back(make_operator<ops::FrcOp>(
+            name, Arg("rate_mult", frc_2x ? 2u : 1u), Arg("grid_size", frc_grid),
+            Arg("out_interval_ns",
+                frc_uniform ? static_cast<uint64_t>(1e9 / out_fps + 0.5) : uint64_t(0))));
       } else if (tok == "scale") {
         chain.push_back(make_operator<ops::ResizeOp>(name, Arg("out_width", ow),
                                                      Arg("out_height", oh), Arg("interp", interp)));
@@ -230,6 +267,39 @@ class St2110Pipeline : public holoscan::Application {
 
 int main() {
   HOLOSCAN_LOG_INFO("ST 2110 pipeline: rx -> unpack -> resize -> pack -> tx (1080p->2160p).");
+  // Shield the realtime pipeline from host CPU contention. The residual ~300ms pipe stalls were
+  // reproduced ON DEMAND with 16 CPU burners (GPU fence 1ms — pure CFS scheduling starvation of
+  // the RX poll / scheduler worker threads) and never occur on a quiet host. Linux nice is
+  // per-thread and INHERITED at thread creation, so set it first thing in main: every EAL lcore,
+  // Holoscan worker, and RX poll thread created below runs at this priority. -15 outweighs
+  // default-nice work ~29:1 without the starve-the-kernel risks of SCHED_FIFO. SPARK_NICE
+  // overrides (0 disables).
+  {
+    const char* n = std::getenv("SPARK_NICE");
+    const int prio = n ? std::atoi(n) : -15;
+    if (prio != 0) {
+      if (setpriority(PRIO_PROCESS, 0, prio) == 0)
+        HOLOSCAN_LOG_INFO("pipeline nice set to {} (inherited by all engine threads)", prio);
+      else
+        HOLOSCAN_LOG_WARN("setpriority({}) failed (not root?) — vulnerable to host CPU contention",
+                          prio);
+    }
+  }
+  // The perf autopsy of the induced ~250ms stall (2026-07-02) showed the worker thread inside
+  // cuLibraryLoadData (CUDA lazily loading an NPP resize kernel mid-run) plus kernel page-fault
+  // storms — host MEMORY pressure, not timeslice starvation (idle CPU existed; nice didn't help).
+  // Two shields, both env-overridable:
+  //  - eager CUDA module loading: every kernel loads at init instead of on first use, so the
+  //    driver never takes the module-load path mid-frame (costs startup time only);
+  //  - mlockall ONFAULT: engine + driver pages stay resident once touched, so external memory
+  //    churn can't evict them into reload/major-fault stalls.
+  if (!std::getenv("SPARK_CUDA_LAZY")) setenv("CUDA_MODULE_LOADING", "EAGER", 0);
+  if (!std::getenv("SPARK_NO_MLOCK")) {
+    if (mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) == 0)
+      HOLOSCAN_LOG_INFO("mlockall(ONFAULT) — engine pages pinned resident");
+    else
+      HOLOSCAN_LOG_WARN("mlockall failed — vulnerable to host memory pressure (page-fault stalls)");
+  }
   auto app = holoscan::make_application<spark::St2110Pipeline>();
   // max run time (ms). Default 0 = run until stopped (a live feed must not self-terminate); set
   // SPARK_MAX_MS>0 to bound a test run. Holoscan needs a finite value, so 0 maps to ~1 week.

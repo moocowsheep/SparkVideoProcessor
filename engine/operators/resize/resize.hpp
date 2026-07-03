@@ -2,9 +2,14 @@
 // synthetic GPU source and sink for standalone benchmarking. Pipeline role:  ... unpack -> [resize]
 // -> frc ... The M0 spike measured nppiResize 1080p->2160p 16u at ~0.1 ms/frame; this is that as a
 // real operator (Y at full res, Cb/Cr at half width).
+//
+// interp also selects AI super-resolution ("fsrcnn" | "fsrcnn-s" | "espcn", alias "ai" = fsrcnn):
+// an embedded pre-trained x2 CNN runs on the luma plane (sr_net.hpp) with cubic chroma. AI models
+// are exact-2x only — any other geometry falls back to cubic (one-shot warn).
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -12,6 +17,7 @@
 #include <npp.h>  // NppStreamContext (CUDA 13 NPP exposes only the _Ctx primitive variants)
 
 #include "gpu_frame.hpp"
+#include "sr_net.hpp"
 
 namespace spark::ops {
 
@@ -26,12 +32,17 @@ class ResizeOp : public holoscan::Operator {
   void stop() override;
 
  private:
+  void ensure_sr(uint32_t in_width, uint32_t in_height);  // (re)build the SR engine for these dims
+
   holoscan::Parameter<uint32_t> out_width_;
   holoscan::Parameter<uint32_t> out_height_;
-  holoscan::Parameter<std::string> interp_;  // linear | cubic | lanczos
+  holoscan::Parameter<std::string> interp_;  // auto | linear | cubic | lanczos | super | AI names
   holoscan::Parameter<bool> measure_;  // per-frame cudaEvent timing (benchmark only; a sync/frame)
 
   int interp_code_ = 0;
+  std::string sr_model_;  // non-empty = AI SR luma path ("fsrcnn" | "fsrcnn-s" | "espcn")
+  std::unique_ptr<spark::sr::Engine> sr_engine_;  // lazy: input dims known at first frame
+  bool sr_fallback_logged_ = false;  // one-shot "not exact 2x -> cubic" warn
   cudaStream_t stream_ = nullptr;  // own CUDA stream (NPP resize); pipelined vs other ops
   NppStreamContext npp_ctx_{};
   std::vector<spark::gpu::GpuFramePtr> pool_;  // output ring (target dims)

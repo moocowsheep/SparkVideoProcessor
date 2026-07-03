@@ -9,6 +9,9 @@
 # Modes:
 #   --check          read-only: HW-timestamp caps, /dev/ptp*, tools, config (run anytime, no root)
 #   (default/slave)  ptp4l slaves the PHC to a network grandmaster + phc2sys syncs the system clock
+#   start            slave mode in the background (setsid), log to /tmp/spark_ptp.log
+#   stop             stop a backgrounded start (ptp4l + phc2sys)
+#   status           is it running? show the latest lock/offset lines
 #   --master         run this box AS the time source (no external GM) + phc2sys pushes system->PHC
 #   --test           --master for ~15s, confirm ptp4l + HW timestamping work, then exit
 # Interface: arg $2 or $IFACE; otherwise the first up ConnectX-7 port is auto-detected.
@@ -16,6 +19,8 @@ set -u
 
 MODE="${1:-slave}"
 CONF="$(dirname "$0")/ptp4l.conf"
+LOG=/tmp/spark_ptp.log
+PIDFILE=/tmp/spark_ptp.pid
 
 ok()   { printf '  [ok]   %s\n' "$1"; }
 info() { printf '  [info] %s\n' "$1"; }
@@ -70,7 +75,7 @@ case "$MODE" in
         && warn "NTP client active:$ntp_active — fights phc2sys (disable: systemctl disable --now systemd-timesyncd)" \
         || ok "no NTP client contending for CLOCK_REALTIME"
     fi
-    info "to run: sudo bash deploy/ptp.sh [--master|--test|slave] [iface]"
+    info "to run: sudo bash deploy/ptp.sh [--master|--test|slave|start|stop|status] [iface]"
     ;;
 
   --master)
@@ -109,8 +114,50 @@ case "$MODE" in
     exec ptp4l -f "$CONF" -i "$IFACE_RESOLVED" -s -m
     ;;
 
+  start)
+    need_root
+    [ -n "$IFACE_RESOLVED" ] || { fail "no CX-7 iface"; exit 1; }
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      info "already running (pid $(cat "$PIDFILE"))"; exit 0
+    fi
+    # setsid puts bash (-> exec ptp4l, same pid) and its backgrounded phc2sys in a fresh process
+    # group whose pgid == that pid, so stop can take both down with one kill -- -PGID.
+    setsid bash "$0" slave "$IFACE_RESOLVED" </dev/null >>"$LOG" 2>&1 &
+    echo $! >"$PIDFILE"
+    ok "started PTP slave on $IFACE_RESOLVED (pid $(cat "$PIDFILE"), log: $LOG, phc2sys: /tmp/spark_phc2sys.log)"
+    info "watch lock: bash deploy/ptp.sh status"
+    ;;
+
+  stop)
+    need_root
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      kill -- -"$(cat "$PIDFILE")" 2>/dev/null || kill "$(cat "$PIDFILE")" 2>/dev/null
+      rm -f "$PIDFILE"
+      ok "stopped ptp4l + phc2sys"
+    else
+      rm -f "$PIDFILE"
+      pkill -x ptp4l 2>/dev/null && info "no pidfile; killed stray ptp4l" || info "not running"
+      pkill -x phc2sys 2>/dev/null || true
+    fi
+    ;;
+
+  status)
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      ok "ptp4l running (pid $(cat "$PIDFILE"))"
+    elif pgrep -x ptp4l >/dev/null; then
+      warn "ptp4l running but not started via '$0 start' (pid $(pgrep -x ptp4l | tr '\n' ' '))"
+    else
+      fail "ptp4l not running"
+    fi
+    pgrep -x phc2sys >/dev/null && ok "phc2sys running" || warn "phc2sys not running (system clock not synced)"
+    if [ -f "$LOG" ]; then
+      echo "  -- last ptp4l lock/offset lines ($LOG):"
+      grep -E 'master offset|port 1|selected|FAULT' "$LOG" | tail -n 6 | sed 's/^/    /'
+    fi
+    ;;
+
   *)
-    fail "unknown mode '$MODE' (use --check | --master | --test | slave)"
+    fail "unknown mode '$MODE' (use --check | --master | --test | slave | start | stop | status)"
     exit 2
     ;;
 esac
