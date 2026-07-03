@@ -1,5 +1,6 @@
-// FRC validation (pure GPU, no NIC/root): synth prev + cur=prev shifted by DX. Run NVOF flow +
-// motion-compensated interpolation at t=0.5; the result should reconstruct prev-shifted-by-DX/2.
+// FRC validation (pure GPU, no NIC/root): synth prev + cur=prev shifted by DX. Run NVOF flow
+// (fwd + bwd) + occlusion-aware motion-compensated interpolation at t=0.5; the result should
+// reconstruct prev-shifted-by-DX/2.
 // Pass = flow ~DX AND motion-comp MAE << naive-blend MAE (i.e., the flow is actually used, no ghosting).
 #include <algorithm>
 #include <cmath>
@@ -59,7 +60,7 @@ int main() {
 
   spark::frc::NvofFlow flow;
   flow.init(W, H, 4);
-  flow.compute(p8, c8);
+  flow.compute(p8, c8, nullptr);  // fwd + bwd on the default stream
 
   const uint32_t gw = flow.grid_w(), gh = flow.grid_h(), pitch = flow.flow_pitch_bytes();
   std::vector<int16_t> frow(gw * 2);
@@ -67,7 +68,10 @@ int main() {
              gw * 2 * sizeof(int16_t), cudaMemcpyDeviceToHost);
   const float cfx = frow[(gw / 2) * 2] / 32.0f, cfy = frow[(gw / 2) * 2 + 1] / 32.0f;
 
-  spark::frc::interpolate(prev, cur, flow.flow_dev(), pitch, gw, gh, flow.grid_size(), mid, 0.5f, 0);
+  float* wmap = nullptr;  // per-pixel luma blend weights (shared with chroma inside interpolate)
+  cudaMalloc(&wmap, (size_t)W * H * sizeof(float));
+  spark::frc::interpolate(prev, cur, flow.flow_dev(), flow.flow_dev_bwd(), pitch, gw, gh,
+                          flow.grid_size(), mid, wmap, 0.5f, nullptr);
   cudaDeviceSynchronize();
 
   std::vector<uint16_t> midH(W * H);
