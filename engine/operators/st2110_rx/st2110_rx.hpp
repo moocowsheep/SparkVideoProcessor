@@ -87,6 +87,18 @@ class St2110RxOp : public holoscan::Operator {
   std::condition_variable q_cv_;
   std::deque<spark::st2110::VideoFrame> frame_q_;
   uint64_t q_dropped_ = 0;  // frames dropped at the queue when TX can't keep up (poll-thread only)
+  // Standing-queue drain governor (poll-thread only, under q_mu_): drops the OLDEST frame when the
+  // queue floor stays >=2 over a window. DEFAULT OFF (SPARK_RX_DRAIN=1 opts in): tried on the rig
+  // 2026-07-02 and it fired continuously (402 drains/7min) — a backpressured chain legitimately
+  // holds ~2 frames here as its working set (the consumer gulps only when the whole downstream has
+  // room), so the "standing depth" regenerates instantly and the drops just discard 1 source
+  // frame/s (visible brackets) without lowering latency. Standing pipeline latency is set by the
+  // inter-op queue CAPACITIES (see pipeline_caps.hpp: depth x frame period == latency); shrinking
+  // those per-hop is the real lever, not draining here.
+  bool drain_enabled_ = false;
+  uint32_t q_win_count_ = 0;    // pushes seen in the current window
+  size_t q_win_min_ = SIZE_MAX;  // min queue depth (before push) seen in the window
+  uint64_t q_drained_ = 0;       // standing-backlog frames dropped by the governor
 
   // --- packet-schedule capture (debug): SPARK_RX_CAPTURE=N dumps N packets' HW timestamps + line
   // numbers to /tmp/spark_rx_capture.csv, to measure a sender's ST 2110-21 pacing (e.g. a BMD IP10 ref).
