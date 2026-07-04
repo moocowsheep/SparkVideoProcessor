@@ -75,27 +75,38 @@ class DpdkRxBackend final : public ISt2110RxBackend {
     lookup_rx_timestamp();
     if (rte_eth_dev_start(port_) < 0) die("rte_eth_dev_start failed");
     if (isolated_) {
-      install_flow_rule();  // steer exactly our UDP flow to queue 0; kernel keeps everything else
-      if (group_be_) send_igmp_join();     // make the switch's IGMP snooping forward the group to us
+      // Steer exactly our UDP flow(s) to queue 0; kernel keeps everything else. The audio companion
+      // flow shares the queue — receive() classifies per packet (its ~1000 pps are noise next to video).
+      install_flow_rule(group_be_, ssm_src_be_, udp_port_be_);
+      if (audio_port_be_) install_flow_rule(audio_group_be_, audio_src_be_, audio_port_be_);
+      if (group_be_) send_igmp_join(group_be_, ssm_src_be_, cfg_.mcast_group.c_str());
+      if (audio_group_be_)
+        send_igmp_join(audio_group_be_, audio_src_be_, cfg_.audio_mcast_group.c_str());
     } else if (group_be_) {
-      // Legacy fallback. Accept ONLY the 2110 group's multicast MAC — NOT all multicast. This mlx5
+      // Legacy fallback. Accept ONLY the 2110 group's multicast MAC(s) — NOT all multicast. This mlx5
       // port is shared with the kernel netdev that runs ptp4l; rte_eth_allmulticast_enable() also
       // sweeps up the grandmaster's PTP multicast, starving ptp4l so it drops the GM and promotes
       // the local clock. A specific mc-addr filter leaves PTP (and other multicast) to the kernel.
       // Fall back to allmulticast only if the PMD can't program the filter (so RX still works).
-      rte_ether_addr mc{};
-      spark::net::multicast_mac(rte_be_to_cpu_32(group_be_), mc.addr_bytes);
-      if (rte_eth_dev_set_mc_addr_list(port_, &mc, 1) != 0) {
+      rte_ether_addr mc[2]{};
+      spark::net::multicast_mac(rte_be_to_cpu_32(group_be_), mc[0].addr_bytes);
+      uint32_t nmc = 1;
+      if (audio_group_be_)
+        spark::net::multicast_mac(rte_be_to_cpu_32(audio_group_be_), mc[nmc++].addr_bytes);
+      if (rte_eth_dev_set_mc_addr_list(port_, mc, nmc) != 0) {
         std::printf("[st2110_rx] WARN: set_mc_addr_list unsupported; using allmulticast (may disturb PTP)\n");
         rte_eth_allmulticast_enable(port_);
       }
-      send_igmp_join();
+      send_igmp_join(group_be_, ssm_src_be_, cfg_.mcast_group.c_str());
+      if (audio_group_be_)
+        send_igmp_join(audio_group_be_, audio_src_be_, cfg_.audio_mcast_group.c_str());
     } else {
       rte_eth_promiscuous_enable(port_);   // legacy loopback: accept all, filter by dst port only
     }
-    std::printf("[st2110_rx] port %u up: udp_port=%u group=%s rxd=%u rx_timestamp=%d isolated=%d\n",
+    std::printf("[st2110_rx] port %u up: udp_port=%u group=%s audio=%s:%u rxd=%u rx_timestamp=%d isolated=%d\n",
                 port_, cfg_.udp_port, cfg_.mcast_group.empty() ? "(none)" : cfg_.mcast_group.c_str(),
-                cfg_.rxd, have_ts_, isolated_);
+                cfg_.audio_mcast_group.empty() ? "(none)" : cfg_.audio_mcast_group.c_str(),
+                cfg_.audio_udp_port, cfg_.rxd, have_ts_, isolated_);
   }
 
   uint16_t receive(RxPacket* out, uint16_t max) override {
@@ -106,7 +117,9 @@ class DpdkRxBackend final : public ISt2110RxBackend {
       const uint64_t t = now_ns();
       if (last_igmp_ns_ == 0) last_igmp_ns_ = t;
       else if (t - last_igmp_ns_ > 30000000000ULL) {
-        send_igmp_join();
+        send_igmp_join(group_be_, ssm_src_be_, cfg_.mcast_group.c_str());
+        if (audio_group_be_)
+          send_igmp_join(audio_group_be_, audio_src_be_, cfg_.audio_mcast_group.c_str());
         last_igmp_ns_ = t;
       }
     }
@@ -171,7 +184,8 @@ class DpdkRxBackend final : public ISt2110RxBackend {
   ~DpdkRxBackend() override { shutdown(); }
 
  private:
-  // Validate Eth(IPv4)/UDP and (dst port) and fill pkt with the UDP payload + HW rx timestamp.
+  // Validate Eth(IPv4)/UDP, classify video vs the companion audio flow, and fill pkt with the UDP
+  // payload + HW rx timestamp.
   bool parse_udp(rte_mbuf* m, RxPacket& pkt) {
     if (m->data_len < sizeof(rte_ether_hdr) + sizeof(rte_ipv4_hdr) + sizeof(rte_udp_hdr))
       return false;
@@ -182,9 +196,18 @@ class DpdkRxBackend final : public ISt2110RxBackend {
     if (ip->next_proto_id != IPPROTO_UDP) return false;
     const uint8_t ihl = (ip->version_ihl & 0x0f) * 4;
     auto* udp = reinterpret_cast<rte_udp_hdr*>(reinterpret_cast<uint8_t*>(ip) + ihl);
-    if (udp->dst_port != udp_port_be_) return false;
-    if (group_be_ && ip->dst_addr != group_be_) return false;      // only our multicast group
-    if (ssm_src_be_ && ip->src_addr != ssm_src_be_) return false;  // ST 2110 source-specific filter
+    const bool video_match = udp->dst_port == udp_port_be_ &&
+                             (!group_be_ || ip->dst_addr == group_be_) &&
+                             (!ssm_src_be_ || ip->src_addr == ssm_src_be_);
+    if (video_match) {
+      pkt.is_audio = false;
+    } else if (audio_port_be_ && udp->dst_port == audio_port_be_ &&
+               (!audio_group_be_ || ip->dst_addr == audio_group_be_) &&
+               (!audio_src_be_ || ip->src_addr == audio_src_be_)) {
+      pkt.is_audio = true;
+    } else {
+      return false;
+    }
 
     const uint16_t dgram = rte_be_to_cpu_16(udp->dgram_len);
     if (dgram < sizeof(rte_udp_hdr)) return false;
@@ -210,26 +233,35 @@ class DpdkRxBackend final : public ISt2110RxBackend {
       if (inet_pton(AF_INET, cfg_.iface_ip.c_str(), &be) != 1) die("bad iface_ip " + cfg_.iface_ip);
       iface_ip_host_ = rte_be_to_cpu_32(be);
     }
+    if (cfg_.audio_udp_port) {
+      audio_port_be_ = rte_cpu_to_be_16(cfg_.audio_udp_port);
+      if (!cfg_.audio_mcast_group.empty() &&
+          inet_pton(AF_INET, cfg_.audio_mcast_group.c_str(), &audio_group_be_) != 1)
+        die("bad audio_mcast_group " + cfg_.audio_mcast_group);
+      if (!cfg_.audio_src_ip.empty() &&
+          inet_pton(AF_INET, cfg_.audio_src_ip.c_str(), &audio_src_be_) != 1)
+        die("bad audio_src_ip " + cfg_.audio_src_ip);
+    }
   }
 
-  // Isolated-mode steering: one rule sending exactly our stream — IPv4/UDP on our dst port, narrowed
-  // to the multicast group and SSM source when configured — to DPDK queue 0. Everything else (SSH,
+  // Isolated-mode steering: one rule per stream — IPv4/UDP on its dst port, narrowed to the
+  // multicast group and SSM source when configured — to DPDK queue 0. Everything else (SSH,
   // ARP, PTP, other groups) keeps flowing to the kernel netdev that shares this port function.
-  void install_flow_rule() {
+  void install_flow_rule(uint32_t group_be, uint32_t src_be, uint16_t port_be) {
     rte_flow_attr attr{};
     attr.ingress = 1;
 
     rte_flow_item_ipv4 ip_spec{}, ip_mask{};
-    if (group_be_) {
-      ip_spec.hdr.dst_addr = group_be_;
+    if (group_be) {
+      ip_spec.hdr.dst_addr = group_be;
       ip_mask.hdr.dst_addr = UINT32_MAX;
     }
-    if (ssm_src_be_) {
-      ip_spec.hdr.src_addr = ssm_src_be_;
+    if (src_be) {
+      ip_spec.hdr.src_addr = src_be;
       ip_mask.hdr.src_addr = UINT32_MAX;
     }
     rte_flow_item_udp udp_spec{}, udp_mask{};
-    udp_spec.hdr.dst_port = udp_port_be_;
+    udp_spec.hdr.dst_port = port_be;
     udp_mask.hdr.dst_port = UINT16_MAX;
 
     rte_flow_item pattern[4]{};
@@ -258,15 +290,15 @@ class DpdkRxBackend final : public ISt2110RxBackend {
 
   // Emit an IGMPv3 Membership Report out the RX port so the fabric forwards the group to us. Sent
   // once at join; a production node also answers periodic general queries (follow-on).
-  void send_igmp_join() {
+  void send_igmp_join(uint32_t group_be, uint32_t src_be, const char* label) {
     rte_ether_addr mac{};
     rte_eth_macaddr_get(port_, &mac);
     rte_mbuf* m = rte_pktmbuf_alloc(pool_);
     if (!m) { std::printf("[st2110_rx] WARNING: IGMP join skipped (mbuf alloc failed)\n"); return; }
     uint8_t* p = rte_pktmbuf_mtod(m, uint8_t*);
     size_t len = spark::net::build_igmpv3_join(p, mac.addr_bytes, iface_ip_host_,
-                                               rte_be_to_cpu_32(group_be_),
-                                               ssm_src_be_ ? rte_be_to_cpu_32(ssm_src_be_) : 0);
+                                               rte_be_to_cpu_32(group_be),
+                                               src_be ? rte_be_to_cpu_32(src_be) : 0);
     if (len < 60) { std::memset(p + len, 0, 60 - len); len = 60; }  // pad to the Ethernet minimum
     m->data_len = static_cast<uint16_t>(len);
     m->pkt_len = static_cast<uint32_t>(len);
@@ -274,8 +306,7 @@ class DpdkRxBackend final : public ISt2110RxBackend {
       rte_pktmbuf_free(m);
       std::printf("[st2110_rx] WARNING: IGMP join report not sent (tx_burst=0)\n");
     } else {
-      std::printf("[st2110_rx] IGMP join sent for %s%s%s\n", cfg_.mcast_group.c_str(),
-                  cfg_.src_ip.empty() ? "" : " src ", cfg_.src_ip.c_str());
+      std::printf("[st2110_rx] IGMP join sent for %s\n", label);
     }
   }
 
@@ -341,6 +372,8 @@ class DpdkRxBackend final : public ISt2110RxBackend {
   uint16_t udp_port_be_ = 0;
   uint32_t group_be_ = 0, ssm_src_be_ = 0;  // network order; 0 = unset (legacy promiscuous path)
   uint32_t iface_ip_host_ = 0;              // host order; IGMP report source address
+  uint16_t audio_port_be_ = 0;              // companion ST 2110-30 flow; 0 = audio disabled
+  uint32_t audio_group_be_ = 0, audio_src_be_ = 0;
 
   int ts_field_off_ = -1;
   uint64_t rx_ts_flag_ = 0;

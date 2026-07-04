@@ -49,6 +49,7 @@ class St2110RxOp : public holoscan::Operator {
   void poll_loop();  // emit mode: dedicated thread, continuously drains the NIC into frames
   void account(const spark::st2110::RxPacketInfo& info, const spark::net::RxPacket& pkt,
                uint64_t now_ns);  // loss + ingest-latency bookkeeping
+  void audio_ingest(const spark::net::RxPacket& pkt, uint64_t now_ns);  // 2110-30 -> AudioBridge
   std::shared_ptr<std::vector<uint8_t>> next_buffer();  // ring buffer for emitted frames
 
   holoscan::Parameter<std::string> pci_addr_;
@@ -66,6 +67,15 @@ class St2110RxOp : public holoscan::Operator {
   holoscan::Parameter<bool> manage_eal_;    // false in multi-backend processes (shared DpdkEal)
   holoscan::Parameter<bool> emit_frames_;   // true: source mode (emit one VideoFrame per compute)
   holoscan::Parameter<bool> ip10_;          // source carries Blackmagic IP10 (8-bit pgroups); decoded downstream
+  // Companion ST 2110-30 audio flow (M10): received on the same port/queue, classified by the
+  // backend, and handed to the TX audio relay via AudioBridge. Empty group = no audio.
+  holoscan::Parameter<std::string> audio_mcast_;
+  holoscan::Parameter<std::string> audio_src_;
+  holoscan::Parameter<uint32_t> audio_port_;
+  holoscan::Parameter<uint32_t> audio_rate_;       // RTP clock of the audio flow (2110-30: 48 kHz)
+  // Frame-queue depth: in fixed-latency mode the standing store of (L - pipeline floor) worth of
+  // source frames lives HERE (the NIC's tx_pp window can only hold ~ms), so the app sizes it from L.
+  holoscan::Parameter<uint32_t> frame_q_depth_;
 
   std::unique_ptr<spark::net::ISt2110RxBackend> backend_;
   std::unique_ptr<spark::st2110::Depacketizer> depkt_;
@@ -78,6 +88,7 @@ class St2110RxOp : public holoscan::Operator {
   std::shared_ptr<std::vector<uint8_t>> cur_buf_;
   bool cur_first_ = true;
   uint32_t cur_ts_ = 0;
+  uint64_t cur_arrival_ns_ = 0;  // first-packet NIC HW arrival — the RTP-unwrap reference
 
   // emit-mode: dedicated NIC-drain thread feeding a bounded frame queue (decouples NIC polling from
   // the emit cadence, so the ring never overflows while TX paces the previous frame).
@@ -115,6 +126,11 @@ class St2110RxOp : public holoscan::Operator {
   uint64_t lat_sum_ = 0, lat_cnt_ = 0, lat_min_ = UINT64_MAX, lat_max_ = 0;
   bool stats_printed_ = false;
   double last_live_s_ = 0;
+
+  // audio ingest (poll-thread only): RTP packets relayed verbatim into AudioBridge with their
+  // absolute capture time (RTP ts unwrapped against the PHC arrival timestamp).
+  bool audio_enabled_ = false;
+  uint64_t audio_pkts_ = 0, audio_bad_ = 0, audio_drop_ = 0;
 };
 
 }  // namespace spark::ops

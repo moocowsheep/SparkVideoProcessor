@@ -5,6 +5,9 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "../audio/audio_bridge.hpp"
+#include "../common/rtp_time.hpp"
+
 namespace spark::ops {
 
 // Capture per-packet HW arrival time + line number for pacing analysis. SPARK_RX_CAPTURE=N records the
@@ -51,6 +54,15 @@ void St2110RxOp::setup(holoscan::OperatorSpec& spec) {
              "true: source mode (one VideoFrame per compute); false: terminal sink", false);
   spec.param(ip10_, "ip10", "IP10 source",
              "source is Blackmagic IP10 (8-bit 4:2:2 pgroups, decoded to 10-bit downstream)", false);
+  spec.param(audio_mcast_, "audio_mcast", "Audio group",
+             "companion ST 2110-30 multicast group on this port (empty = no audio)", std::string(""));
+  spec.param(audio_src_, "audio_src", "Audio SSM source", "audio source-specific filter",
+             std::string(""));
+  spec.param(audio_port_, "audio_port", "Audio UDP port", "audio RTP destination port", uint32_t(0));
+  spec.param(audio_rate_, "audio_rate", "Audio RTP clock", "audio media clock (2110-30: 48000)",
+             uint32_t(48000));
+  spec.param(frame_q_depth_, "frame_q_depth", "Frame queue depth",
+             "completed-frame queue; fixed-latency mode stores its standing frames here", uint32_t(8));
 }
 
 void St2110RxOp::start() {
@@ -77,6 +89,12 @@ void St2110RxOp::start() {
   cfg.mcast_group = mcast_group_.get();
   cfg.src_ip = src_ip_.get();
   cfg.iface_ip = iface_ip_.get();
+  audio_enabled_ = !audio_mcast_.get().empty() && audio_port_.get() != 0;
+  if (audio_enabled_) {
+    cfg.audio_mcast_group = audio_mcast_.get();
+    cfg.audio_src_ip = audio_src_.get();
+    cfg.audio_udp_port = static_cast<uint16_t>(audio_port_.get());
+  }
   backend_->init(cfg);
   if (const char* c = std::getenv("SPARK_RX_CAPTURE")) {
     cap_target_ = static_cast<uint32_t>(std::atoll(c));
@@ -109,6 +127,26 @@ void St2110RxOp::account(const spark::st2110::RxPacketInfo& info, const spark::n
     if (lat > lat_max_) lat_max_ = lat;
   }
   ++packets_;
+}
+
+// Companion 2110-30 audio packet: validate the RTP header, unwrap its 48 kHz timestamp to the
+// absolute capture instant (same PHC reference as video), and hand the packet — verbatim — to the
+// TX audio relay. No format assumptions: channels/depth/ptime pass through untouched.
+void St2110RxOp::audio_ingest(const spark::net::RxPacket& pkt, uint64_t now_ns) {
+  if (pkt.len < 12 || (pkt.payload[0] >> 6) != 2) {  // RTP v2 header minimum
+    ++audio_bad_;
+    return;
+  }
+  const uint32_t rtp_ts = (uint32_t(pkt.payload[4]) << 24) | (uint32_t(pkt.payload[5]) << 16) |
+                          (uint32_t(pkt.payload[6]) << 8) | uint32_t(pkt.payload[7]);
+  spark::st2110::AudioBridge::Pkt p;
+  p.rtp.assign(pkt.payload, pkt.payload + pkt.len);
+  p.capture_ns = spark::st2110::rtp_unwrap_ns(
+      rtp_ts, audio_rate_.get(), pkt.has_timestamp ? pkt.hw_timestamp_ns : now_ns);
+  if (spark::st2110::AudioBridge::instance().push(std::move(p)))
+    ++audio_pkts_;
+  else
+    ++audio_drop_;
 }
 
 std::shared_ptr<std::vector<uint8_t>> St2110RxOp::next_buffer() {
@@ -171,7 +209,7 @@ void St2110RxOp::compute_sink() {
 // latency seen when polling only inside compute()). On queue-full it drops the frame but keeps
 // draining (whole-frame drop beats HW packet loss).
 void St2110RxOp::poll_loop() {
-  constexpr size_t kMaxQ = 8;
+  const size_t kMaxQ = std::max<uint32_t>(frame_q_depth_.get(), 2);
   cur_buf_ = next_buffer();
   cur_first_ = true;
   spark::net::RxPacket pkts[256];
@@ -180,6 +218,10 @@ void St2110RxOp::poll_loop() {
     if (n == 0) continue;
     const uint64_t now = backend_->now_ns();
     for (uint16_t i = 0; i < n; ++i) {
+      if (pkts[i].is_audio) {  // companion 2110-30 flow: relay verbatim via the bridge
+        audio_ingest(pkts[i], now);
+        continue;
+      }
       spark::st2110::RxPacketInfo info;
       if (!depkt_->parse(pkts[i].payload, pkts[i].len, info)) {
         ++bad_;
@@ -189,6 +231,7 @@ void St2110RxOp::poll_loop() {
       cap_record(info, pkts[i]);
       if (cur_first_) {
         cur_ts_ = info.rtp_timestamp;
+        cur_arrival_ns_ = pkts[i].has_timestamp ? pkts[i].hw_timestamp_ns : now;
         cur_first_ = false;
       }
       depkt_->scatter(info, pkts[i].payload, cur_buf_->data());
@@ -196,7 +239,10 @@ void St2110RxOp::poll_loop() {
         spark::st2110::VideoFrame f;
         f.data = cur_buf_;
         f.format = fmt_;
-        f.capture_ts_ns = static_cast<uint64_t>(cur_ts_) * 1000000000ULL / 90000ULL;
+        // ABSOLUTE capture time (PTP epoch): the 32-bit RTP ts unwrapped against the first packet's
+        // PHC arrival. Restart-invariant and wrap-free, so a FIXED genlock offset (capture + L) is
+        // a true end-to-end latency — and audio, unwrapped the same way, shares the timeline.
+        f.capture_ts_ns = spark::st2110::rtp_unwrap_ns(cur_ts_, 90000, cur_arrival_ns_);
         f.frame_number = frames_++;
         {
           std::lock_guard<std::mutex> lk(q_mu_);
@@ -261,6 +307,9 @@ void St2110RxOp::emit_live(bool force) {
   // Unique tokens so the control daemon can grab each field unambiguously (latest-wins).
   HOLOSCAN_LOG_INFO("spark_live rx_frames={} rx_packets={} rx_lost={} rx_latency_us={}", frames_,
                     packets_, lost_, avg_us);
+  if (audio_enabled_)
+    HOLOSCAN_LOG_INFO("spark_live audio_rx_pkts={} audio_rx_bad={} audio_rx_drop={}", audio_pkts_,
+                      audio_bad_, audio_drop_);
 }
 
 void St2110RxOp::print_stats() {

@@ -180,6 +180,11 @@ add_test(NAME ip10_codec COMMAND test_ip10_codec)
 add_executable(test_net_addr operators/common/test/test_net_addr.cpp)
 add_test(NAME net_addr COMMAND test_net_addr)
 
+# RTP timestamp unwrap (absolute capture time — the fixed-latency + lip-sync basis); header-only
+add_executable(test_rtp_time operators/common/test/test_rtp_time.cpp)
+target_include_directories(test_rtp_time PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME rtp_time COMMAND test_rtp_time)
+
 # FRC uniform-grid tick/phase math (SPARK_FRC=3); header-only, no CUDA/Holoscan
 add_executable(test_frc_grid operators/frc/test/test_frc_grid.cpp)
 add_test(NAME frc_grid COMMAND test_frc_grid)

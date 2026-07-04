@@ -94,16 +94,17 @@ class DpdkTxBackend final : public ISt2110TxBackend {
     if (payload_len == hdr_cache_len_) {
       std::memcpy(p, hdr_cache_, kL2L3L4Hdr);
     } else {
-      build_headers(p, payload_len);
+      build_headers(p, payload_len, dst_mac_, dst_ip_be_, udp_port_be_);
       std::memcpy(hdr_cache_, p, kL2L3L4Hdr);
       hdr_cache_len_ = payload_len;
     }
     return TxBuf{p + kL2L3L4Hdr, payload_len, m};
   }
 
-  void build_headers(uint8_t* p, uint32_t payload_len) {
+  void build_headers(uint8_t* p, uint32_t payload_len, const uint8_t* dmac, uint32_t dip_be,
+                     uint16_t port_be) {
     auto* eth = reinterpret_cast<rte_ether_hdr*>(p);
-    std::memcpy(eth->dst_addr.addr_bytes, dst_mac_, 6);
+    std::memcpy(eth->dst_addr.addr_bytes, dmac, 6);
     std::memcpy(eth->src_addr.addr_bytes, src_mac_, 6);
     eth->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
 
@@ -117,15 +118,51 @@ class DpdkTxBackend final : public ISt2110TxBackend {
     ip->time_to_live = 64;
     ip->next_proto_id = IPPROTO_UDP;
     ip->src_addr = src_ip_be_;
-    ip->dst_addr = dst_ip_be_;
+    ip->dst_addr = dip_be;
     ip->hdr_checksum = 0;
     ip->hdr_checksum = rte_ipv4_cksum(ip);
 
     auto* udp = reinterpret_cast<rte_udp_hdr*>(p + sizeof(rte_ether_hdr) + sizeof(rte_ipv4_hdr));
-    udp->src_port = udp_port_be_;
-    udp->dst_port = udp_port_be_;
+    udp->src_port = port_be;
+    udp->dst_port = port_be;
     udp->dgram_len = rte_cpu_to_be_16(static_cast<uint16_t>(sizeof(rte_udp_hdr) + payload_len));
     udp->dgram_cksum = 0;  // UDP checksum optional over IPv4
+  }
+
+  // --- companion audio channel: own queue (1), own header template, no shared mutable state with
+  // the video path (reserve_packet/submit/flush) beyond the MT-safe mbuf pool. -------------------
+  bool audio_ready() override { return audio_ok_; }
+
+  TxBuf reserve_audio(uint32_t payload_len) override {
+    if (!audio_ok_) die("reserve_audio without an audio channel");
+    rte_mbuf* m = rte_pktmbuf_alloc(pool_);
+    if (!m) die("mbuf pool exhausted (audio)");
+    const uint32_t total = kL2L3L4Hdr + payload_len;
+    m->data_len = static_cast<uint16_t>(total);
+    m->pkt_len = total;
+    uint8_t* p = rte_pktmbuf_mtod(m, uint8_t*);
+    if (payload_len == audio_hdr_cache_len_) {
+      std::memcpy(p, audio_hdr_cache_, kL2L3L4Hdr);
+    } else {
+      build_headers(p, payload_len, audio_dst_mac_, audio_dst_ip_be_, audio_port_be_);
+      std::memcpy(audio_hdr_cache_, p, kL2L3L4Hdr);
+      audio_hdr_cache_len_ = payload_len;
+    }
+    return TxBuf{p + kL2L3L4Hdr, payload_len, m};
+  }
+
+  void submit_audio(const TxBuf& buf, uint64_t send_ts_ns) override {
+    auto* m = static_cast<rte_mbuf*>(buf.opaque);
+    if (cfg_.pacing && have_ts_ && send_ts_ns != 0) {
+      *RTE_MBUF_DYNFIELD(m, ts_field_off_, uint64_t*) = send_ts_ns;
+      m->ol_flags |= ts_flag_;
+    }
+    // ~1000 pps: burst each packet immediately; a couple retries cover a momentarily full ring.
+    for (int tries = 0; tries < 1000; ++tries) {
+      if (rte_eth_tx_burst(port_, 1, &m, 1) == 1) return;
+    }
+    rte_pktmbuf_free(m);
+    ++audio_dropped_;
   }
 
   // send_ts_ns == 0 is a sentinel: "send this packet back-to-back, no HW timestamp". The TX op uses it
@@ -213,6 +250,17 @@ class DpdkTxBackend final : public ISt2110TxBackend {
     if (inet_pton(AF_INET, cfg_.src_ip.c_str(), &src_ip_be_) != 1) die("bad src_ip");
     if (inet_pton(AF_INET, cfg_.dst_ip.c_str(), &dst_ip_be_) != 1) die("bad dst_ip");
     udp_port_be_ = rte_cpu_to_be_16(cfg_.udp_port);
+    if (!cfg_.audio_dst_ip.empty() && cfg_.audio_udp_port) {
+      if (inet_pton(AF_INET, cfg_.audio_dst_ip.c_str(), &audio_dst_ip_be_) != 1)
+        die("bad audio_dst_ip");
+      audio_port_be_ = rte_cpu_to_be_16(cfg_.audio_udp_port);
+      const uint32_t adst_host = rte_be_to_cpu_32(audio_dst_ip_be_);
+      if (spark::net::ipv4_is_multicast(adst_host))
+        spark::net::multicast_mac(adst_host, audio_dst_mac_);
+      else
+        std::memcpy(audio_dst_mac_, cfg_.dst_mac.data(), 6);  // unicast loopback rigs
+      want_audio_ = true;
+    }
     // dst MAC: if none was given (all-zero) and dst_ip is a multicast group, derive it (RFC 1112) —
     // the NMOS egress path just sets the group. An explicit MAC wins (gate-4 loopback to a known RX
     // port uses a unicast MAC even though dst_ip is a placeholder group).
@@ -235,7 +283,17 @@ class DpdkTxBackend final : public ISt2110TxBackend {
         die("NIC lacks SEND_ON_TIMESTAMP offload (REAL_TIME_CLOCK_ENABLE=1 set? see M0 findings)");
       port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_SEND_ON_TIMESTAMP;
     }
-    if (rte_eth_dev_configure(port_, 0, 1, &port_conf) < 0) die("rte_eth_dev_configure failed");
+    // Audio rides a second TX queue so its relay thread never touches the video queue. If the PMD
+    // rejects the 2-queue config, fall back to video-only rather than failing the validated path.
+    uint16_t nb_txq = want_audio_ ? 2 : 1;
+    if (rte_eth_dev_configure(port_, 0, nb_txq, &port_conf) < 0) {
+      if (!want_audio_) die("rte_eth_dev_configure failed");
+      std::printf("[st2110_tx] WARN: 2-queue configure failed — audio channel disabled\n");
+      want_audio_ = false;
+      nb_txq = 1;
+      if (rte_eth_dev_configure(port_, 0, nb_txq, &port_conf) < 0)
+        die("rte_eth_dev_configure failed");
+    }
 
     uint16_t nb_rxd = 0, nb_txd = cfg_.txd;
     if (rte_eth_dev_adjust_nb_rx_tx_desc(port_, &nb_rxd, &nb_txd) < 0)
@@ -246,6 +304,15 @@ class DpdkTxBackend final : public ISt2110TxBackend {
     txconf.offloads = port_conf.txmode.offloads;
     if (rte_eth_tx_queue_setup(port_, 0, nb_txd, rte_eth_dev_socket_id(port_), &txconf) < 0)
       die("rte_eth_tx_queue_setup failed");
+    if (want_audio_) {
+      // 512 descriptors ≈ half a second of 1 ms-ptime audio in flight — far beyond any horizon.
+      if (rte_eth_tx_queue_setup(port_, 1, 512, rte_eth_dev_socket_id(port_), &txconf) < 0) {
+        std::printf("[st2110_tx] WARN: audio tx_queue_setup failed — audio channel disabled\n");
+        want_audio_ = false;
+      } else {
+        audio_ok_ = true;
+      }
+    }
   }
 
   void lookup_timestamp_dynfield() {
@@ -291,6 +358,16 @@ class DpdkTxBackend final : public ISt2110TxBackend {
   uint16_t udp_port_be_ = 0;
   uint8_t hdr_cache_[kL2L3L4Hdr] = {};  // prebuilt L2/L3/L4 header for the dominant payload size
   uint32_t hdr_cache_len_ = 0;          // payload_len the cache was built for (0 = uncached)
+
+  // audio channel (queue 1; relay-thread-only state)
+  bool want_audio_ = false;  // configured; may be cleared if the 2-queue setup fails
+  bool audio_ok_ = false;    // queue 1 is up
+  uint8_t audio_dst_mac_[6] = {};
+  uint32_t audio_dst_ip_be_ = 0;
+  uint16_t audio_port_be_ = 0;
+  uint8_t audio_hdr_cache_[kL2L3L4Hdr] = {};
+  uint32_t audio_hdr_cache_len_ = 0;
+  uint64_t audio_dropped_ = 0;
 
   int ts_field_off_ = -1;
   uint64_t ts_flag_ = 0;
