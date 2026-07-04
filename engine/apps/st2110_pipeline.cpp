@@ -96,6 +96,36 @@ class St2110Pipeline : public holoscan::Application {
         static_cast<uint32_t>(std::atoll(env("SPARK_TX_LEAD_NS", "8000000").c_str()));
     const uint32_t tx_trim =
         static_cast<uint32_t>(std::atoll(env("SPARK_TX_TRIM_NS", "20000").c_str()));
+    // FIXED end-to-end latency (M10, docs/M10-audio-fixed-latency.md): wire time = capture + L for
+    // BOTH essences. Default ON at 105 ms — deterministic beats minimal (the servo's moving latency
+    // made lip-sync unsolvable). Sizing (2026-07-03 probe ladder): chain floor ~73 ms (L=65 fails
+    // ~13%, lead ≈ −8 ms) + the residual host stall class (~17 ms bursts, ~1-2 per 10 min — bit an
+    // L=85 run; L=80's clean pass predates a stall window) + margin. Below L≈78 the RX L-store
+    // drains fully and tx_margin_us becomes a true headroom signal; at higher L the arrival lead
+    // pins at ~13.4 ms and margin is meaningless. SPARK_LATENCY_MS=0 restores the servo.
+    const double latency_ms = std::atof(env("SPARK_LATENCY_MS", "105").c_str());
+    const uint64_t latency_ns =
+        latency_ms > 0 ? static_cast<uint64_t>(latency_ms * 1e6) : uint64_t(0);
+    const int64_t av_offset_ns =
+        static_cast<int64_t>(std::atof(env("SPARK_AV_OFFSET_MS", "0").c_str()) * 1e6);
+    // Companion ST 2110-30 audio (relayed bit-transparent, re-timed to capture + L). Active only
+    // when BOTH sides are routed and the schedule is fixed — lip-sync is undefined under the servo.
+    const std::string rx_a_mcast = env("SPARK_RX_AUDIO_MCAST", "");
+    const std::string rx_a_src = env("SPARK_RX_AUDIO_SRC", "");
+    uint32_t rx_a_port = static_cast<uint32_t>(std::atoll(env("SPARK_RX_AUDIO_PORT", "0").c_str()));
+    if (rx_a_port == 0) rx_a_port = 5004;
+    const std::string tx_a_mcast = env("SPARK_TX_AUDIO_MCAST", "");
+    uint32_t tx_a_port = static_cast<uint32_t>(std::atoll(env("SPARK_TX_AUDIO_PORT", "0").c_str()));
+    if (tx_a_port == 0) tx_a_port = 5004;
+    const uint32_t audio_rate =
+        static_cast<uint32_t>(std::atoll(env("SPARK_AUDIO_RATE", "48000").c_str()));
+    bool audio = !rx_a_mcast.empty() && !tx_a_mcast.empty();
+    if (!rx_a_mcast.empty() && tx_a_mcast.empty())
+      HOLOSCAN_LOG_WARN("audio: RX group set but no SPARK_TX_AUDIO_MCAST — audio disabled");
+    if (audio && latency_ns == 0) {
+      HOLOSCAN_LOG_WARN("audio: requires the fixed-latency schedule (SPARK_LATENCY_MS>0) — disabled");
+      audio = false;
+    }
     // Source format from the SDP (SPARK_IN_*; the NMOS bridge fills these from the sender's fmtp). The
     // real input rate must reach the TX pacer — FRC here is 1:1, so the output rate == the input rate.
     auto parse_rate = [](const std::string& s) -> double {
@@ -163,13 +193,24 @@ class St2110Pipeline : public holoscan::Application {
       }
       setenv("SPARK_BURST_SINK", sink.c_str(), 1);
     }
+    // Fixed-latency frame store: the standing ~L worth of source frames waits in the RX frame
+    // queue (the NIC's tx_pp window holds only ~ms), so size it from L + the source rate. Servo
+    // mode keeps the legacy depth 8.
+    const uint32_t q_depth =
+        latency_ns > 0
+            ? std::max<uint32_t>(8, static_cast<uint32_t>(latency_ms * base_fps / 1000.0) + 4)
+            : 8;
     auto rx = make_operator<ops::St2110RxOp>("st2110_rx", Arg("pci_addr", rx_pci),
                                              Arg("profile", profile), Arg("manage_eal", false),
                                              Arg("emit_frames", true), Arg("udp_port", rx_port),
                                              Arg("mcast_group", rx_mcast), Arg("src_ip", rx_src),
                                              Arg("iface_ip", rx_iface), Arg("in_width", in_w),
                                              Arg("in_height", in_h), Arg("in_fps", in_fps),
-                                             Arg("ip10", in_ip10));
+                                             Arg("ip10", in_ip10), Arg("frame_q_depth", q_depth),
+                                             Arg("audio_mcast", audio ? rx_a_mcast : std::string("")),
+                                             Arg("audio_src", rx_a_src),
+                                             Arg("audio_port", audio ? rx_a_port : uint32_t(0)),
+                                             Arg("audio_rate", audio_rate));
     // frames <= 0 => run until stopped (proto contract: 0 = unbounded, e.g. a live NMOS feed);
     // > 0 => bounded run via CountCondition. Without this guard frames=0 made CountCondition(0)
     // gate the RX to zero compute() calls, so the graph emitted nothing and exited at startup.
@@ -212,7 +253,12 @@ class St2110Pipeline : public holoscan::Application {
         Arg("reanchor_lead_ns", tx_lead), Arg("trim_ns", tx_trim),
         // Wide (2110TPW) when SPARK_TX_TP=wide: even full-frame pacing, no per-line gaps. The receiver's
         // wide buffer absorbs tx_pp jitter (fixes the narrow dips); keep the SDP TP= in sync via the NMOS node.
-        Arg("tx_wide", tx_wide));
+        Arg("tx_wide", tx_wide),
+        // M10: fixed capture->wire latency + the audio relay slaved to the same constant.
+        Arg("latency_ns", latency_ns),
+        Arg("audio_dst_ip", audio ? tx_a_mcast : std::string("")),
+        Arg("audio_port", audio ? tx_a_port : uint32_t(0)), Arg("audio_rate", audio_rate),
+        Arg("av_offset_ns", av_offset_ns));
     // Compose the GpuFrame chain unpack -> [filters...] -> pack from the `filters` token list. Every
     // filter is a GpuFrame->GpuFrame operator (own stream, ready-event ordered, out-of-place pool),
     // so any subset in any order wires the same way. Default order rationale: FRC BEFORE scale so

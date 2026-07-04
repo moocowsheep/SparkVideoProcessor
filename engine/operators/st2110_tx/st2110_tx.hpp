@@ -12,8 +12,11 @@
 // ~one frame interval per frame (correct for a real-time sender), backpressuring the upstream graph.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <thread>
 
 #include <holoscan/holoscan.hpp>
 
@@ -37,6 +40,7 @@ class St2110TxOp : public holoscan::Operator {
  private:
   void ensure_pacer(const spark::st2110::VideoFormat& fmt);
   void emit_live(bool force = false);  // periodic "spark_live tx_*" line (1 Hz) for the daemon
+  void audio_loop();  // relay thread: AudioBridge -> capture+L -> tx_pp queue 1 (fixed mode only)
 
   // --- parameters ---
   holoscan::Parameter<std::string> pci_addr_;
@@ -68,6 +72,16 @@ class St2110TxOp : public holoscan::Operator {
   // target lead. Converges end-to-end latency to (steady pipeline delay + reanchor_lead) after startup
   // transients instead of freezing whatever the cold first frame baked in. 0 = off (legacy behavior).
   holoscan::Parameter<uint32_t> trim_ns_;
+  // FIXED end-to-end latency (M10): when > 0, wire time = absolute capture_ts + latency_ns — a
+  // CONFIGURED constant. No calibration, no trim servo, no re-anchor: latency is deterministic
+  // across restarts, and frames that miss the schedule skip (freeze) rather than shift it. Requires
+  // the absolute capture timestamps from the RX RTP-unwrap (i.e. a PTP-locked source + synced PHC).
+  // 0 = the adaptive servo above (legacy). The audio relay uses the SAME constant -> exact lip-sync.
+  holoscan::Parameter<uint64_t> latency_ns_;
+  holoscan::Parameter<std::string> audio_dst_ip_;  // companion 2110-30 egress group ("" = no audio)
+  holoscan::Parameter<uint32_t> audio_port_;
+  holoscan::Parameter<uint32_t> audio_rate_;       // audio RTP clock (2110-30: 48000)
+  holoscan::Parameter<int64_t> av_offset_ns_;      // extra audio delay (+) / advance (-) vs video
 
   // --- runtime state ---
   std::unique_ptr<spark::net::ISt2110TxBackend> backend_;
@@ -112,6 +126,30 @@ class St2110TxOp : public holoscan::Operator {
   int64_t last_lead_ns_ = 0;
   int64_t trim_total_ns_ = 0;  // net latency trimmed (signed: reverse trim subtracts)
   bool genlocked_ = false;  // last frame used the capture_ts genlock path (media clock may slew)
+
+  // --- fixed-latency mode state ---
+  bool fixed_active_ = false;      // this frame is on the fixed schedule (per-frame)
+  bool fixed_checked_ = false;     // one-time clock-consistency check ran
+  uint32_t fixed_late_streak_ = 0; // consecutive frames under the skip floor (L below the pipe floor)
+  int64_t min_lead_win_ = INT64_MAX;  // min lead since the last live line -> tx_margin_us telemetry
+
+  // --- async NIC stats (emit_live) ---
+  // backend_->stats() sweeps the mlx5 xstats via firmware mailbox round-trips (~10-20 ms measured)
+  // — far more than the pacing slack, so it must NEVER run on the compute/pacing thread: sampled
+  // there it debited the 1 Hz frame's lead and fixed mode skipped exactly that frame every second.
+  // A poller thread refreshes the cache at 1 Hz; emit_live() only copies it under the mutex.
+  std::thread stats_thread_;
+  std::atomic<bool> stop_stats_{false};
+  std::mutex stats_mtx_;
+  spark::net::TxStats stats_cache_{};
+
+  // --- audio relay (fixed mode only) ---
+  std::thread audio_thread_;
+  std::atomic<bool> stop_audio_{false};
+  std::atomic<uint64_t> audio_tx_pkts_{0};
+  std::atomic<uint64_t> audio_late_{0};   // sent past due (immediate, unpaced)
+  std::atomic<uint64_t> audio_drop_{0};   // >50 ms late — dropped
+  bool audio_on_ = false;
 };
 
 }  // namespace spark::ops

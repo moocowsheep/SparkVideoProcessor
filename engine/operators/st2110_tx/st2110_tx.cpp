@@ -5,7 +5,11 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
+
+#include "../audio/audio_bridge.hpp"
+#include "../common/rtp_time.hpp"
 
 namespace spark::ops {
 namespace {
@@ -15,6 +19,10 @@ std::array<uint8_t, 6> parse_mac(const std::string& s) {
   std::sscanf(s.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]);
   return m;
 }
+
+// Fixed-latency send floor: below this lead the frame's first packets would past-stamp (unpaced
+// bursts -> IP10 colored lines), so the frame skips instead — the schedule NEVER shifts.
+constexpr int64_t kFixedSkipFloorNs = 2000000;
 
 }  // namespace
 
@@ -70,6 +78,17 @@ void St2110TxOp::setup(holoscan::OperatorSpec& spec) {
   spec.param(trim_ns_, "trim_ns", "Trim ns/frame",
              "max ns/frame to slew the send base (and media clock) toward the target lead; 0 = off",
              uint32_t(5000));
+  // Fixed end-to-end latency (M10): wire time = capture + latency_ns, a configured CONSTANT.
+  // Deterministic across restarts (no calibration/trim/re-anchor); late frames skip, never shift.
+  spec.param(latency_ns_, "latency_ns", "Fixed latency ns",
+             "capture->wire latency constant; 0 = adaptive servo (legacy)", uint64_t(0));
+  spec.param(audio_dst_ip_, "audio_dst_ip", "Audio group",
+             "companion ST 2110-30 egress multicast group (empty = no audio)", std::string(""));
+  spec.param(audio_port_, "audio_port", "Audio UDP port", "audio RTP destination port", uint32_t(0));
+  spec.param(audio_rate_, "audio_rate", "Audio RTP clock", "audio media clock (2110-30: 48000)",
+             uint32_t(48000));
+  spec.param(av_offset_ns_, "av_offset_ns", "A/V offset ns",
+             "extra audio delay (+) or advance (-) relative to the video latency", int64_t(0));
 }
 
 void St2110TxOp::start() {
@@ -86,10 +105,96 @@ void St2110TxOp::start() {
   cfg.eal_core_list = eal_cores_.get();
   cfg.pacing = pacing_.get();
   cfg.manage_eal = manage_eal_.get();
+  const bool want_audio = !audio_dst_ip_.get().empty() && audio_port_.get() != 0;
+  if (want_audio) {
+    cfg.audio_dst_ip = audio_dst_ip_.get();
+    cfg.audio_udp_port = static_cast<uint16_t>(audio_port_.get());
+  }
   backend_->init(cfg);
+
+  // NIC stats poller for emit_live: the mlx5 xstats sweep costs ~10-20 ms of firmware round-trips,
+  // which is more than the pacing slack — run it here at 1 Hz and let the compute thread read the
+  // cache. (DPDK's own in-process telemetry thread queries stats concurrently the same way.)
+  stats_thread_ = std::thread([this] {
+    while (!stop_stats_.load(std::memory_order_relaxed)) {
+      spark::net::TxStats s = backend_->stats();
+      {
+        std::lock_guard<std::mutex> lk(stats_mtx_);
+        stats_cache_ = s;
+      }
+      for (int i = 0; i < 10 && !stop_stats_.load(std::memory_order_relaxed); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+  });
+
+  if (want_audio) {
+    if (latency_ns_.get() == 0) {
+      HOLOSCAN_LOG_WARN(
+          "st2110_tx: audio egress configured but latency_ns=0 (adaptive servo) — audio needs the "
+          "fixed-latency schedule for lip-sync; audio DISABLED (set SPARK_LATENCY_MS)");
+    } else if (!backend_->audio_ready()) {
+      HOLOSCAN_LOG_WARN("st2110_tx: audio TX queue unavailable — audio DISABLED");
+    } else {
+      audio_on_ = true;
+      audio_thread_ = std::thread(&St2110TxOp::audio_loop, this);
+      HOLOSCAN_LOG_INFO("st2110_tx: audio relay up -> {}:{} at capture + {} ms (+{} us A/V offset)",
+                        audio_dst_ip_.get(), audio_port_.get(), latency_ns_.get() / 1000000,
+                        av_offset_ns_.get() / 1000);
+    }
+  }
+  if (latency_ns_.get() > 0)
+    HOLOSCAN_LOG_INFO("st2110_tx: FIXED latency mode — wire = capture + {} ms (no trim/re-anchor)",
+                      latency_ns_.get() / 1000000);
 
   HOLOSCAN_LOG_INFO("st2110_tx started: TX {} -> {} pacing={}", cfg.pci_addr, dst_mac_.get(),
                     cfg.pacing);
+}
+
+// Audio relay: pop each received 2110-30 packet (with its absolute capture time), hold it until
+// capture + L (+ av_offset), shift its RTP timestamp by exactly that constant, and submit it to the
+// dedicated tx_pp queue — the NIC fires it on the same PHC the video schedule uses. Sequence
+// numbers, SSRC, and PCM pass through verbatim, so the relay is bit-transparent to loss and format.
+void St2110TxOp::audio_loop() {
+  using namespace std::chrono;
+  auto& bridge = spark::st2110::AudioBridge::instance();
+  const int64_t shift_ns = static_cast<int64_t>(latency_ns_.get()) + av_offset_ns_.get();
+  const uint64_t mag = static_cast<uint64_t>(shift_ns >= 0 ? shift_ns : -shift_ns);
+  const int64_t shift_ticks_signed =
+      (shift_ns >= 0 ? 1 : -1) *
+      static_cast<int64_t>(spark::st2110::rtp_ticks_abs(mag, audio_rate_.get()));
+  const uint32_t tick_shift = static_cast<uint32_t>(shift_ticks_signed);  // mod 2^32 add is exact
+  constexpr uint64_t kHorizonNs = 4000000;   // submit within 4 ms of due (inside the tx_pp window)
+  constexpr int64_t kLateDropNs = 50000000;  // >50 ms late: the receiver would discard it anyway
+  spark::st2110::AudioBridge::Pkt p;
+  while (!stop_audio_.load(std::memory_order_relaxed)) {
+    if (!bridge.pop(p, milliseconds(100))) continue;
+    if (p.rtp.size() < 12) continue;
+    const uint64_t due = static_cast<uint64_t>(static_cast<int64_t>(p.capture_ns) + shift_ns);
+    const int64_t wait =
+        static_cast<int64_t>(due - kHorizonNs) - static_cast<int64_t>(backend_->now_ns());
+    if (wait > 0) std::this_thread::sleep_for(nanoseconds(wait));
+    const uint64_t now = backend_->now_ns();
+    uint64_t send_ts = due;
+    if (static_cast<int64_t>(now) - static_cast<int64_t>(due) > kLateDropNs) {
+      ++audio_drop_;
+      continue;
+    }
+    if (due <= now) {
+      send_ts = 0;  // late (host stall): back-to-back sentinel — send immediately, unpaced
+      ++audio_late_;
+    }
+    uint32_t ts = (uint32_t(p.rtp[4]) << 24) | (uint32_t(p.rtp[5]) << 16) |
+                  (uint32_t(p.rtp[6]) << 8) | uint32_t(p.rtp[7]);
+    ts += tick_shift;
+    p.rtp[4] = uint8_t(ts >> 24);
+    p.rtp[5] = uint8_t(ts >> 16);
+    p.rtp[6] = uint8_t(ts >> 8);
+    p.rtp[7] = uint8_t(ts);
+    spark::net::TxBuf buf = backend_->reserve_audio(static_cast<uint32_t>(p.rtp.size()));
+    std::memcpy(buf.payload, p.rtp.data(), p.rtp.size());
+    backend_->submit_audio(buf, send_ts);
+    ++audio_tx_pkts_;
+  }
 }
 
 void St2110TxOp::emit_live(bool force) {
@@ -97,7 +202,11 @@ void St2110TxOp::emit_live(bool force) {
       std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   if (!force && t - last_live_s_ < 1.0) return;
   last_live_s_ = t;
-  const spark::net::TxStats s = backend_ ? backend_->stats() : spark::net::TxStats{};
+  spark::net::TxStats s;
+  {
+    std::lock_guard<std::mutex> lk(stats_mtx_);
+    s = stats_cache_;
+  }
   // tx_e2e_us: capture -> first-bit-out latency estimate, i.e. the genlock offset modulo the 32-bit
   // 90 kHz RTP wrap (~13.25 h). Exact when the source stamps RTP on the PTP epoch (ST 2110-10 — the
   // BMDs do); for a free-running source the absolute value is meaningless but its CHANGES are real.
@@ -106,11 +215,20 @@ void St2110TxOp::emit_live(bool force) {
   // has reclaimed.
   constexpr uint64_t kRtpWrapNs = 4294967296ULL * 100000ULL / 9ULL;  // 2^32 ticks @90 kHz, in ns
   const uint64_t e2e_us = genlock_offset_ ? (genlock_offset_ % kRtpWrapNs) / 1000 : 0;
+  // Fixed-latency extras: tx_fixed_ms is the configured L (0 = servo mode); tx_margin_us is the
+  // MINIMUM lead seen since the last line — the operator's headroom gauge for lowering L (clamped
+  // at 0 for the digits-only parser; a floor'd margin shows as 0 alongside rising tx_skipped).
+  const int64_t margin = min_lead_win_ == INT64_MAX ? 0 : std::max<int64_t>(min_lead_win_, 0);
+  min_lead_win_ = INT64_MAX;
   HOLOSCAN_LOG_INFO(
       "spark_live tx_frames={} tx_packets={} tx_future_err={} tx_past_err={} tx_reanchors={} "
-      "tx_skipped={} tx_lead_us={} tx_e2e_us={} tx_trim_ms={}",
+      "tx_skipped={} tx_lead_us={} tx_e2e_us={} tx_trim_ms={} tx_fixed_ms={} tx_margin_us={}",
       frames_sent_, packets_sent_, s.future_errors, s.past_errors, reanchors_, skipped_late_,
-      last_lead_ns_ / 1000, e2e_us, trim_total_ns_ / 1000000);
+      last_lead_ns_ / 1000, e2e_us, trim_total_ns_ / 1000000, latency_ns_.get() / 1000000,
+      margin / 1000);
+  if (audio_on_)
+    HOLOSCAN_LOG_INFO("spark_live audio_tx_pkts={} audio_tx_late={} audio_tx_drop={}",
+                      audio_tx_pkts_.load(), audio_late_.load(), audio_drop_.load());
 }
 
 void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
@@ -230,7 +348,46 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
 
   const uint64_t now = backend_->now_ns();
   const uint64_t tgt = reanchor_lead_ns_.get();
-  if (tgt > 0 && frame.capture_ts_ns != 0) {
+  const uint64_t fixed_l = latency_ns_.get();
+  fixed_active_ = fixed_l > 0 && frame.capture_ts_ns != 0;
+  if (fixed_active_) {
+    // FIXED-LATENCY genlock (M10): wire time = absolute capture_ts + configured L. The offset is
+    // CONFIGURATION, not calibration — no first-frame anchor, no trim servo, no re-anchor, so the
+    // end-to-end latency is a printable constant across restarts and the RTP media clock derives
+    // straight from the schedule (true PTP-epoch stamps). The only degree of freedom is per-frame:
+    // a frame that misses its slot skips UNSENT (receiver repeats one frame) and the schedule
+    // stands still. Chronic skipping means L is below the pipeline floor — an operator decision
+    // (raise SPARK_LATENCY_MS), never an automatic one. tx_margin_us tells them how much headroom
+    // the current L has. The audio relay (audio_loop) uses the SAME constant: lip-sync by
+    // construction, both essences on the capture+L timeline.
+    const int64_t gbase =
+        static_cast<int64_t>(frame.capture_ts_ns) + static_cast<int64_t>(fixed_l);
+    const int64_t lead = gbase - static_cast<int64_t>(now);
+    if (lead < min_lead_win_) min_lead_win_ = lead;
+    if (!fixed_checked_) {
+      fixed_checked_ = true;
+      if (lead > static_cast<int64_t>(fixed_l) + 500000000LL || lead < -5000000000LL)
+        HOLOSCAN_LOG_ERROR(
+            "st2110_tx: FIXED-LATENCY CLOCK MISMATCH — first-frame lead {} ms vs configured {} ms. "
+            "capture_ts is not on the NIC PHC timeline (ptp4l running? source PTP-locked?); the "
+            "schedule will skip everything. SPARK_LATENCY_MS=0 falls back to the adaptive servo.",
+            lead / 1000000, fixed_l / 1000000);
+    }
+    if (lead < kFixedSkipFloorNs) {
+      ++skipped_late_;
+      if (++fixed_late_streak_ == 1 || (fixed_late_streak_ & 255) == 0)
+        HOLOSCAN_LOG_WARN(
+            "st2110_tx: fixed-latency frame late (lead {} us, streak {}) — the pipeline floor is "
+            "above L; raise SPARK_LATENCY_MS (watch tx_margin_us). {} skipped total",
+            lead / 1000, fixed_late_streak_, skipped_late_);
+      return;
+    }
+    fixed_late_streak_ = 0;
+    schedule_base_ns_ = static_cast<uint64_t>(gbase);
+    last_lead_ns_ = lead;
+    genlock_offset_ = fixed_l;  // tx_e2e_us telemetry: exact by construction in this mode
+    genlocked_ = true;
+  } else if (tgt > 0 && frame.capture_ts_ns != 0) {
     // GENLOCK (IP10): anchor the send base to the SOURCE's frame timing (capture_ts, from the sender's RTP
     // clock, plumbed through the GPU stages) plus a calibrated constant offset. capture_ts advances at the
     // source rate and is jitter-free — unlike the compute-time NIC clock, whose pipeline jitter forced
@@ -375,25 +532,32 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
   const uint64_t base = schedule_base_ns_;
   const bool pace = pacing_.get();
 
-  // RTP media timestamp from a MONOTONIC clock anchored once to the GM-locked egress. Decoupling it
-  // from schedule_base_ns_ matters: the pacer may re-anchor base (jump), and a timestamp that jumped
-  // with it would break a downstream receiver's clock recovery — the monotonic clock never jumps, so
-  // BMD-class receivers hold a solid lock. It does SLEW (bounded, below) toward base in genlock mode
-  // so the two stay glued across trims and re-anchors without ever stepping.
-  if (media_ts_ns_ == 0) media_ts_ns_ = base;
-  pktz_->start_frame(spark::st2110::rtp_timestamp_90k(media_ts_ns_));
-  // Advance the media clock one frame — plus, in genlock mode, a bounded slew toward the wire base.
-  // Without the slew, any base re-anchor or trim leaves the RTP timestamps permanently offset from
-  // the wire schedule, and a timestamp-driven receiver keeps playing at the OLD latency: the trimmed
-  // wire time buys nothing. Slewing at the same trim rate keeps ts == schedule (both receiver models
-  // see the latency drop) while staying smooth and monotonic (|slew| < frame interval by orders).
-  int64_t media_adj = 0;
-  if (genlocked_ && trim_ns_.get() > 0) {
-    const int64_t skew = static_cast<int64_t>(base) - static_cast<int64_t>(media_ts_ns_);
-    const int64_t lim = static_cast<int64_t>(trim_ns_.get());
-    media_adj = skew > lim ? lim : (skew < -lim ? -lim : skew);
+  if (fixed_active_) {
+    // Fixed mode: the RTP timestamp derives straight from the wire schedule — a true PTP-epoch
+    // stamp (capture + L), the ST 2110-10 ideal. The base never jumps (skips leave it untouched),
+    // so there is no media-clock state to anchor or slew, and skipped frames are honest gaps.
+    pktz_->start_frame(spark::st2110::rtp_timestamp_90k(base));
+  } else {
+    // RTP media timestamp from a MONOTONIC clock anchored once to the GM-locked egress. Decoupling it
+    // from schedule_base_ns_ matters: the pacer may re-anchor base (jump), and a timestamp that jumped
+    // with it would break a downstream receiver's clock recovery — the monotonic clock never jumps, so
+    // BMD-class receivers hold a solid lock. It does SLEW (bounded, below) toward base in genlock mode
+    // so the two stay glued across trims and re-anchors without ever stepping.
+    if (media_ts_ns_ == 0) media_ts_ns_ = base;
+    pktz_->start_frame(spark::st2110::rtp_timestamp_90k(media_ts_ns_));
+    // Advance the media clock one frame — plus, in genlock mode, a bounded slew toward the wire base.
+    // Without the slew, any base re-anchor or trim leaves the RTP timestamps permanently offset from
+    // the wire schedule, and a timestamp-driven receiver keeps playing at the OLD latency: the trimmed
+    // wire time buys nothing. Slewing at the same trim rate keeps ts == schedule (both receiver models
+    // see the latency drop) while staying smooth and monotonic (|slew| < frame interval by orders).
+    int64_t media_adj = 0;
+    if (genlocked_ && trim_ns_.get() > 0) {
+      const int64_t skew = static_cast<int64_t>(base) - static_cast<int64_t>(media_ts_ns_);
+      const int64_t lim = static_cast<int64_t>(trim_ns_.get());
+      media_adj = skew > lim ? lim : (skew < -lim ? -lim : skew);
+    }
+    media_ts_ns_ += frame_interval_ns_ + media_adj;
   }
-  media_ts_ns_ += frame_interval_ns_ + media_adj;
 
   uint32_t i = 0;
   uint32_t pace_line = 0xffffffffu, pace_intra = 0;
@@ -447,8 +611,10 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
         // job is to not submit too far ahead of the NIC clock; the actual wire timing is the per-packet
         // send timestamp the NIC paces on, NOT when software submits. So a sleep-based (less precise)
         // submit is fine given the large horizon — and it stops the throttle pegging a core, which under
-        // load starved the RX poll thread (rx packet loss). IP10/others keep the validated tight spin.
-        if (pace_line_burst_) {
+        // load starved the RX poll thread (rx packet loss). IP10/others keep the validated tight spin —
+        // EXCEPT in fixed-latency mode, where the lead can be most of L (tens of ms): spinning that
+        // long every frame would peg a core for nothing, so fixed mode always sleeps long waits.
+        if (pace_line_burst_ || fixed_active_) {
           const int64_t wait_ns =
               static_cast<int64_t>(send_ts) - static_cast<int64_t>(backend_->now_ns() + eff_horizon_ns_);
           if (wait_ns > 200000) std::this_thread::sleep_for(std::chrono::nanoseconds(wait_ns - 100000));
@@ -468,6 +634,11 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
 
 void St2110TxOp::stop() {
   if (!backend_) return;
+  // Stop the audio relay and stats poller BEFORE the backend goes down (both use backend_).
+  stop_audio_.store(true);
+  stop_stats_.store(true);
+  if (audio_thread_.joinable()) audio_thread_.join();
+  if (stats_thread_.joinable()) stats_thread_.join();
   emit_live(true);  // final live snapshot for the daemon
   const auto s = backend_->stats();
   HOLOSCAN_LOG_INFO(
