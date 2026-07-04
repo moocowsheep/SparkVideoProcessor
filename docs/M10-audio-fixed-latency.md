@@ -109,6 +109,17 @@ when the **video** receiver is active — audio is a companion essence, not a st
    the sender recovers. Lip-sync while latched is arrival-anchored: exact to within network+ptime
    (~1–2 ms), not to the sender's (broken) claim. WARN on each latch (1/s rate-limited);
    `audio_rx_relatch` counts them — any nonzero value means the sender needs fixing.
+   **The VIDEO stamps get the same guard** (added 2026-07-04 after BMD-1's video epoch stepped
+   +2.0 s: frames scheduled 2 s early, `tx_lead_us`≈2.06 s, true wire latency ~2.1 s while
+   `tx_e2e_us` echoed L — and with a future epoch nothing skips, so a fixed-mode floor probe
+   silently measures nothing). `video_capture_ns()` applies the same latch per frame at a tighter
+   **±150 ms** (healthy video stamps sit within ~20 ms of first-packet arrival; the audio 500 ms
+   bound let sub-threshold epoch hops accumulate into a 65→565 ms latency sawtooth, observed live);
+   since both the fixed schedule and the outgoing wire stamps derive from `capture_ts` (wire =
+   capture + L), the one correction keeps latency real and the output 2110-10 stamps on the PTP
+   epoch. `rx_relatch` on the `spark_live rx_…` line counts video latches. Note this also
+   subsumes most `FIXED-LATENCY CLOCK MISMATCH` cases: capture is now always arrival-sane, so
+   that error should no longer fire even when the sender epoch is broken.
 
 ## Rig validation checklist
 

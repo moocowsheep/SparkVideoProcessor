@@ -50,6 +50,7 @@ class St2110RxOp : public holoscan::Operator {
   void account(const spark::st2110::RxPacketInfo& info, const spark::net::RxPacket& pkt,
                uint64_t now_ns);  // loss + ingest-latency bookkeeping
   void audio_ingest(const spark::net::RxPacket& pkt, uint64_t now_ns);  // 2110-30 -> AudioBridge
+  uint64_t video_capture_ns(uint32_t rtp_ts, uint64_t ref);  // unwrap + broken-epoch guard
   std::shared_ptr<std::vector<uint8_t>> next_buffer();  // ring buffer for emitted frames
 
   holoscan::Parameter<std::string> pci_addr_;
@@ -89,6 +90,11 @@ class St2110RxOp : public holoscan::Operator {
   bool cur_first_ = true;
   uint32_t cur_ts_ = 0;
   uint64_t cur_arrival_ns_ = 0;  // first-packet NIC HW arrival — the RTP-unwrap reference
+  // Broken-sender-epoch guard for the VIDEO stamps (poll-thread only), mirroring the audio one
+  // below: same device fault observed on both essences (video epoch seen +2.0s off TAI).
+  uint32_t video_ts_delta_ = 0;      // latched correction (0 = verbatim stamps)
+  uint64_t video_relatch_ = 0;       // times the sanity check re-latched (>0 = sender epoch broken)
+  double video_relatch_warn_s_ = 0;  // WARN rate-limit
 
   // emit-mode: dedicated NIC-drain thread feeding a bounded frame queue (decouples NIC polling from
   // the emit cadence, so the ring never overflows while TX paces the previous frame).
