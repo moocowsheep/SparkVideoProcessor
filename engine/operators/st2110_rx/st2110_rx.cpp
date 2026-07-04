@@ -179,6 +179,47 @@ void St2110RxOp::audio_ingest(const spark::net::RxPacket& pkt, uint64_t now_ns) 
     ++audio_drop_;
 }
 
+// Video frame capture instant, with the same broken-sender-epoch guard as audio_ingest above:
+// unwrap the 90 kHz stamp against the frame's first-packet arrival, and if it lands beyond kSaneNs
+// of that arrival (observed on a BMD: video epoch stepped +2.0s while PTP was clean — same device
+// fault as the audio epochs), latch a constant tick delta re-anchoring the stream to arrival time.
+// Cadence-exact (integer add), auto-returns to verbatim when the sender recovers. The fixed-latency
+// schedule AND the outgoing wire stamps both derive from capture_ts (wire = capture + L), so this
+// one correction keeps the schedule real and the output 2110-10 stamps on the PTP epoch. Runs once
+// per frame; each relatch = one step in output timestamps (downstream receivers resync once).
+// Threshold is TIGHTER than audio's ±500 ms: a healthy video stamp sits within ~20 ms of its
+// first-packet arrival (measured −17.9 ms on a sane BMD), and a sender whose epoch steps in
+// sub-threshold hops accumulates each hop straight into wire latency until a hop crosses the
+// line (observed live 2026-07-04: +72 ms then +421 ms hops → e2e sawtoothed 65→565 ms under the
+// old 500 ms bound). 150 ms caps that excursion while staying 7× above legit stamp lag; a
+// genuine >150 ms delivery stall relatches once and self-corrects on the next sane frame.
+uint64_t St2110RxOp::video_capture_ns(uint32_t rtp_ts, uint64_t ref) {
+  constexpr int64_t kSaneNs = 150000000;
+  uint64_t cap = spark::st2110::rtp_unwrap_ns(rtp_ts + video_ts_delta_, 90000, ref);
+  if (const int64_t err = int64_t(cap) - int64_t(ref); err > kSaneNs || err < -kSaneNs) {
+    const uint64_t raw = spark::st2110::rtp_unwrap_ns(rtp_ts, 90000, ref);
+    const int64_t raw_err = int64_t(raw) - int64_t(ref);
+    if (video_ts_delta_ != 0 && raw_err <= kSaneNs && raw_err >= -kSaneNs) {
+      video_ts_delta_ = 0;  // sender recovered: back to the verbatim stamp
+      cap = raw;
+    } else {
+      video_ts_delta_ = spark::st2110::rtp_restamp_delta(rtp_ts, 90000, ref);
+      cap = spark::st2110::rtp_unwrap_ns(rtp_ts + video_ts_delta_, 90000, ref);
+    }
+    ++video_relatch_;
+    const double t = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (t - video_relatch_warn_s_ >= 1.0) {  // rate-limit: a jittering sender relatches per frame
+      video_relatch_warn_s_ = t;
+      HOLOSCAN_LOG_WARN(
+          "st2110_rx: video sender stamp {:.3f}s off its arrival — broken sender epoch; "
+          "re-latched ts_delta={} (relatch #{}); capture now anchored to arrival time",
+          err / 1e9, video_ts_delta_, video_relatch_);
+    }
+  }
+  return cap;
+}
+
 std::shared_ptr<std::vector<uint8_t>> St2110RxOp::next_buffer() {
   if (buf_ring_.empty()) {
     buf_ring_.resize(8);
@@ -272,7 +313,7 @@ void St2110RxOp::poll_loop() {
         // ABSOLUTE capture time (PTP epoch): the 32-bit RTP ts unwrapped against the first packet's
         // PHC arrival. Restart-invariant and wrap-free, so a FIXED genlock offset (capture + L) is
         // a true end-to-end latency — and audio, unwrapped the same way, shares the timeline.
-        f.capture_ts_ns = spark::st2110::rtp_unwrap_ns(cur_ts_, 90000, cur_arrival_ns_);
+        f.capture_ts_ns = video_capture_ns(cur_ts_, cur_arrival_ns_);
         f.frame_number = frames_++;
         {
           std::lock_guard<std::mutex> lk(q_mu_);
@@ -335,8 +376,8 @@ void St2110RxOp::emit_live(bool force) {
   last_live_s_ = t;
   const uint64_t avg_us = lat_cnt_ ? (lat_sum_ / lat_cnt_) / 1000 : 0;  // ns -> us
   // Unique tokens so the control daemon can grab each field unambiguously (latest-wins).
-  HOLOSCAN_LOG_INFO("spark_live rx_frames={} rx_packets={} rx_lost={} rx_latency_us={}", frames_,
-                    packets_, lost_, avg_us);
+  HOLOSCAN_LOG_INFO("spark_live rx_frames={} rx_packets={} rx_lost={} rx_latency_us={} rx_relatch={}",
+                    frames_, packets_, lost_, avg_us, video_relatch_);
   if (audio_enabled_)
     HOLOSCAN_LOG_INFO("spark_live audio_rx_pkts={} audio_rx_bad={} audio_rx_drop={} audio_rx_relatch={}",
                       audio_pkts_, audio_bad_, audio_drop_, audio_relatch_);
