@@ -1,7 +1,12 @@
 # M9 — modular filter chain: downscale, sharpen, proc amp
 
-**Status:** implemented + built 2026-07-01, kernel unit tests green (`test_filters`). Hardware
-(picture) validation on the BMD rig pending.
+**Status:** implemented + built 2026-07-01, kernel unit tests green (`test_filters`). **On-air
+picture validation 2026-07-04** (BMD-1 1080p29.97 → BD2 at 2160p29.97, `deploy/m9_run.sh`
+variants): SR A/B — fsrcnn visibly better than cubic; sharpen good at 0.8 and 1.2 (no halos);
+proc amp verified live (sat 1.6 / hue +30° / bright +0.05). The hue sign was flipped during
+validation so **positive = clockwise on the vectorscope (skin toward warm)** — the original CCW
+math read as "skin goes green" on air. Still open: downscale-AA picture check (needs a >1080p
+source or a sub-1080p monitor format).
 
 The processing stages between unpack and pack are now a **composable chain**. Every filter is a
 GpuFrame → GpuFrame operator with the same contract (own CUDA stream, `cudaStreamWaitEvent` on the
@@ -36,7 +41,7 @@ range), sharpening at the delivery resolution, levels trimmed last.
 | `SPARK_PA_BRIGHT` | `paBrightness` | 0 | ±1 = ±full Y swing |
 | `SPARK_PA_CONTRAST` | `paContrast` | 1 | 0/negative reads as **unset → 1.0** (proto3 zero-default safety; use 0.01 for an effective zero) |
 | `SPARK_PA_SAT` | `paSaturation` | 1 | same 0-as-unset rule; 0.01 ≈ mono |
-| `SPARK_PA_HUE` | `paHueDeg` | 0 | degrees |
+| `SPARK_PA_HUE` | `paHueDeg` | 0 | degrees; positive = clockwise on the vectorscope (skin → warm) |
 | `SPARK_FILTERS` | `filters` | "" (auto) | explicit chain, e.g. `procamp,frc,scale` — order and set override; repeated tokens allowed (ops get unique names); `frc` still requires `SPARK_FRC`≠0 |
 
 The web Configuration card exposes sharpen + the four proc amp fields; the chain-order override
