@@ -23,6 +23,12 @@ struct RxBackendConfig {
   std::string mcast_group;    // ST 2110-20 multicast group to receive (e.g. "239.100.0.10")
   std::string src_ip;         // SSM source filter (sender's source IP); empty = any-source
   std::string iface_ip;       // local media interface IP (IGMP report source; "" -> 0.0.0.0)
+  // Companion ST 2110-30 audio flow on the SAME port (M10). When audio_mcast_group is set, a second
+  // flow rule steers it into the same DPDK queue; receive() classifies each packet (is_audio) by
+  // group/port. Both groups are IGMP-joined and renewed. Empty = video-only (unchanged behavior).
+  std::string audio_mcast_group;
+  std::string audio_src_ip;      // SSM filter for the audio flow; empty = any-source
+  uint16_t audio_udp_port = 0;   // 0 = audio disabled
 };
 
 // One received media packet. `payload` points at the UDP payload (the RTP/RFC 4175 bytes) inside the
@@ -33,6 +39,7 @@ struct RxPacket {
   uint32_t len = 0;
   uint64_t hw_timestamp_ns = 0;
   bool has_timestamp = false;
+  bool is_audio = false;   // matched the companion audio flow (RxBackendConfig::audio_*)
   void* opaque = nullptr;  // the rte_mbuf*
 };
 

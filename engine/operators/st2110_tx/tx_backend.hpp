@@ -28,6 +28,12 @@ struct TxBackendConfig {
   bool pacing = true;                    // enable tx_pp HW send-scheduling
   bool manage_eal = true;  // true: this backend owns rte_eal_init (standalone). false: shared EAL
                            // already up (DpdkEal) — just attach to the port (multi-backend process).
+  // Companion ST 2110-30 audio egress on the SAME port (M10): a second header template and a
+  // dedicated TX queue (index 1), so the audio relay thread submits without touching the video
+  // queue's state. Both queues share the port's tx_pp clock — audio packets get the same
+  // send-on-timestamp pacing on the same PHC. Empty dst = audio disabled (unchanged behavior).
+  std::string audio_dst_ip;
+  uint16_t audio_udp_port = 0;
 };
 
 // HW pacing counters mirrored from the mlx5 tx_pp xstats — the same metrics the gate-4 spike read.
@@ -65,6 +71,13 @@ class ISt2110TxBackend {
 
   // Drain any buffered packets to the NIC (call at end of frame / burst).
   virtual void flush() = 0;
+
+  // --- companion audio channel (config.audio_dst_ip; see TxBackendConfig) ---------------------
+  // Thread contract: reserve_audio/submit_audio are called ONLY from the audio relay thread and use
+  // a dedicated TX queue, so they never contend with the video compute() thread's reserve/submit.
+  virtual bool audio_ready() = 0;  // audio channel configured AND its queue came up
+  virtual TxBuf reserve_audio(uint32_t payload_len) = 0;
+  virtual void submit_audio(const TxBuf& buf, uint64_t send_ts_ns) = 0;  // bursts immediately
 
   virtual TxStats stats() = 0;
   virtual uint64_t now_ns() = 0;  // read the NIC PHC — the pacing time base for send_ts_ns

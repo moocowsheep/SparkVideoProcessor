@@ -100,6 +100,15 @@ message PipelineStats {
   uint64 tx_past_err = 7;
   double ingest_latency_us = 8;
   uint64 frc_interpolated = 9;
+  // --- M10: fixed-latency schedule + audio relay health ---
+  uint64 tx_reanchors = 10;      // genlock re-anchors (servo mode; 0 in fixed mode by design)
+  uint64 tx_skipped = 11;        // frames skipped unsent (late vs the schedule -> receiver repeats)
+  uint64 fixed_latency_ms = 12;  // configured capture->wire latency L; 0 = adaptive servo (legacy)
+  uint64 tx_margin_us = 13;      // min schedule headroom over the last window (fixed-mode gauge)
+  uint64 pipe_latency_us = 14;   // unpack->pack GPU-chain latency, current
+  uint64 audio_rx_packets = 15;  // 2110-30 packets received (companion flow)
+  uint64 audio_tx_packets = 16;  // 2110-30 packets relayed at capture + L
+  uint64 audio_late = 17;        // relayed late or dropped (host stall / L too small)
 }
 
 message PipelineStatus {
