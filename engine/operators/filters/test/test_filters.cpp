@@ -24,7 +24,8 @@ void cpu_procamp(const std::vector<uint16_t>& y, const std::vector<uint16_t>& cb
                  const std::vector<uint16_t>& cr, std::vector<uint16_t>& yo,
                  std::vector<uint16_t>& cbo, std::vector<uint16_t>& cro, float bright, float con,
                  float sat, float hue_deg) {
-  const float off = bright * 876.0f, rad = hue_deg * 3.14159265358979f / 180.0f;
+  // Positive hue = clockwise on the vectorscope (skin toward warm) — negation matches procamp().
+  const float off = bright * 876.0f, rad = -hue_deg * 3.14159265358979f / 180.0f;
   const float ch = std::cos(rad), sh = std::sin(rad);
   for (size_t i = 0; i < y.size(); ++i) yo[i] = clamp10(64.0f + (y[i] - 64.0f) * con + off);
   for (size_t i = 0; i < cb.size(); ++i) {
