@@ -60,7 +60,9 @@ void procamp(const uint16_t* y_in, const uint16_t* cb_in, const uint16_t* cr_in,
   const size_t ny = (size_t)width * height;
   const size_t nc = (size_t)(width / 2) * height;
   const float offset_cv = brightness * 876.0f;  // ±1.0 = ±the full 10-bit Y swing (940-64)
-  const float rad = hue_deg * 3.14159265358979f / 180.0f;
+  // Positive hue = CLOCKWISE on the vectorscope (skin toward red/warm), matching the common analog
+  // phase-control expectation — hence the negation into the CCW (Cb,Cr) rotation below.
+  const float rad = -hue_deg * 3.14159265358979f / 180.0f;
   procamp_y_k<<<grid1d(ny), kBlock, 0, stream>>>(y_in, y_out, ny, contrast, offset_cv);
   procamp_c_k<<<grid1d(nc), kBlock, 0, stream>>>(cb_in, cr_in, cb_out, cr_out, nc, saturation,
                                                  std::cos(rad), std::sin(rad));
