@@ -162,6 +162,16 @@ void parse_stats(PipelineStats& st) {
   st.set_tx_past_err(grab(log, "tx_past_err="));
   st.set_frc_interpolated(grab(log, "frc_interpolated="));
   st.set_ingest_latency_us(static_cast<double>(grab(log, "rx_latency_us=")));
+  // M10: schedule + audio relay health (tokens absent -> 0, e.g. video-only or servo mode)
+  st.set_tx_reanchors(grab(log, "tx_reanchors="));
+  st.set_tx_skipped(grab(log, "tx_skipped="));
+  st.set_fixed_latency_ms(grab(log, "tx_fixed_ms="));
+  st.set_tx_margin_us(grab(log, "tx_margin_us="));
+  st.set_pipe_latency_us(grab(log, "pipe_latency_us cur="));
+  st.set_audio_rx_packets(grab(log, "audio_rx_pkts="));
+  st.set_audio_tx_packets(grab(log, "audio_tx_pkts="));
+  st.set_audio_late(grab(log, "audio_tx_late=") + grab(log, "audio_tx_drop=") +
+                    grab(log, "audio_rx_drop="));
 }
 
 // Reap the child if it exited on its own; update state. Caller holds the lock.

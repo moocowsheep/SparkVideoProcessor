@@ -48,14 +48,22 @@ function readForm() {
   return c;
 }
 function renderStats(s) {
+  const fixed = +s.fixedLatencyMs > 0;
   const rows = [
     ['RX frames', s.rxFrames], ['RX packets', s.rxPackets], ['RX lost', s.rxLost],
     ['TX frames', s.txFrames], ['TX packets', s.txPackets],
     ['TX future_err', s.txFutureErr], ['TX past_err', s.txPastErr],
+    ['TX skipped', s.txSkipped],
+    ['Latency', fixed ? `${s.fixedLatencyMs} ms fixed` : 'servo'],
+    ['Margin (µs)', fixed ? s.txMarginUs : '–'],
+    ['Pipe latency (µs)', s.pipeLatencyUs],
     ['FRC interpolated', s.frcInterpolated], ['Ingest latency (µs)', (s.ingestLatencyUs || 0).toFixed(1)],
+    ['Audio RX pkts', s.audioRxPackets], ['Audio TX pkts', s.audioTxPackets],
+    ['Audio late/drop', s.audioLate],
   ];
   $('stats').innerHTML = rows.map(([k, v]) => {
-    const bad = (k === 'RX lost' && +v > 0);
+    const bad = (k === 'RX lost' && +v > 0) || (k === 'Audio late/drop' && +v > 0) ||
+                (k === 'Margin (µs)' && fixed && +v === 0);
     return `<div class="stat"><span>${k}</span><b class="${bad ? 'bad' : ''}">${v ?? '–'}</b></div>`;
   }).join('');
 }
