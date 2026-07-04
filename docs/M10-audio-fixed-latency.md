@@ -99,6 +99,16 @@ when the **video** receiver is active — audio is a companion essence, not a st
    exactly the 1 Hz stats frame at ANY L (found on the rig 2026-07-03); a 1 Hz poller thread now
    caches it. Symptom signature if it regresses: ~1 skip/s whose WARN directly follows the
    `spark_live tx_…` line, with small late leads (−8..+1 ms).
+8. **Broken sender audio epoch (auto-rescued)**: a sender whose audio RTP timestamps are not on
+   the PTP epoch (observed live 2026-07-04: BMD-1 audio frozen −14.8 s, then −8.26 s vs TAI
+   mid-run, while its video stamps stayed correct) would unwrap to a capture seconds in the past
+   and the relay would drop 100% of audio. `audio_ingest` now sanity-checks each unwrapped capture
+   against the packet's NIC arrival; beyond ±500 ms it latches a constant mod-2³² tick delta
+   (`rtp_restamp_delta`) that re-anchors the stream to arrival — smooth (exact integer add,
+   cadence preserved), one step at the latch instant, and it returns to the verbatim stamp when
+   the sender recovers. Lip-sync while latched is arrival-anchored: exact to within network+ptime
+   (~1–2 ms), not to the sender's (broken) claim. WARN on each latch (1/s rate-limited);
+   `audio_rx_relatch` counts them — any nonzero value means the sender needs fixing.
 
 ## Rig validation checklist
 

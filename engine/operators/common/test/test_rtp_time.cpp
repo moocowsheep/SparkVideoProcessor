@@ -107,6 +107,36 @@ int main() {
     CHECK(err >= -1 && err <= 1);
   }
 
+  // 6. broken-sender-epoch rescue (rtp_restamp_delta): a stamp seconds off its arrival — the
+  // BMD-1 failure observed live (audio epoch −14.8s then −8.26s vs TAI, video correct) — latches a
+  // delta that (a) puts the corrected stamp within 1 tick of arrival, (b) applied unchanged to
+  // later packets preserves the sender's exact tick cadence, (c) is 0 for a sane sender.
+  {
+    using spark::st2110::rtp_restamp_delta;
+    const uint32_t rate = 48000;
+    for (int64_t epoch_err_ns : {int64_t(-14795000000), int64_t(-8259000000), int64_t(22205000000)}) {
+      const uint64_t arrival = kT2026 + 123456789;
+      const uint64_t claimed = static_cast<uint64_t>(static_cast<int64_t>(arrival) + epoch_err_ns);
+      const uint32_t bad_ts = static_cast<uint32_t>(rtp_ticks_abs(claimed, rate));
+      const uint32_t delta = rtp_restamp_delta(bad_ts, rate, arrival);
+      // (a) corrected stamp unwraps onto the arrival instant
+      CHECK(abs_diff(rtp_unwrap_ns(bad_ts + delta, rate, arrival), arrival) <= tick_ns(rate));
+      // (b) 10 s later (packets every 48 ticks / 1 ms), the SAME delta still lands each packet on
+      // its own arrival, and corrected stamps advance by exactly the sender's cadence
+      uint32_t prev_ts = bad_ts + delta;
+      for (int i = 1; i <= 10000; i += 999) {
+        const uint64_t arr_i = arrival + uint64_t(i) * 1000000ULL;
+        const uint32_t ts_i = bad_ts + uint32_t(i) * 48u;
+        CHECK(abs_diff(rtp_unwrap_ns(ts_i + delta, rate, arr_i), arr_i) <= tick_ns(rate));
+        CHECK(uint32_t((ts_i + delta) - prev_ts) % 48u == 0u);
+        prev_ts = ts_i + delta;
+      }
+    }
+    // (c) sane sender: stamp == arrival instant -> delta 0 (the verbatim/bit-transparent path)
+    const uint64_t t = kT2026 + 5555;
+    CHECK(rtp_restamp_delta(static_cast<uint32_t>(rtp_ticks_abs(t, rate)), rate, t) == 0);
+  }
+
   std::printf("test_rtp_time: all checks passed\n");
   return 0;
 }
