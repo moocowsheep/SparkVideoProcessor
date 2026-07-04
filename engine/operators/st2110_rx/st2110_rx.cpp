@@ -139,10 +139,40 @@ void St2110RxOp::audio_ingest(const spark::net::RxPacket& pkt, uint64_t now_ns) 
   }
   const uint32_t rtp_ts = (uint32_t(pkt.payload[4]) << 24) | (uint32_t(pkt.payload[5]) << 16) |
                           (uint32_t(pkt.payload[6]) << 8) | uint32_t(pkt.payload[7]);
+  const uint64_t ref = pkt.has_timestamp ? pkt.hw_timestamp_ns : now_ns;
+  const uint32_t rate = audio_rate_.get();
+  uint64_t cap = spark::st2110::rtp_unwrap_ns(rtp_ts + audio_ts_delta_, rate, ref);
+  // Sender-stamp sanity: a correct 2110-30 stamp sits within packetization+network delay of its
+  // arrival. Anything beyond kSaneNs is a broken sender epoch (observed on a BMD: audio frozen
+  // seconds off TAI while video was correct, stepping again mid-run) — without this the relay
+  // would drop 100% of audio forever. Latch a constant tick delta that puts the stream back on
+  // the arrival instant; prefer delta=0 (bit-transparent) whenever the raw stamp is sane again.
+  constexpr int64_t kSaneNs = 500000000;  // generous vs ptime+device pipeline, tiny vs a bad epoch
+  if (const int64_t err = int64_t(cap) - int64_t(ref); err > kSaneNs || err < -kSaneNs) {
+    const uint64_t raw = spark::st2110::rtp_unwrap_ns(rtp_ts, rate, ref);
+    const int64_t raw_err = int64_t(raw) - int64_t(ref);
+    if (audio_ts_delta_ != 0 && raw_err <= kSaneNs && raw_err >= -kSaneNs) {
+      audio_ts_delta_ = 0;  // sender recovered: back to the verbatim stamp
+      cap = raw;
+    } else {
+      audio_ts_delta_ = spark::st2110::rtp_restamp_delta(rtp_ts, rate, ref);
+      cap = spark::st2110::rtp_unwrap_ns(rtp_ts + audio_ts_delta_, rate, ref);
+    }
+    ++audio_relatch_;
+    const double t = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (t - audio_relatch_warn_s_ >= 1.0) {  // rate-limit: a jittering sender relatches per packet
+      audio_relatch_warn_s_ = t;
+      HOLOSCAN_LOG_WARN(
+          "st2110_rx: audio sender stamp {:.3f}s off its arrival — broken sender epoch; "
+          "re-latched ts_delta={} (relatch #{}); lip-sync now anchored to arrival time",
+          err / 1e9, audio_ts_delta_, audio_relatch_);
+    }
+  }
   spark::st2110::AudioBridge::Pkt p;
   p.rtp.assign(pkt.payload, pkt.payload + pkt.len);
-  p.capture_ns = spark::st2110::rtp_unwrap_ns(
-      rtp_ts, audio_rate_.get(), pkt.has_timestamp ? pkt.hw_timestamp_ns : now_ns);
+  p.capture_ns = cap;
+  p.ts_delta = audio_ts_delta_;
   if (spark::st2110::AudioBridge::instance().push(std::move(p)))
     ++audio_pkts_;
   else
@@ -308,8 +338,8 @@ void St2110RxOp::emit_live(bool force) {
   HOLOSCAN_LOG_INFO("spark_live rx_frames={} rx_packets={} rx_lost={} rx_latency_us={}", frames_,
                     packets_, lost_, avg_us);
   if (audio_enabled_)
-    HOLOSCAN_LOG_INFO("spark_live audio_rx_pkts={} audio_rx_bad={} audio_rx_drop={}", audio_pkts_,
-                      audio_bad_, audio_drop_);
+    HOLOSCAN_LOG_INFO("spark_live audio_rx_pkts={} audio_rx_bad={} audio_rx_drop={} audio_rx_relatch={}",
+                      audio_pkts_, audio_bad_, audio_drop_, audio_relatch_);
 }
 
 void St2110RxOp::print_stats() {

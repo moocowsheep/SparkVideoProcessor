@@ -185,7 +185,9 @@ void St2110TxOp::audio_loop() {
     }
     uint32_t ts = (uint32_t(p.rtp[4]) << 24) | (uint32_t(p.rtp[5]) << 16) |
                   (uint32_t(p.rtp[6]) << 8) | uint32_t(p.rtp[7]);
-    ts += tick_shift;
+    // ts_delta: RX's broken-sender-epoch correction (0 for a sane sender). Folding it in keeps the
+    // emitted stamp on the same timeline as the send schedule (capture already includes it).
+    ts += tick_shift + p.ts_delta;
     p.rtp[4] = uint8_t(ts >> 24);
     p.rtp[5] = uint8_t(ts >> 16);
     p.rtp[6] = uint8_t(ts >> 8);

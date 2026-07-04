@@ -131,6 +131,9 @@ class St2110RxOp : public holoscan::Operator {
   // absolute capture time (RTP ts unwrapped against the PHC arrival timestamp).
   bool audio_enabled_ = false;
   uint64_t audio_pkts_ = 0, audio_bad_ = 0, audio_drop_ = 0;
+  uint32_t audio_ts_delta_ = 0;      // latched broken-sender-epoch correction (0 = verbatim stamps)
+  uint64_t audio_relatch_ = 0;       // times the sanity check re-latched (>0 = sender epoch broken)
+  double audio_relatch_warn_s_ = 0;  // WARN rate-limit
 };
 
 }  // namespace spark::ops
