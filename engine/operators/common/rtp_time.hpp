@@ -33,4 +33,14 @@ inline uint64_t rtp_unwrap_ns(uint32_t rtp_ts, uint32_t rate_hz, uint64_t near_n
   return static_cast<uint64_t>((static_cast<unsigned __int128>(ticks) * 1000000000u) / rate_hz);
 }
 
+// Correction for a sender whose RTP timestamps are NOT on the PTP epoch (observed: a BMD 2110-30
+// sender with its audio epoch frozen seconds off while its video stamps were correct). Returns the
+// mod-2^32 tick delta that moves `rtp_ts` onto the reference instant: unwrap(rtp_ts + delta) lands
+// within 1 tick of `ref_ns`. Adding the SAME latched delta to every subsequent stamp preserves the
+// sender's tick cadence exactly (integer add, no rounding), so the corrected stream is smooth and
+// only the latch instant steps.
+inline uint32_t rtp_restamp_delta(uint32_t rtp_ts, uint32_t rate_hz, uint64_t ref_ns) {
+  return static_cast<uint32_t>(rtp_ticks_abs(ref_ns, rate_hz)) - rtp_ts;
+}
+
 }  // namespace spark::st2110

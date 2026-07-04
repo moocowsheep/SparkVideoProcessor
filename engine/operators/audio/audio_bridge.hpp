@@ -22,6 +22,9 @@ class AudioBridge {
   struct Pkt {
     std::vector<uint8_t> rtp;  // full RTP packet (header + PCM payload), verbatim from the wire
     uint64_t capture_ns = 0;   // absolute capture time (RTP ts unwrapped against the PHC arrival)
+    uint32_t ts_delta = 0;     // mod-2^32 correction latched by RX when the sender's stamp epoch
+                               // is broken (capture_ns already includes it); TX must add it to the
+                               // outgoing RTP ts so the emitted stamp matches the send schedule
   };
 
   static AudioBridge& instance() {
