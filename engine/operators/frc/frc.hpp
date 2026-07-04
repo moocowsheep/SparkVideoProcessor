@@ -28,6 +28,7 @@
 
 #include "../resize/gpu_frame.hpp"
 #include "frc_grid.hpp"
+#include "frc_kernels.hpp"
 #include "nvof_flow.hpp"
 
 namespace spark::ops {
@@ -57,10 +58,15 @@ class FrcOp : public holoscan::Operator {
   uint64_t grid_dropped_ = 0;      // ticks dropped (stall jumps / over-burst brackets)
   uint32_t burst_ = 1;             // max emits per compute (== pipeline_emit_burst(), cached)
   spark::frc::NvofFlow flow_;
+  spark::frc::FlowView fview_{};  // what interpolate() consumes (raw or median-filtered flow)
+  bool median_ = true;            // 3x3 flow median pre-filter (SPARK_FRC_MEDIAN=0 disables)
   bool inited_ = false;
   cudaStream_t stream_ = nullptr;  // FRC's own CUDA stream (NVOF + interpolate); pipelined vs other ops
   uint8_t* prevY8_ = nullptr;
   uint8_t* curY8_ = nullptr;
+  short* flow_med_f_ = nullptr;  // median-filtered flow grids (packed SHORT2, grid_w x grid_h)
+  short* flow_med_b_ = nullptr;
+  spark::frc::WarpWorkspace ws_{};  // splat scratch (accum + phase-t grids), owned here
   float* wmap_ = nullptr;  // per-pixel occlusion blend weight (luma res), shared luma->chroma per frame
   spark::gpu::GpuFramePtr prev_;
   std::vector<spark::gpu::GpuFramePtr> pool_;

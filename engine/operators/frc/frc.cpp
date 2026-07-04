@@ -1,6 +1,7 @@
 #include "frc.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <stdexcept>
 
 #include <cuda_runtime.h>
@@ -48,6 +49,16 @@ void FrcOp::ensure(uint32_t width, uint32_t height) {
   cudaMalloc(reinterpret_cast<void**>(&prevY8_), static_cast<size_t>(width) * height);
   cudaMalloc(reinterpret_cast<void**>(&curY8_), static_cast<size_t>(width) * height);
   cudaMalloc(reinterpret_cast<void**>(&wmap_), static_cast<size_t>(width) * height * sizeof(float));
+  const char* mv = std::getenv("SPARK_FRC_MEDIAN");
+  median_ = mv ? std::atoi(mv) != 0 : true;
+  const size_t grid_bytes =
+      static_cast<size_t>(flow_.grid_w()) * flow_.grid_h() * 2 * sizeof(short);
+  cudaMalloc(reinterpret_cast<void**>(&flow_med_f_), grid_bytes);
+  cudaMalloc(reinterpret_cast<void**>(&flow_med_b_), grid_bytes);
+  cudaMalloc(reinterpret_cast<void**>(&ws_.accum),
+             spark::frc::warp_workspace_floats(flow_.grid_w(), flow_.grid_h()) * sizeof(float));
+  cudaMalloc(reinterpret_cast<void**>(&ws_.fwd_t), grid_bytes);
+  cudaMalloc(reinterpret_cast<void**>(&ws_.bwd_t), grid_bytes);
   // Synthetic frames feed the downstream input queue (capacity == emit burst); the pool must exceed
   // that + the frames in flight (being read downstream / built here) so a transiently-full queue can
   // never alias a slot still in use. Frames are at native input resolution (FRC precedes resize).
@@ -56,9 +67,11 @@ void FrcOp::ensure(uint32_t width, uint32_t height) {
   pool_.assign(2 * burst_ + 6, nullptr);
   for (auto& f : pool_) f = std::make_shared<spark::gpu::GpuFrame>(width, height);
   inited_ = true;
-  HOLOSCAN_LOG_INFO("frc: {}x{} grid={} phase={} rate_mult={} uniform_interval={}ns burst={}", width,
-                    height, grid_size_.get(), phase_.get(), rate_mult_.get(), out_interval_ns_.get(),
-                    burst_);
+  HOLOSCAN_LOG_INFO(
+      "frc: {}x{} grid={} phase={} rate_mult={} uniform_interval={}ns burst={} median={} cost={} "
+      "temporal_hints={}",
+      width, height, grid_size_.get(), phase_.get(), rate_mult_.get(), out_interval_ns_.get(),
+      burst_, median_, flow_.has_cost(), flow_.temporal_hints());
 }
 
 void FrcOp::run_flow(const spark::gpu::GpuFramePtr& cur) {
@@ -71,6 +84,14 @@ void FrcOp::run_flow(const spark::gpu::GpuFramePtr& cur) {
   spark::frc::y10_to_y8(prev_->y, prevY8_, cur->width, cur->height, stream_);
   spark::frc::y10_to_y8(cur->y, curY8_, cur->width, cur->height, stream_);
   flow_.compute(prevY8_, curY8_, stream_);  // NVOF fwd (prev->cur) + bwd (cur->prev), async on stream_
+  fview_ = flow_.view();
+  if (median_) {  // 3x3 vector median: kills single-cell outliers before they warp
+    const uint32_t packed_pitch = flow_.grid_w() * 2 * sizeof(short);
+    spark::frc::median3x3_flow(fview_, flow_med_f_, flow_med_b_, packed_pitch, stream_);
+    fview_.fwd = flow_med_f_;
+    fview_.bwd = flow_med_b_;
+    fview_.pitch_bytes = packed_pitch;
+  }
 }
 
 void FrcOp::compute_uniform(const spark::gpu::GpuFramePtr& cur, holoscan::OutputContext& op_output) {
@@ -107,9 +128,8 @@ void FrcOp::compute_uniform(const spark::gpu::GpuFramePtr& cur, holoscan::Output
     }
     auto out = pool_[idx_];
     idx_ = (idx_ + 1) % pool_.size();
-    spark::frc::interpolate(*prev_, *cur, flow_.flow_dev(), flow_.flow_dev_bwd(),
-                            flow_.flow_pitch_bytes(), flow_.grid_w(), flow_.grid_h(),
-                            flow_.grid_size(), *out, wmap_, ticks[i].phase, stream_);
+    spark::frc::interpolate(*prev_, *cur, fview_, ws_, prevY8_, curY8_, *out, wmap_,
+                            ticks[i].phase, stream_);
     cudaEventRecord(out->ready, stream_);
     out->t_ingest_ns = cur->t_ingest_ns;  // rides cur's ingest time for the latency probe
     out->capture_ts_ns = ticks[i].ts;
@@ -155,9 +175,8 @@ void FrcOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& o
 
   auto mid = pool_[idx_];
   idx_ = (idx_ + 1) % pool_.size();
-  spark::frc::interpolate(*prev_, *cur, flow_.flow_dev(), flow_.flow_dev_bwd(),
-                          flow_.flow_pitch_bytes(), flow_.grid_w(), flow_.grid_h(),
-                          flow_.grid_size(), *mid, wmap_, static_cast<float>(phase_.get()), stream_);
+  spark::frc::interpolate(*prev_, *cur, fview_, ws_, prevY8_, curY8_, *mid, wmap_,
+                          static_cast<float>(phase_.get()), stream_);
   cudaEventRecord(mid->ready, stream_);  // mid is ready once interpolate completes on stream_
   mid->t_ingest_ns = cur->t_ingest_ns;   // mid rides cur's ingest time for the latency probe
   // The mid is the temporal MIDPOINT of (prev, cur), so stamp it halfway between their capture times.
@@ -198,6 +217,20 @@ void FrcOp::stop() {
   if (wmap_) {
     cudaFree(wmap_);
     wmap_ = nullptr;
+  }
+  if (flow_med_f_) {
+    cudaFree(flow_med_f_);
+    flow_med_f_ = nullptr;
+  }
+  if (flow_med_b_) {
+    cudaFree(flow_med_b_);
+    flow_med_b_ = nullptr;
+  }
+  if (ws_.accum) {
+    cudaFree(ws_.accum);
+    cudaFree(ws_.fwd_t);
+    cudaFree(ws_.bwd_t);
+    ws_ = {};
   }
 }
 
