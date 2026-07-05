@@ -51,3 +51,4 @@ secrets/
 *.pcap
 captures/
 tools/sr_weights/cache/
+docs/blackmagic-bidirect-report.md
