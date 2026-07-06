@@ -10,10 +10,12 @@ V="${1:?variant: cubic|sr|sr-s|espcn|sharpen|procamp|frc60}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # BMD-1 1080p29.97 in -> BD2 monitor group out; L=105 (validated), run until killed/timeout.
+# RX_SRC = BMD-1 (DHCP moved it .196 -> .104 on 2026-07-06); TX_SRC = .103 to match the NMOS
+# node manifest and stay clear of BMD-1's new address.
 COMMON="SPARK_LATENCY_MS=105 SPARK_RX_PCI=0000:01:00.0 SPARK_RX_IFACE=192.0.2.103
-SPARK_RX_MCAST=239.255.194.137 SPARK_RX_PORT=16388 SPARK_RX_SRC=192.0.2.196
+SPARK_RX_MCAST=239.255.194.137 SPARK_RX_PORT=16388 SPARK_RX_SRC=${BMD1_IP:-192.0.2.104}
 SPARK_IN_W=1920 SPARK_IN_H=1080 SPARK_IN_FPS=30000/1001 SPARK_IP10=0
-SPARK_TX_PCI=0002:01:00.0 SPARK_TX_SRC=192.0.2.104 SPARK_TX_MCAST=239.100.0.10
+SPARK_TX_PCI=0002:01:00.0 SPARK_TX_SRC=192.0.2.103 SPARK_TX_MCAST=239.100.0.10
 SPARK_TX_PORT=20000 SPARK_FRAMES=1000000"
 UP="SPARK_FRC=0 SPARK_OUT_W=3840 SPARK_OUT_H=2160"  # 1080 -> 2160p29.97 upscale variants
 
@@ -24,7 +26,9 @@ case "$V" in
   espcn)   EXTRA="$UP SPARK_INTERP=espcn" ;;                              # AI x2 SR (alt look)
   sharpen) EXTRA="$UP SPARK_INTERP=cubic SPARK_SHARPEN=${2:-0.8}" ;;      # unsharp on cubic; amount = arg 2
   procamp) EXTRA="$UP SPARK_INTERP=cubic SPARK_PA_SAT=1.6 SPARK_PA_HUE=30 SPARK_PA_BRIGHT=0.05" ;;
-  frc60)   EXTRA="SPARK_FRC=3 SPARK_OUT_W=1920 SPARK_OUT_H=1080 SPARK_INTERP=auto" ;;  # 59.94 up-convert
+  frc60)   EXTRA="SPARK_FRC=3 SPARK_OUT_W=1920 SPARK_OUT_H=1080 SPARK_INTERP=auto" ;;  # 59.94 up-convert (uniform grid)
+  frc60-flow) EXTRA="SPARK_FRC=2 SPARK_OUT_W=1920 SPARK_OUT_H=1080 SPARK_INTERP=auto" ;;  # 59.94 optical-flow up-convert;
+             # knob A/Bs ride the inherited env: sudo SPARK_FRC_MEDIAN=0 bash m9_run.sh frc60-flow (also _COST, _TEMPORAL_HINTS, SPARK_FRC_GRID=4|2|1)
   *) echo "unknown variant: $V" >&2; exit 1 ;;
 esac
 
