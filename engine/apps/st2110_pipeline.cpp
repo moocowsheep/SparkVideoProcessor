@@ -47,8 +47,9 @@ class St2110Pipeline : public holoscan::Application {
     const bool frc_2x = frc_mode == "2" || frc_mode == "3";
     const bool frc_uniform = frc_mode == "3";
     // NVOF flow grid: 1|2|4 px per output vector (hardware only supports those three; anything
-    // else falls back to 4 in NvofFlow). 4 is required for realtime — grid 1 caps at ~12 fps.
-    const uint32_t frc_grid = static_cast<uint32_t>(std::atoll(env("SPARK_FRC_GRID", "4").c_str()));
+    // else falls back to 4 in NvofFlow). Default is resolution-aware — resolved after the input
+    // dims are parsed below; SPARK_FRC_GRID forces a value.
+    const uint32_t frc_grid_env = static_cast<uint32_t>(std::atoll(env("SPARK_FRC_GRID", "0").c_str()));
     const int64_t frames = std::atoll(env("SPARK_FRAMES", "300").c_str());
     const uint32_t ow = static_cast<uint32_t>(std::atoll(env("SPARK_OUT_W", "3840").c_str()));
     const uint32_t oh = static_cast<uint32_t>(std::atoll(env("SPARK_OUT_H", "2160").c_str()));
@@ -140,6 +141,12 @@ class St2110Pipeline : public holoscan::Application {
     const double base_fps = in_fps > 0.0 ? in_fps : 60000.0 / 1001.0;
     // Up-convert doubles the media rate; the TX pacer + RTP media clock track out_fps (e.g. 30->60).
     const double out_fps = frc_2x ? base_fps * 2.0 : base_fps;
+    // Flow runs at INPUT resolution (frc sits before scale in the chain). At <=1080p, grid 1 is
+    // realtime with the same TX margin as grid 4 and a clearly better picture (on-air A/B
+    // 2026-07-06: 1 >> 2 >> 4); larger formats keep 4 for headroom. Unknown dims -> conservative 4.
+    const uint32_t frc_grid = frc_grid_env != 0
+        ? frc_grid_env
+        : (in_w > 0 && in_h > 0 && in_w <= 1920 && in_h <= 1080 ? 1u : 4u);
 
     auto& eal = spark::net::DpdkEal::instance();
     eal.add_device(tx_pci, "tx_pp=500");
