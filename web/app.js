@@ -189,9 +189,15 @@ function applyChainState() {
   if (!CATALOG) return;
   const list = $('filter-list');
   const rest = CATALOG.map((d) => d.name).filter((n) => !chain.includes(n));
-  for (const n of [...chain, ...rest]) {
-    const row = $(`frow-${n}`);
-    if (row) list.appendChild(row);  // appendChild moves existing nodes
+  const want = [...chain, ...rest];
+  // Only reorder when the DOM differs: this runs from the 1 s poll, and moving a node
+  // (appendChild) closes its open <select> popup mid-click.
+  const cur = [...list.children].map((el) => el.id.replace('frow-', ''));
+  if (want.some((n, i) => cur[i] !== n)) {
+    for (const n of want) {
+      const row = $(`frow-${n}`);
+      if (row) list.appendChild(row);  // appendChild moves existing nodes
+    }
   }
   for (const d of CATALOG) {
     const i = chain.indexOf(d.name);
@@ -300,7 +306,11 @@ function renderStats(s) {
   put('st-avlate', s.audioLate ?? 0, +s.audioLate > 0);
 }
 
+let lastRunning = null;  // called every poll tick: only touch the DOM on an actual transition
 function setRunning(r) {
+  if (!CATALOG) return;      // filter rows not built yet; retry on the next tick
+  if (r === lastRunning) return;
+  lastRunning = r;
   running = r;
   $('panel-format').classList.toggle('inactive', r);
   $('panel-filters').classList.toggle('inactive', r);
