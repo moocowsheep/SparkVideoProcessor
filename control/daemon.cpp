@@ -349,6 +349,44 @@ std::string json_of(const google::protobuf::Message& m) {
   return s;
 }
 
+// ---------------- /api/filters — filter-chain descriptors ----------------
+// The dashboard's Filter chain panel renders entirely from these (REDStreamer-style): each entry
+// is one GPU stage of the M9 chain with its UI params; `cfg` names the PipelineConfig JSON field a
+// param maps to. Adding a stage here (+ its engine op + env plumbing in start_locked) puts it in
+// the GUI with zero JS changes. Membership + order travel as the config `filters` token list.
+const char* kFilterCatalog = R"json({"filters":[
+{"name":"frc","label":"FRC — motion interpolation",
+ "tip":"Motion-compensated frame-rate conversion (NVOF). Runs at native input resolution, before scale.",
+ "params":[
+  {"key":"mode","label":"Mode","type":"select","cfg":"frcMode","choices":[
+   {"value":1,"label":"retime (1:1)"},
+   {"value":2,"label":"up-convert 2×"},
+   {"value":3,"label":"up-convert 2× — uniform grid"}]}]},
+{"name":"scale","label":"Scale",
+ "tip":"Resize to the delivery resolution. auto = anti-aliased supersampling on downscale, cubic on upscale, passthrough at 1:1.",
+ "params":[
+  {"key":"out_width","label":"Width","type":"number","cfg":"outWidth","int":true,"min":320,"max":7680,"step":2},
+  {"key":"out_height","label":"Height","type":"number","cfg":"outHeight","int":true,"min":240,"max":4320,"step":2},
+  {"key":"interp","label":"Interpolation","type":"select","cfg":"interp","choices":[
+   {"value":"auto","label":"auto"},{"value":"cubic","label":"cubic"},
+   {"value":"linear","label":"linear"},{"value":"lanczos","label":"lanczos"},
+   {"value":"super","label":"super (AA downscale)"},
+   {"value":"fsrcnn","label":"fsrcnn (AI ×2)"},
+   {"value":"fsrcnn-s","label":"fsrcnn-s (AI ×2 fast)"},
+   {"value":"espcn","label":"espcn (AI ×2)"}]}]},
+{"name":"sharpen","label":"Sharpen",
+ "tip":"Luma unsharp mask at the delivery resolution. 0 = identity.",
+ "params":[
+  {"key":"amount","label":"Amount","type":"slider","cfg":"sharpen","min":0,"max":4,"step":0.05,"digits":2}]},
+{"name":"procamp","label":"Proc amp",
+ "tip":"Classic video corrector on the native 10-bit YCbCr. Neutral = 0 / 1 / 1 / 0.",
+ "params":[
+  {"key":"brightness","label":"Brightness","type":"slider","cfg":"paBrightness","min":-1,"max":1,"step":0.01,"digits":2},
+  {"key":"contrast","label":"Contrast","type":"slider","cfg":"paContrast","min":0,"max":4,"step":0.05,"digits":2,"unset_to":1},
+  {"key":"saturation","label":"Saturation","type":"slider","cfg":"paSaturation","min":0,"max":4,"step":0.05,"digits":2,"unset_to":1},
+  {"key":"hue","label":"Hue (°)","type":"slider","cfg":"paHueDeg","min":-180,"max":180,"step":1,"digits":0}]}
+]})json";
+
 const char* ctype(const std::string& path) {
   if (path.size() > 5 && path.substr(path.size() - 5) == ".html") return "text/html";
   if (path.size() > 3 && path.substr(path.size() - 3) == ".js") return "application/javascript";
@@ -604,6 +642,7 @@ MHD_Result http_handler(void*, struct MHD_Connection* conn, const char* url, con
 
   // GET
   if (u == "/api/nmos") return nmos_proxy(conn, "GET", "");
+  if (u == "/api/filters") return reply(conn, 200, kFilterCatalog, "application/json");
   if (u == "/api/status") {
     std::lock_guard<std::mutex> lk(g_state.mu);
     return reply(conn, 200, json_of(build_status_locked(g_state)), "application/json");

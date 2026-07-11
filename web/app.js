@@ -1,108 +1,386 @@
-// Spark Video Processor dashboard.
-//   * Engine control: talks to the control daemon's HTTP/JSON API (/api/*).
-//   * Discover: talks DIRECTLY to the NMOS registry (IS-04 Query API) and our NMOS node (IS-05
-//     Connection API) — both CORS-enabled — to list 2110 senders and route one to this processor.
+// Spark Video Processor dashboard (REDStreamer-style).
+//   * Engine control: HTTP/JSON to the control daemon (/api/*), 1 s status poll.
+//   * Filter chain: the panel renders entirely from /api/filters descriptors (same idea as the
+//     REDStreamer filters panel — a new stage appears here with zero JS changes). The chain array
+//     (membership + order) maps onto config.filters; per-stage params map onto their config fields.
+//     The daemon locks config while the engine runs, so edits apply at the next pipeline start.
+//   * Routing: NMOS registry (IS-04) + nodes (IS-05) via the daemon's same-origin /api/nmos proxy.
 // protobuf JSON: enums are strings, fields are camelCase, 64-bit ints are strings.
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const CFG = ['profile', 'interp', 'out_width', 'out_height', 'frc_mode', 'ip10', 'frames',
-  'sharpen', 'pa_brightness', 'pa_contrast', 'pa_saturation', 'pa_hue_deg',
-  'rx_pci', 'tx_pci', 'dst_mac', 'in_ip10', 'filters'];
-const CAMEL = { out_width: 'outWidth', out_height: 'outHeight', frc_mode: 'frcMode', rx_pci: 'rxPci',
-  tx_pci: 'txPci', dst_mac: 'dstMac', in_ip10: 'inIp10', pa_brightness: 'paBrightness',
-  pa_contrast: 'paContrast', pa_saturation: 'paSaturation', pa_hue_deg: 'paHueDeg' };
-// float-valued config (proc amp / sharpen) — parseInt would truncate 0.85 to 0
-const FLOAT = new Set(['sharpen', 'pa_brightness', 'pa_contrast', 'pa_saturation', 'pa_hue_deg']);
-let formLoaded = false;
-// Last full config from /api/status. The form covers only the processing knobs, but /api/config
-// REPLACES the daemon's whole config — posting the bare form would wipe the NMOS/SDP-derived
-// routing fields (rxMcastGroup, rxSrcIp, in* format, tx*...), so Save overlays the form onto this.
-let lastConfig = null;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
   return r.json();
 }
 
-// ---------------- engine config (control daemon) ----------------
+// ---------------- engine config model ----------------
+// Simple (non-filter) form fields; the filter panel owns the rest via descriptors.
+const SIMPLE = ['profile', 'frames', 'ip10', 'in_ip10', 'rx_pci', 'tx_pci', 'dst_mac'];
+const CAMEL = { in_ip10: 'inIp10', rx_pci: 'rxPci', tx_pci: 'txPci', dst_mac: 'dstMac' };
+
+let CATALOG = null;     // filter descriptors from /api/filters (or the fallback below)
+let chain = [];         // enabled filters in run order -> config.filters
+const sliders = {};     // cfg key -> {update(v), setDisabled(b)}
+let formLoaded = false;
+let dirty = false;      // unsaved edits: the poll must not clobber them
+let running = false;
+// Last full config from /api/status. /api/config REPLACES the daemon's whole config — posting the
+// bare form would wipe the NMOS/SDP-derived routing fields (rxMcastGroup, in* format, tx*...), so
+// Save overlays the form onto this.
+let lastConfig = null;
+
+// Mirrors the catalog the daemon serves at /api/filters; used if the endpoint is missing (older
+// daemon binary). cfg = the PipelineConfig JSON key each param maps to.
+const FALLBACK_CATALOG = [
+  { name: 'frc', label: 'FRC — motion interpolation',
+    tip: 'Motion-compensated frame-rate conversion (NVOF). Runs at native input resolution, before scale.',
+    params: [
+      { key: 'mode', label: 'Mode', type: 'select', cfg: 'frcMode', choices: [
+        { value: 1, label: 'retime (1:1)' },
+        { value: 2, label: 'up-convert 2×' },
+        { value: 3, label: 'up-convert 2× — uniform grid' }] }] },
+  { name: 'scale', label: 'Scale',
+    tip: 'Resize to the delivery resolution. auto = anti-aliased supersampling on downscale, cubic on upscale, passthrough at 1:1.',
+    params: [
+      { key: 'out_width', label: 'Width', type: 'number', cfg: 'outWidth', int: true, min: 320, max: 7680, step: 2 },
+      { key: 'out_height', label: 'Height', type: 'number', cfg: 'outHeight', int: true, min: 240, max: 4320, step: 2 },
+      { key: 'interp', label: 'Interpolation', type: 'select', cfg: 'interp', choices: [
+        { value: 'auto', label: 'auto' }, { value: 'cubic', label: 'cubic' },
+        { value: 'linear', label: 'linear' }, { value: 'lanczos', label: 'lanczos' },
+        { value: 'super', label: 'super (AA downscale)' },
+        { value: 'fsrcnn', label: 'fsrcnn (AI ×2)' },
+        { value: 'fsrcnn-s', label: 'fsrcnn-s (AI ×2 fast)' },
+        { value: 'espcn', label: 'espcn (AI ×2)' }] }] },
+  { name: 'sharpen', label: 'Sharpen',
+    tip: 'Luma unsharp mask at the delivery resolution. 0 = identity.',
+    params: [
+      { key: 'amount', label: 'Amount', type: 'slider', cfg: 'sharpen', min: 0, max: 4, step: 0.05, digits: 2 }] },
+  { name: 'procamp', label: 'Proc amp',
+    tip: 'Classic video corrector on the native 10-bit YCbCr. Neutral = 0 / 1 / 1 / 0.',
+    params: [
+      { key: 'brightness', label: 'Brightness', type: 'slider', cfg: 'paBrightness', min: -1, max: 1, step: 0.01, digits: 2 },
+      { key: 'contrast', label: 'Contrast', type: 'slider', cfg: 'paContrast', min: 0, max: 4, step: 0.05, digits: 2, unset_to: 1 },
+      { key: 'saturation', label: 'Saturation', type: 'slider', cfg: 'paSaturation', min: 0, max: 4, step: 0.05, digits: 2, unset_to: 1 },
+      { key: 'hue', label: 'Hue (°)', type: 'slider', cfg: 'paHueDeg', min: -180, max: 180, step: 1, digits: 0 }] },
+];
+
+function markDirty() {
+  if (running || !formLoaded) return;
+  dirty = true;
+  $('msg').textContent = 'unsaved changes — Save applies at next start';
+}
+
+// ---------------- widgets ----------------
+function setChip(el, text, cls) {
+  el.textContent = text;
+  el.classList.remove('on', 'off', 'warn');
+  if (cls) el.classList.add(cls);
+}
+
+function mkSlider(el, { label, cfg, min, max, step, digits = 2 }) {
+  el.innerHTML = `
+    <div class="top"><label>${label}</label><input type="number" id="fp-${cfg}"></div>
+    <input type="range">`;
+  const num = el.querySelector('input[type=number]');
+  const rng = el.querySelector('input[type=range]');
+  for (const i of [num, rng]) { i.min = min; i.max = max; i.step = step; }
+  rng.addEventListener('input', () => {
+    num.value = Number(rng.value).toFixed(digits);
+    markDirty();
+  });
+  num.addEventListener('change', () => {
+    const v = Math.min(max, Math.max(min, Number(num.value) || 0));
+    num.value = Number(v).toFixed(digits);
+    rng.value = v;
+    markDirty();
+  });
+  sliders[cfg] = {
+    update(v) { rng.value = v; num.value = Number(v).toFixed(digits); },
+    setDisabled(b) { el.classList.toggle('disabled', b); num.disabled = rng.disabled = b; },
+  };
+}
+
+// ---------------- filter chain panel ----------------
+// Rows display in chain order (enabled stages first, run top to bottom), then the disabled rest in
+// catalog order. Enabling appends at the end of the chain; disabled filters keep their params.
+
+async function loadCatalog() {
+  try {
+    const j = await api('/api/filters');
+    CATALOG = Array.isArray(j.filters) && j.filters.length ? j.filters : FALLBACK_CATALOG;
+  } catch {
+    CATALOG = FALLBACK_CATALOG;
+  }
+  buildFilterPanel();
+}
+
+function buildFilterPanel() {
+  const list = $('filter-list');
+  list.innerHTML = '';
+  for (const d of CATALOG) {
+    const row = document.createElement('div');
+    row.className = 'frow off';
+    row.id = `frow-${d.name}`;
+
+    const head = document.createElement('div');
+    head.className = 'fhead';
+    head.title = d.tip || '';
+    head.innerHTML = `
+      <label class="toggle"><input type="checkbox" id="fen-${d.name}"><span>${d.label}</span></label>
+      <button class="fmove" id="fup-${d.name}" title="run earlier">&#9650;</button>
+      <button class="fmove" id="fdn-${d.name}" title="run later">&#9660;</button>`;
+    row.appendChild(head);
+
+    const body = document.createElement('div');
+    body.className = 'fbody';
+    for (const p of d.params || []) {
+      if (p.type === 'slider') {
+        const div = document.createElement('div');
+        div.className = 'slider';
+        body.appendChild(div);
+        mkSlider(div, { label: p.label, cfg: p.cfg, min: p.min, max: p.max, step: p.step, digits: p.digits ?? 2 });
+      } else {
+        const r = document.createElement('div');
+        r.className = 'row';
+        const id = `fp-${p.cfg}`;
+        r.innerHTML = p.type === 'select'
+          ? `<label for="${id}">${p.label}</label><select id="${id}"></select>`
+          : `<label for="${id}">${p.label}</label><input type="number" id="${id}" min="${p.min ?? 0}" max="${p.max ?? ''}" step="${p.step ?? 1}">`;
+        body.appendChild(r);
+        if (p.type === 'select') {
+          const sel = r.querySelector('select');
+          for (const c of p.choices || []) {
+            const o = document.createElement('option');
+            o.value = String(c.value);
+            o.textContent = c.label;
+            sel.appendChild(o);
+          }
+        }
+        r.querySelector('select, input').addEventListener('change', markDirty);
+      }
+    }
+    row.appendChild(body);
+    list.appendChild(row);
+
+    $(`fen-${d.name}`).addEventListener('change', () => {
+      const on = $(`fen-${d.name}`).checked;
+      chain = chain.filter((n) => n !== d.name);
+      if (on) chain.push(d.name);
+      markDirty();
+      applyChainState();
+    });
+    $(`fup-${d.name}`).addEventListener('click', () => moveFilter(d.name, -1));
+    $(`fdn-${d.name}`).addEventListener('click', () => moveFilter(d.name, +1));
+  }
+}
+
+function moveFilter(name, dir) {
+  const i = chain.indexOf(name);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= chain.length) return;
+  [chain[i], chain[j]] = [chain[j], chain[i]];
+  markDirty();
+  applyChainState();
+}
+
+function applyChainState() {
+  if (!CATALOG) return;
+  const list = $('filter-list');
+  const rest = CATALOG.map((d) => d.name).filter((n) => !chain.includes(n));
+  for (const n of [...chain, ...rest]) {
+    const row = $(`frow-${n}`);
+    if (row) list.appendChild(row);  // appendChild moves existing nodes
+  }
+  for (const d of CATALOG) {
+    const i = chain.indexOf(d.name);
+    $(`frow-${d.name}`).classList.toggle('off', i < 0);
+    $(`fen-${d.name}`).checked = i >= 0;
+    $(`fup-${d.name}`).disabled = running || i <= 0;
+    $(`fdn-${d.name}`).disabled = running || i < 0 || i === chain.length - 1;
+  }
+}
+
+// config.filters -> chain array. Empty/absent = the engine's automatic composition (mirror
+// st2110_pipeline: frc when mode>0, scale always, sharpen when amount>0, procamp when non-neutral).
+// The GUI dedupes; hand-set duplicates ("procamp,procamp") stay an API-only feature.
+function deriveChain(c) {
+  const known = new Set(CATALOG.map((d) => d.name));
+  const f = (c.filters || '').trim();
+  if (f) {
+    const seen = new Set();
+    return f.split(',').map((t) => t.trim())
+      .filter((t) => known.has(t) && !seen.has(t) && seen.add(t));
+  }
+  const ch = [];
+  if (+c.frcMode > 0 || c.frc) ch.push('frc');
+  ch.push('scale');
+  if (+c.sharpen > 0) ch.push('sharpen');
+  const contrast = +c.paContrast > 0 ? +c.paContrast : 1;
+  const sat = +c.paSaturation > 0 ? +c.paSaturation : 1;
+  if (+c.paBrightness !== 0 || contrast !== 1 || sat !== 1 || +c.paHueDeg !== 0) ch.push('procamp');
+  return ch;
+}
+
+// ---------------- config <-> form ----------------
 function fillForm(c) {
-  for (const id of CFG) {
+  if (!CATALOG) return;  // catalog not loaded yet; retry on the next poll
+  for (const id of SIMPLE) {
     const el = $(id);
     const v = c[CAMEL[id] || id];
     if (v === undefined) continue;
     if (el.type === 'checkbox') el.checked = !!v;
     else el.value = v;
   }
+  for (const d of CATALOG) {
+    for (const p of d.params || []) {
+      let v = c[p.cfg];
+      if (v === undefined) continue;
+      // proto3 zero-default: 0 for contrast/saturation (and frcMode) means "unset", not zero
+      if (p.unset_to !== undefined && !(+v > 0)) v = p.unset_to;
+      if (p.type === 'slider') sliders[p.cfg].update(+v);
+      else if (p.type === 'select') { if (+v > 0 || typeof v === 'string') $(`fp-${p.cfg}`).value = String(v); }
+      else $(`fp-${p.cfg}`).value = v;
+    }
+  }
+  chain = deriveChain(c);
+  applyChainState();
+  formLoaded = true;
 }
+
 function readForm() {
   const c = {};
-  for (const id of CFG) {
+  for (const id of SIMPLE) {
     const el = $(id);
     const key = CAMEL[id] || id;
     if (el.type === 'checkbox') c[key] = el.checked;
-    else if (FLOAT.has(id)) c[key] = parseFloat(el.value) || 0;
-    else if (el.type === 'number' || id === 'frc_mode') c[key] = parseInt(el.value, 10) || 0;
+    else if (el.type === 'number') c[key] = parseInt(el.value, 10) || 0;
     else c[key] = el.value;
   }
+  for (const d of CATALOG) {
+    for (const p of d.params || []) {
+      const el = $(`fp-${p.cfg}`);
+      if (p.type === 'select') {
+        const numeric = (p.choices || []).some((ch) => typeof ch.value === 'number');
+        c[p.cfg] = numeric ? Number(el.value) : el.value;
+      } else {
+        c[p.cfg] = p.int ? Math.round(Number(el.value) || 0) : Number(el.value) || 0;
+      }
+    }
+  }
+  // Chain membership + order. "," = explicitly-empty chain (the engine parses zero tokens; a truly
+  // empty string would re-trigger its automatic composition). FRC enable rides frcMode: the daemon
+  // defaults frc_mode=1, and a stale frc:true would re-enable it, so both are forced together.
+  c.filters = chain.length ? chain.join(',') : ',';
+  c.frc = chain.includes('frc');
+  c.frcMode = c.frc ? (c.frcMode || 1) : 0;
   return c;
 }
+
+// ---------------- status poll ----------------
 function renderStats(s) {
   const fixed = +s.fixedLatencyMs > 0;
-  const rows = [
-    ['RX frames', s.rxFrames], ['RX packets', s.rxPackets], ['RX lost', s.rxLost],
-    ['TX frames', s.txFrames], ['TX packets', s.txPackets],
-    ['TX future_err', s.txFutureErr], ['TX past_err', s.txPastErr],
-    ['TX skipped', s.txSkipped],
-    ['Latency', fixed ? `${s.fixedLatencyMs} ms fixed` : 'servo'],
-    ['Margin (µs)', fixed ? s.txMarginUs : '–'],
-    ['Pipe latency (µs)', s.pipeLatencyUs],
-    ['FRC interpolated', s.frcInterpolated], ['Ingest latency (µs)', (s.ingestLatencyUs || 0).toFixed(1)],
-    ['Audio RX pkts', s.audioRxPackets], ['Audio TX pkts', s.audioTxPackets],
-    ['Audio late/drop', s.audioLate],
-  ];
-  $('stats').innerHTML = rows.map(([k, v]) => {
-    const bad = (k === 'RX lost' && +v > 0) || (k === 'Audio late/drop' && +v > 0) ||
-                (k === 'Margin (µs)' && fixed && +v === 0);
-    return `<div class="stat"><span>${k}</span><b class="${bad ? 'bad' : ''}">${v ?? '–'}</b></div>`;
-  }).join('');
+  const put = (id, v, warn) => {
+    const el = $(id);
+    el.textContent = v;
+    el.classList.toggle('warn', !!warn);
+  };
+  put('st-rxf', s.rxFrames ?? 0);
+  put('st-rxlost', s.rxLost ?? 0, +s.rxLost > 0);
+  put('st-txf', s.txFrames ?? 0);
+  put('st-skip', s.txSkipped ?? 0, +s.txSkipped > 0);
+  put('st-errs', `${s.txPastErr ?? 0} / ${s.txFutureErr ?? 0}`, +s.txPastErr > 0 || +s.txFutureErr > 0);
+  put('st-frc', s.frcInterpolated ?? 0);
+  put('st-lat', fixed ? `${s.fixedLatencyMs} ms` : 'servo');
+  put('st-margin', fixed ? s.txMarginUs : '—', fixed && +s.txMarginUs === 0);
+  put('st-pipe', (+s.pipeLatencyUs / 1000 || 0).toFixed(1));
+  put('st-ingest', (+s.ingestLatencyUs || 0).toFixed(0));
+  put('st-audio', `${s.audioRxPackets ?? 0} / ${s.audioTxPackets ?? 0}`);
+  put('st-avlate', s.audioLate ?? 0, +s.audioLate > 0);
 }
+
+function setRunning(r) {
+  running = r;
+  $('panel-format').classList.toggle('inactive', r);
+  $('panel-filters').classList.toggle('inactive', r);
+  for (const id of SIMPLE) $(id).disabled = r;
+  for (const d of CATALOG || []) {
+    $(`fen-${d.name}`).disabled = r;
+    for (const p of d.params || []) {
+      if (p.type === 'slider') sliders[p.cfg].setDisabled(r);
+      else $(`fp-${p.cfg}`).disabled = r;
+    }
+  }
+  if (CATALOG) applyChainState();  // refresh the move buttons' disabled state
+  $('save').disabled = r;
+  const power = $('power');
+  power.textContent = r ? '■ STOP' : '▶ START';
+  power.classList.toggle('running', r);
+}
+
 async function poll() {
   let st;
-  try { st = await api('/api/status'); } catch { $('state').textContent = 'daemon offline'; return; }
+  try {
+    st = await api('/api/status');
+  } catch {
+    setChip($('conn'), 'offline', 'off');
+    return;
+  }
+  setChip($('conn'), 'online', 'on');
   const state = st.state || 'STOPPED';
-  const running = state === 'RUNNING';
-  const badge = $('state');
-  badge.textContent = state;
-  badge.className = 'badge ' + (running ? 'run' : state === 'ERRORED' ? 'err' : 'idle');
-  $('pid').textContent = st.pid > 0 ? st.pid : '–';
-  $('uptime').textContent = Math.round(st.uptimeS || 0);
-  $('msg').textContent = st.message || '';
+  setChip($('state'), state.toLowerCase(),
+          state === 'RUNNING' ? 'on' : state === 'ERRORED' ? 'off' : '');
+  const ptp = $('ptp');
+  ptp.hidden = !st.ptpGmid;
+  if (st.ptpGmid) ptp.textContent = `PTP ${st.ptpGmid}`;
+  $('meta').textContent = st.pid > 0 ? `pid ${st.pid} · ${Math.round(st.uptimeS || 0)}s` : '';
+  if (!dirty) $('msg').textContent = st.message || '';
   if (st.stats) renderStats(st.stats);
   if (st.config) lastConfig = st.config;
-  if (st.config && (!formLoaded || running)) { fillForm(st.config); formLoaded = true; }
-  for (const id of CFG) $(id).disabled = running;
-  $('save').disabled = running;
-  $('start').disabled = running;
-  $('stop').disabled = !running;
+  const run = state === 'RUNNING';
+  if (st.config && (!formLoaded || run) && !dirty) fillForm(st.config);
+  setRunning(run);
 }
 
-$('save').onclick = async () => {
-  const a = await api('/api/config', { method: 'POST', body: JSON.stringify({ ...(lastConfig || {}), ...readForm() }) });
+async function saveConfig() {
+  const a = await api('/api/config', {
+    method: 'POST',
+    body: JSON.stringify({ ...(lastConfig || {}), ...readForm() }),
+  });
+  if (a.ok) dirty = false;
   $('msg').textContent = a.message || '';
-  poll();
-};
-$('start').onclick = async () => { const a = await api('/api/start', { method: 'POST', body: '' }); $('msg').textContent = a.message || ''; poll(); };
-$('stop').onclick = async () => { const a = await api('/api/stop', { method: 'POST', body: '' }); $('msg').textContent = a.message || ''; poll(); };
+  return !!a.ok;
+}
 
-// ---------------- NMOS discovery (registry OR mDNS proxy + node, direct) ----------------
+$('save').onclick = async () => { await saveConfig(); poll(); };
+$('power').onclick = async () => {
+  const power = $('power');
+  power.disabled = true;
+  try {
+    if (running) {
+      const a = await api('/api/stop', { method: 'POST', body: '' });
+      $('msg').textContent = a.message || '';
+    } else {
+      if (dirty && !(await saveConfig())) return;  // unsaved edits ride along on START
+      const a = await api('/api/start', { method: 'POST', body: '' });
+      $('msg').textContent = a.message || '';
+    }
+  } finally {
+    power.disabled = false;
+    poll();
+  }
+};
+for (const id of SIMPLE) $(id).addEventListener('change', markDirty);
+
+// ---------------- NMOS discovery (registry OR mDNS proxy + node, via the daemon proxy) ----------
 // `registry` is the IS-04 Query API base the dashboard reads. In registry-free (P2P) mode it
 // points at the mDNS proxy (deploy/nmos_mdns_proxy.py), which browses _nmos-node._tcp and
 // re-serves the Query API shape — so no registry is needed. The Node base (IS-05) is unchanged.
 const NMOS = { registry: '', registryUrl: '', node: '', proxy: '', p2p: false, receivers: null, senders: null };
 
 // Facility NMOS registry (IS-04 Query API). External registry on registry-host.
-// Per-browser override: edit the Registry field in the Discover card (saved to localStorage).
+// Per-browser override: edit the Registry field in the Routing panel (saved to localStorage).
 const DEFAULT_REGISTRY = 'http://192.0.2.41:8010';
 
 function nmosDefaults() {
@@ -262,7 +540,7 @@ async function loadSources() {
         : `<button class="btn go" data-sender="${s.id}" data-kind="${kind}">Connect</button>`;
     return `<div class="src ${connected ? 'on' : ''}">
         <div class="src-main"><b>${label}</b><span class="src-fmt">${fmtLabel(media)}</span></div>
-        <div class="src-act">${connected ? '<span class="badge run">routed</span>' : ''}${btn}</div>
+        <div class="src-act">${connected ? '<span class="badge">routed</span>' : ''}${btn}</div>
       </div>`;
   }).join('') : '<p class="hint">no ST 2110 (RTP) senders discovered.</p>';
 
@@ -294,7 +572,7 @@ async function loadSources() {
         : `<button class="btn go" data-dest="${r.id}">Send</button>`;
     return `<div class="src ${fromUs ? 'on' : ''}">
         <div class="src-main"><b>${label}</b><span class="src-fmt">${kind}${busy ? ' · routed elsewhere' : ''}</span></div>
-        <div class="src-act">${fromUs ? '<span class="badge run">receiving us</span>' : ''}${btn}</div>
+        <div class="src-act">${fromUs ? '<span class="badge">receiving us</span>' : ''}${btn}</div>
       </div>`;
   }).join('') : '<p class="hint">no ST 2110 (RTP) receivers discovered.</p>';
 
@@ -396,6 +674,6 @@ $('nmos_p2p').onchange = () => { saveNmosCfg(); refreshNmos(); };
 // ---------------- boot ----------------
 loadNmosCfg();
 refreshNmos();
-poll();
+loadCatalog().then(poll);
 setInterval(poll, 1000);
 setInterval(refreshNmos, 5000);
