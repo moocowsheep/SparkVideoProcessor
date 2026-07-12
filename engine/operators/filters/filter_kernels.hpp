@@ -42,4 +42,15 @@ void grain_c(const uint16_t* y_in, const uint16_t* cb_in, const uint16_t* cr_in,
              uint16_t* cr_out, uint32_t width, uint32_t height, float amount, float size,
              uint32_t seed, cudaStream_t stream);
 
+// Spatial noise reduction: edge-preserving 5x5 bilateral. Range sigma maps from strength
+// (0..1 -> 4..64 code values), spatial sigma fixed at 1.5 px; flat regions average toward clean,
+// edges bigger than ~sigma_r survive. strength <= 0 = identity (the caller skips/copies instead).
+void nr_y(const uint16_t* y_in, uint16_t* y_out, uint32_t width, uint32_t height, float strength,
+          cudaStream_t stream);
+
+// Chroma pair: same bilateral independently on the Cb and Cr planes ((width/2) x height, 4:2:2),
+// one thread per sample pair. Chroma noise usually tolerates a stronger setting than luma.
+void nr_c(const uint16_t* cb_in, const uint16_t* cr_in, uint16_t* cb_out, uint16_t* cr_out,
+          uint32_t width, uint32_t height, float strength, cudaStream_t stream);
+
 }  // namespace spark::filters

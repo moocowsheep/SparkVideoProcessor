@@ -51,6 +51,29 @@ void cpu_unsharp(const std::vector<uint16_t>& y, std::vector<uint16_t>& yo, floa
     }
 }
 
+// Bilateral 5x5 reference, matching nr_y/nr_c: spatial sigma 1.5 px, range sigma 4 + 60*strength.
+void cpu_nr(const std::vector<uint16_t>& in, std::vector<uint16_t>& out, uint32_t w, uint32_t h,
+            float strength) {
+  const float sr = 4.0f + 60.0f * strength;
+  const float inv2sr2 = 1.0f / (2.0f * sr * sr);
+  for (int y = 0; y < (int)h; ++y)
+    for (int x = 0; x < (int)w; ++x) {
+      const float c = in[(size_t)y * w + x];
+      float acc = 0, wsum = 0;
+      for (int dy = -2; dy <= 2; ++dy)
+        for (int dx = -2; dx <= 2; ++dx) {
+          const int xx = std::min(std::max(x + dx, 0), (int)w - 1);
+          const int yy = std::min(std::max(y + dy, 0), (int)h - 1);
+          const float v = in[(size_t)yy * w + xx];
+          const float d = v - c;
+          const float wt = std::exp(-(dx * dx + dy * dy) / 4.5f) * std::exp(-d * d * inv2sr2);
+          acc += wt * v;
+          wsum += wt;
+        }
+      out[(size_t)y * w + x] = clamp10(acc / wsum);
+    }
+}
+
 // GPU float rounding may differ from the CPU by one code value right at the .5 boundary — allow ±1.
 int diff_count(const std::vector<uint16_t>& a, const std::vector<uint16_t>& b, int tol) {
   int bad = 0;
@@ -116,6 +139,24 @@ int main() {
   run_unsharp(0.f, "amount=0", true);
   run_unsharp(1.0f, "amount=1", false);
   run_unsharp(2.0f, "amount=2 (clamps)", false);
+
+  // NR vs the CPU bilateral reference. __expf on the GPU is a fast approximation, so the tap
+  // weights differ slightly from std::exp — allow ±2 code values instead of the usual ±1.
+  {
+    std::vector<uint16_t> ncb(nc), ncr(nc);
+    spark::filters::nr_y(dy, dyo, W, H, 0.6f, nullptr);
+    spark::filters::nr_c(dcb, dcr, dcbo, dcro, W, H, 0.8f, nullptr);
+    CK(cudaDeviceSynchronize());
+    CK(cudaMemcpy(gy.data(), dyo, ny * 2, cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(gcb.data(), dcbo, nc * 2, cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(gcr.data(), dcro, nc * 2, cudaMemcpyDeviceToHost));
+    cpu_nr(y, ry, W, H, 0.6f);
+    cpu_nr(cb, ncb, W / 2, H, 0.8f);
+    cpu_nr(cr, ncr, W / 2, H, 0.8f);
+    const int bad = diff_count(gy, ry, 2) + diff_count(gcb, ncb, 2) + diff_count(gcr, ncr, 2);
+    std::printf("nr      %-24s vs-ref bad=%d\n", "y=0.6 c=0.8", bad);
+    failures += bad;
+  }
 
   // Grain is hash noise, so instead of a CPU reference: determinism (same seed -> bit-identical),
   // frame-to-frame variation (different seed -> different field), the film response (black/white

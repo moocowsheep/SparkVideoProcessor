@@ -56,9 +56,8 @@ struct State {
     config.set_out_width(3840);
     config.set_out_height(2160);
     config.set_interp("auto");  // supersampling on downscale, cubic on upscale, 1:1 passthrough
-    config.set_frc(true);
-    config.set_frc_mode(1);  // 1=retime; web UI / NMOS can pick 2=up-convert (30->60) or
-                             // 3=uniform-grid up-convert (2x on a rigid grid; erratic-source-proof)
+    // FRC defaults OFF (frc=false, frc_mode=0 via proto3 defaults) — enable per run from the web
+    // UI / NMOS (1=retime, 2=up-convert 30->60, 3=uniform-grid up-convert).
     config.set_pa_contrast(1.0);    // proc amp neutral (0 would read as "unset" -> 1.0 anyway)
     config.set_pa_saturation(1.0);
     config.set_rx_pci("0000:01:00.0");
@@ -224,7 +223,9 @@ bool start_locked(State& s, std::string& msg) {
     setenv("SPARK_PA_CONTRAST", std::to_string(c.pa_contrast()).c_str(), 1);
     setenv("SPARK_PA_SAT", std::to_string(c.pa_saturation()).c_str(), 1);
     setenv("SPARK_PA_HUE", std::to_string(c.pa_hue_deg()).c_str(), 1);
-    // Film grain + A/V delay (0 size/mode = unset -> engine defaults 1.5/mono).
+    // Spatial NR, film grain + A/V delay (0 grain size/mode = unset -> engine defaults 1.5/mono).
+    setenv("SPARK_NR_LUMA", std::to_string(c.nr_luma()).c_str(), 1);
+    setenv("SPARK_NR_CHROMA", std::to_string(c.nr_chroma()).c_str(), 1);
     setenv("SPARK_GRAIN", std::to_string(c.grain()).c_str(), 1);
     setenv("SPARK_GRAIN_SIZE", std::to_string(c.grain_size()).c_str(), 1);
     setenv("SPARK_GRAIN_MODE", c.grain_mode().c_str(), 1);
@@ -368,6 +369,11 @@ const char* kFilterCatalog = R"json({"filters":[
    {"value":1,"label":"retime (1:1)"},
    {"value":2,"label":"up-convert 2×"},
    {"value":3,"label":"up-convert 2× — uniform grid"}]}]},
+{"name":"nr","label":"Noise reduction",
+ "tip":"Edge-preserving spatial denoise (5×5 bilateral) with separate luma / chroma strengths; 0 leaves that plane untouched. Runs best before Scale, at the native input resolution where the noise lives.",
+ "params":[
+  {"key":"luma","label":"Luma","type":"slider","cfg":"nrLuma","min":0,"max":1,"step":0.01,"digits":2},
+  {"key":"chroma","label":"Chroma","type":"slider","cfg":"nrChroma","min":0,"max":1,"step":0.01,"digits":2}]},
 {"name":"scale","label":"Scale",
  "tip":"Resize to the delivery resolution. auto = anti-aliased supersampling on downscale, cubic on upscale, passthrough at 1:1.",
  "params":[

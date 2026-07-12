@@ -46,6 +46,11 @@ const FALLBACK_CATALOG = [
         { value: 1, label: 'retime (1:1)' },
         { value: 2, label: 'up-convert 2×' },
         { value: 3, label: 'up-convert 2× — uniform grid' }] }] },
+  { name: 'nr', label: 'Noise reduction',
+    tip: 'Edge-preserving spatial denoise (5×5 bilateral) with separate luma / chroma strengths; 0 leaves that plane untouched. Runs best before Scale, at the native input resolution where the noise lives.',
+    params: [
+      { key: 'luma', label: 'Luma', type: 'slider', cfg: 'nrLuma', min: 0, max: 1, step: 0.01, digits: 2 },
+      { key: 'chroma', label: 'Chroma', type: 'slider', cfg: 'nrChroma', min: 0, max: 1, step: 0.01, digits: 2 }] },
   { name: 'scale', label: 'Scale',
     tip: 'Resize to the delivery resolution. auto = anti-aliased supersampling on downscale, cubic on upscale, passthrough at 1:1.',
     params: [
@@ -236,6 +241,7 @@ function deriveChain(c) {
   }
   const ch = [];
   if (+c.frcMode > 0 || c.frc) ch.push('frc');
+  if (+c.nrLuma > 0 || +c.nrChroma > 0) ch.push('nr');
   ch.push('scale');
   if (+c.sharpen > 0) ch.push('sharpen');
   const contrast = +c.paContrast > 0 ? +c.paContrast : 1;
