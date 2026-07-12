@@ -117,6 +117,63 @@ int main() {
   run_unsharp(1.0f, "amount=1", false);
   run_unsharp(2.0f, "amount=2 (clamps)", false);
 
+  // Grain is hash noise, so instead of a CPU reference: determinism (same seed -> bit-identical),
+  // frame-to-frame variation (different seed -> different field), the film response (black/white
+  // bit-exact, mid-tones perturbed within the amplitude bound), and mono leaving chroma to the
+  // caller while color writes both planes.
+  {
+    std::vector<uint16_t> g2(ny);
+    spark::filters::grain_y(dy, dyo, W, H, 1.0f, 1.5f, 7u, nullptr);
+    CK(cudaDeviceSynchronize());
+    CK(cudaMemcpy(gy.data(), dyo, ny * 2, cudaMemcpyDeviceToHost));
+    spark::filters::grain_y(dy, dyo, W, H, 1.0f, 1.5f, 7u, nullptr);
+    CK(cudaDeviceSynchronize());
+    CK(cudaMemcpy(g2.data(), dyo, ny * 2, cudaMemcpyDeviceToHost));
+    const int nondet = diff_count(gy, g2, 0);
+    spark::filters::grain_y(dy, dyo, W, H, 1.0f, 1.5f, 8u, nullptr);
+    CK(cudaDeviceSynchronize());
+    CK(cudaMemcpy(g2.data(), dyo, ny * 2, cudaMemcpyDeviceToHost));
+    int reseed_same = 0;  // fields from different seeds must actually differ
+    for (size_t i = 0; i < ny; ++i) reseed_same += gy[i] == g2[i];
+    int resp_bad = 0, moved = 0;
+    const float bound = 0.08f * 876.0f + 1.0f;  // peak amplitude at amount 1 (+1 rounding)
+    for (size_t i = 0; i < ny; ++i) {
+      const float d = std::abs((int)gy[i] - (int)y[i]);
+      if (y[i] <= 64 || y[i] >= 940) resp_bad += d != 0;  // black/white: bit-exact
+      else resp_bad += d > bound;                          // mid-tones: bounded amplitude
+      moved += d != 0;
+    }
+    // >90% of mid-tone pixels should carry grain at amount 1 (weight only nulls the extremes).
+    const int bad = nondet + resp_bad + (reseed_same > (int)ny * 95 / 100 ? 1 : 0) +
+                    (moved < (int)ny / 2 ? 1 : 0);
+    std::printf("grain   %-24s det=%d resp_bad=%d moved=%d/%zu\n", "y (amount=1)", nondet,
+                resp_bad, moved, ny);
+    failures += bad;
+  }
+  {
+    spark::filters::grain_c(dy, dcb, dcr, dcbo, dcro, W, H, 1.0f, 1.5f, 7u, nullptr);
+    CK(cudaDeviceSynchronize());
+    CK(cudaMemcpy(gcb.data(), dcbo, nc * 2, cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(gcr.data(), dcro, nc * 2, cudaMemcpyDeviceToHost));
+    int moved_cb = 0, moved_cr = 0, indep = 0, resp_bad = 0;
+    const float bound = 0.08f * 448.0f + 1.0f;
+    for (size_t i = 0; i < nc; ++i) {
+      const int db = std::abs((int)gcb[i] - (int)cb[i]), dr = std::abs((int)gcr[i] - (int)cr[i]);
+      const uint16_t yv = y[(i / (W / 2)) * W + (i % (W / 2)) * 2];  // co-sited luma
+      if (yv <= 64 || yv >= 940) resp_bad += (db != 0) + (dr != 0);
+      else resp_bad += (db > bound) + (dr > bound);
+      moved_cb += db != 0;
+      moved_cr += dr != 0;
+      indep += ((int)gcb[i] - (int)cb[i]) != ((int)gcr[i] - (int)cr[i]);
+    }
+    // Cb/Cr fields must be independent (different salts), not one field applied twice.
+    const int bad = resp_bad + (moved_cb < (int)nc / 2 ? 1 : 0) + (moved_cr < (int)nc / 2 ? 1 : 0) +
+                    (indep < (int)nc / 4 ? 1 : 0);
+    std::printf("grain   %-24s resp_bad=%d moved=%d/%d indep=%d\n", "chroma (color mode)", resp_bad,
+                moved_cb, moved_cr, indep);
+    failures += bad;
+  }
+
   std::printf(failures ? "FAIL (%d)\n" : "PASS\n", failures);
   return failures ? 1 : 0;
 }

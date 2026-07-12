@@ -57,4 +57,28 @@ class SharpenOp : public holoscan::Operator {
   uint64_t frames_ = 0;
 };
 
+// Film grain (photochemical look; kernels ported from REDStreamer). The field re-draws every frame
+// from an internal counter, so grain is alive on static frames too. mono = luma-only grain
+// (silver-halide look; chroma passes through by device copy); color adds independent Cb/Cr fields
+// (color-negative look).
+class GrainOp : public holoscan::Operator {
+ public:
+  HOLOSCAN_OPERATOR_FORWARD_ARGS(GrainOp)
+  GrainOp() = default;
+  void setup(holoscan::OperatorSpec& spec) override;
+  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
+               holoscan::ExecutionContext& context) override;
+  void stop() override;
+
+ private:
+  void ensure(uint32_t width, uint32_t height);
+  holoscan::Parameter<double> amount_;     // 0..1; 0 = identity (stage normally omitted then)
+  holoscan::Parameter<double> size_;       // grain cell in pixels, 1..4
+  holoscan::Parameter<std::string> mode_;  // "mono" | "color"
+  cudaStream_t stream_ = nullptr;
+  std::vector<spark::gpu::GpuFramePtr> pool_;
+  size_t idx_ = 0;
+  uint64_t frames_ = 0;  // doubles as the per-frame grain seed
+};
+
 }  // namespace spark::ops

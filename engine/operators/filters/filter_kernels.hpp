@@ -26,4 +26,20 @@ void procamp(const uint16_t* y_in, const uint16_t* cb_in, const uint16_t* cr_in,
 void unsharp_y(const uint16_t* y_in, uint16_t* y_out, uint32_t width, uint32_t height, float amount,
                cudaStream_t stream);
 
+// Film grain on the LUMA plane (ported from REDStreamer's grainKernel): value noise — a smoothstep-
+// bilerped lattice of triangular hash draws — with a photochemical density response 4L(1-L), so
+// grain peaks in the mid-tones and vanishes at black/white (those stay bit-exact). `size` is the
+// grain cell in pixels (1..4; 1 = per-pixel), `seed` re-draws the field (pass a frame counter),
+// amount 1 = 0.08 of the Y swing peak amplitude at mid-gray. Output clamps to [4, 1019].
+void grain_y(const uint16_t* y_in, uint16_t* y_out, uint32_t width, uint32_t height, float amount,
+             float size, uint32_t seed, cudaStream_t stream);
+
+// Chroma leg of "color" grain: independent noise fields on Cb and Cr (color-negative look; mono
+// grain leaves chroma untouched — the caller copies those planes). The film-response weight is
+// taken from the co-sited luma sample, amplitude scales the ±448 chroma swing. 4:2:2 planes,
+// (width/2) x height; salts are derived from `seed` so the fields decorrelate from the Y grain.
+void grain_c(const uint16_t* y_in, const uint16_t* cb_in, const uint16_t* cr_in, uint16_t* cb_out,
+             uint16_t* cr_out, uint32_t width, uint32_t height, float amount, float size,
+             uint32_t seed, cudaStream_t stream);
+
 }  // namespace spark::filters

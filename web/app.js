@@ -69,6 +69,18 @@ const FALLBACK_CATALOG = [
       { key: 'contrast', label: 'Contrast', type: 'slider', cfg: 'paContrast', min: 0, max: 4, step: 0.05, digits: 2, unset_to: 1 },
       { key: 'saturation', label: 'Saturation', type: 'slider', cfg: 'paSaturation', min: 0, max: 4, step: 0.05, digits: 2, unset_to: 1 },
       { key: 'hue', label: 'Hue (°)', type: 'slider', cfg: 'paHueDeg', min: -180, max: 180, step: 1, digits: 0 }] },
+  { name: 'grain', label: 'Film grain',
+    tip: 'Photochemical-style grain: strongest in the mid-tones, vanishing at pure black/white, re-drawn every frame. mono = one luma grain field (silver-halide look); color adds independent chroma fields (color-negative look). Size is the grain cell in pixels.',
+    params: [
+      { key: 'mode', label: 'Mode', type: 'select', cfg: 'grainMode', choices: [
+        { value: 'mono', label: 'mono' }, { value: 'color', label: 'color' }] },
+      { key: 'amount', label: 'Amount', type: 'slider', cfg: 'grain', min: 0, max: 1, step: 0.01, digits: 2 },
+      { key: 'size', label: 'Size (px)', type: 'slider', cfg: 'grainSize', min: 1, max: 4, step: 0.25, digits: 2, unset_to: 1.5 }] },
+  { name: 'delay', label: 'A/V delay',
+    tip: 'Schedule-level delay, not a GPU stage: each essence\'s wire time shifts independently on top of the fixed capture→wire latency L (video → L + video ms, audio → L + audio ms — audio-only is a lip-sync trim). Requires fixed-latency mode (default L = 105 ms); video delay grows the RX frame store accordingly.',
+    params: [
+      { key: 'video_ms', label: 'Video (ms)', type: 'slider', cfg: 'delayVideoMs', min: 0, max: 1000, step: 5, digits: 0 },
+      { key: 'audio_ms', label: 'Audio (ms)', type: 'slider', cfg: 'delayAudioMs', min: 0, max: 1000, step: 5, digits: 0 }] },
 ];
 
 function markDirty() {
@@ -229,6 +241,8 @@ function deriveChain(c) {
   const contrast = +c.paContrast > 0 ? +c.paContrast : 1;
   const sat = +c.paSaturation > 0 ? +c.paSaturation : 1;
   if (+c.paBrightness !== 0 || contrast !== 1 || sat !== 1 || +c.paHueDeg !== 0) ch.push('procamp');
+  if (+c.grain > 0) ch.push('grain');
+  if (+c.delayVideoMs > 0 || +c.delayAudioMs > 0) ch.push('delay');
   return ch;
 }
 
