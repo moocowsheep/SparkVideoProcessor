@@ -171,6 +171,10 @@ class St2110Pipeline : public holoscan::Application {
     const double pa_hue = std::atof(env("SPARK_PA_HUE", "0").c_str());
     const bool with_procamp =
         pa_bright != 0.0 || pa_contrast != 1.0 || pa_sat != 1.0 || pa_hue != 0.0;
+    // Spatial noise reduction (NrOp): edge-preserving bilateral, separate luma/chroma strengths
+    // 0..1 (0 = that plane untouched; both 0 = stage off).
+    const double nr_luma = std::atof(env("SPARK_NR_LUMA", "0").c_str());
+    const double nr_chroma = std::atof(env("SPARK_NR_CHROMA", "0").c_str());
     // Film grain (GrainOp): amount 0..1 (0 = stage off), cell size 1..4 px, mono|color. 0/negative
     // size reads as "unset" -> the 1.5 default (proto3 zero-default, same rationale as contrast).
     const double grain_amt = std::atof(env("SPARK_GRAIN", "0").c_str());
@@ -185,7 +189,10 @@ class St2110Pipeline : public holoscan::Application {
     const double delay_a_ms = std::atof(env("SPARK_DELAY_AUDIO_MS", "0").c_str());
     std::string filters = env("SPARK_FILTERS", "");
     if (filters.empty()) {
-      filters = with_frc ? "frc,scale" : "scale";
+      filters = with_frc ? "frc," : "";
+      // NR before scale: denoise at the native input resolution, where the noise lives.
+      if (nr_luma > 0.0 || nr_chroma > 0.0) filters += "nr,";
+      filters += "scale";
       if (sharpen_amt > 0.0) filters += ",sharpen";
       if (with_procamp) filters += ",procamp";
       if (grain_amt > 0.0) filters += ",grain";
@@ -223,7 +230,7 @@ class St2110Pipeline : public holoscan::Application {
         for (std::string tok; std::getline(pre, tok, ',');) {
           // real GpuFrame operators only — 'delay' is a schedule marker, never an input queue
           if (tok != "frc" && tok != "scale" && tok != "sharpen" && tok != "procamp" &&
-              tok != "grain")
+              tok != "grain" && tok != "nr")
             continue;
           const int nth = seen_pre[tok]++;
           const std::string name = nth ? tok + std::to_string(nth + 1) : tok;
@@ -339,6 +346,9 @@ class St2110Pipeline : public holoscan::Application {
         chain.push_back(make_operator<ops::ProcAmpOp>(
             name, Arg("brightness", pa_bright), Arg("contrast", pa_contrast),
             Arg("saturation", pa_sat), Arg("hue_deg", pa_hue)));
+      } else if (tok == "nr") {
+        chain.push_back(make_operator<ops::NrOp>(name, Arg("luma", nr_luma),
+                                                 Arg("chroma", nr_chroma)));
       } else if (tok == "grain") {
         chain.push_back(make_operator<ops::GrainOp>(name, Arg("amount", grain_amt),
                                                     Arg("size", grain_size),

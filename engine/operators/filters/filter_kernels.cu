@@ -135,6 +135,61 @@ __global__ void grain_c_k(const uint16_t* __restrict__ y_in, const uint16_t* __r
   cr_out[i] = clamp10(static_cast<float>(cr_in[i]) + s * grain_noise(gx, gy, seed * 4u + 1u));
 }
 
+// --- spatial noise reduction (5x5 bilateral) ---
+
+// Fixed spatial gaussian, sigma 1.5 px: exp(-(dx^2+dy^2) / (2 * 1.5^2)).
+__device__ __forceinline__ float nr_spatial(int dx, int dy) {
+  return __expf(-(dx * dx + dy * dy) * (1.0f / 4.5f));
+}
+
+// One bilateral tap accumulation pass for a single plane sample at (x, y).
+__device__ __forceinline__ float nr_bilateral5(const uint16_t* __restrict__ in, uint32_t w,
+                                               uint32_t h, uint32_t x, uint32_t y,
+                                               float inv2sr2) {
+  const float c = in[(size_t)y * w + x];
+  float acc = 0.0f, wsum = 0.0f;
+#pragma unroll
+  for (int dy = -2; dy <= 2; ++dy) {
+#pragma unroll
+    for (int dx = -2; dx <= 2; ++dx) {
+      const uint32_t xx = min(max((int)x + dx, 0), (int)w - 1);
+      const uint32_t yy = min(max((int)y + dy, 0), (int)h - 1);
+      const float v = in[(size_t)yy * w + xx];
+      const float d = v - c;
+      const float wt = nr_spatial(dx, dy) * __expf(-d * d * inv2sr2);
+      acc += wt * v;
+      wsum += wt;
+    }
+  }
+  return acc / wsum;
+}
+
+__global__ void nr_y_k(const uint16_t* __restrict__ in, uint16_t* __restrict__ out, uint32_t w,
+                       uint32_t h, float inv2sr2) {
+  const uint32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+  const uint32_t y = blockIdx.y * blockDim.y + threadIdx.y;
+  if (x >= w || y >= h) return;
+  out[(size_t)y * w + x] = clamp10(nr_bilateral5(in, w, h, x, y, inv2sr2));
+}
+
+__global__ void nr_c_k(const uint16_t* __restrict__ cb_in, const uint16_t* __restrict__ cr_in,
+                       uint16_t* __restrict__ cb_out, uint16_t* __restrict__ cr_out, uint32_t cw,
+                       uint32_t h, float inv2sr2) {
+  const uint32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+  const uint32_t y = blockIdx.y * blockDim.y + threadIdx.y;
+  if (x >= cw || y >= h) return;
+  const size_t i = (size_t)y * cw + x;
+  cb_out[i] = clamp10(nr_bilateral5(cb_in, cw, h, x, y, inv2sr2));
+  cr_out[i] = clamp10(nr_bilateral5(cr_in, cw, h, x, y, inv2sr2));
+}
+
+// strength 0..1 -> range sigma 4..64 code values (10-bit): 4 cv barely touches anything above the
+// dither floor, 64 cv averages across typical sensor noise while 100+ cv edges still survive.
+inline float nr_inv2sr2(float strength) {
+  const float sr = 4.0f + 60.0f * fminf(fmaxf(strength, 0.0f), 1.0f);
+  return 1.0f / (2.0f * sr * sr);
+}
+
 constexpr int kBlock = 256;
 inline unsigned int grid1d(size_t n) { return (unsigned int)((n + kBlock - 1) / kBlock); }
 
@@ -181,6 +236,22 @@ void grain_c(const uint16_t* y_in, const uint16_t* cb_in, const uint16_t* cr_in,
   const float inv_size = 1.0f / fminf(fmaxf(size, 1.0f), 4.0f);
   grain_c_k<<<grid, block, 0, stream>>>(y_in, cb_in, cr_in, cb_out, cr_out, width, height,
                                         strength_cv, inv_size, seed);
+}
+
+void nr_y(const uint16_t* y_in, uint16_t* y_out, uint32_t width, uint32_t height, float strength,
+          cudaStream_t stream) {
+  const dim3 block(32, 8);
+  const dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y);
+  nr_y_k<<<grid, block, 0, stream>>>(y_in, y_out, width, height, nr_inv2sr2(strength));
+}
+
+void nr_c(const uint16_t* cb_in, const uint16_t* cr_in, uint16_t* cb_out, uint16_t* cr_out,
+          uint32_t width, uint32_t height, float strength, cudaStream_t stream) {
+  const uint32_t cw = width / 2;
+  const dim3 block(32, 8);
+  const dim3 grid((cw + block.x - 1) / block.x, (height + block.y - 1) / block.y);
+  nr_c_k<<<grid, block, 0, stream>>>(cb_in, cr_in, cb_out, cr_out, cw, height,
+                                     nr_inv2sr2(strength));
 }
 
 }  // namespace spark::filters

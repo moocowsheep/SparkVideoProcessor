@@ -103,6 +103,11 @@ message PipelineConfig {
   // JSON: delayVideoMs delayAudioMs
   double delay_video_ms = 41;
   double delay_audio_ms = 42;
+  // Spatial noise reduction (NrOp): edge-preserving 5x5 bilateral at the native input resolution
+  // (auto-order places it before scale). Separate strengths 0..1 per plane group; 0 = that plane
+  // untouched, both 0 = stage off. Map to SPARK_NR_LUMA/SPARK_NR_CHROMA. JSON: nrLuma nrChroma
+  double nr_luma = 43;
+  double nr_chroma = 44;
 }
 
 enum PipelineState {
