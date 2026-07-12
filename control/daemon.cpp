@@ -224,6 +224,12 @@ bool start_locked(State& s, std::string& msg) {
     setenv("SPARK_PA_CONTRAST", std::to_string(c.pa_contrast()).c_str(), 1);
     setenv("SPARK_PA_SAT", std::to_string(c.pa_saturation()).c_str(), 1);
     setenv("SPARK_PA_HUE", std::to_string(c.pa_hue_deg()).c_str(), 1);
+    // Film grain + A/V delay (0 size/mode = unset -> engine defaults 1.5/mono).
+    setenv("SPARK_GRAIN", std::to_string(c.grain()).c_str(), 1);
+    setenv("SPARK_GRAIN_SIZE", std::to_string(c.grain_size()).c_str(), 1);
+    setenv("SPARK_GRAIN_MODE", c.grain_mode().c_str(), 1);
+    setenv("SPARK_DELAY_VIDEO_MS", std::to_string(c.delay_video_ms()).c_str(), 1);
+    setenv("SPARK_DELAY_AUDIO_MS", std::to_string(c.delay_audio_ms()).c_str(), 1);
     setenv("SPARK_FILTERS", c.filters().c_str(), 1);
     setenv("SPARK_RX_PCI", c.rx_pci().c_str(), 1);
     setenv("SPARK_TX_PCI", c.tx_pci().c_str(), 1);
@@ -384,7 +390,19 @@ const char* kFilterCatalog = R"json({"filters":[
   {"key":"brightness","label":"Brightness","type":"slider","cfg":"paBrightness","min":-1,"max":1,"step":0.01,"digits":2},
   {"key":"contrast","label":"Contrast","type":"slider","cfg":"paContrast","min":0,"max":4,"step":0.05,"digits":2,"unset_to":1},
   {"key":"saturation","label":"Saturation","type":"slider","cfg":"paSaturation","min":0,"max":4,"step":0.05,"digits":2,"unset_to":1},
-  {"key":"hue","label":"Hue (°)","type":"slider","cfg":"paHueDeg","min":-180,"max":180,"step":1,"digits":0}]}
+  {"key":"hue","label":"Hue (°)","type":"slider","cfg":"paHueDeg","min":-180,"max":180,"step":1,"digits":0}]},
+{"name":"grain","label":"Film grain",
+ "tip":"Photochemical-style grain: strongest in the mid-tones, vanishing at pure black/white, re-drawn every frame. mono = one luma grain field (silver-halide look); color adds independent chroma fields (color-negative look). Size is the grain cell in pixels.",
+ "params":[
+  {"key":"mode","label":"Mode","type":"select","cfg":"grainMode","choices":[
+   {"value":"mono","label":"mono"},{"value":"color","label":"color"}]},
+  {"key":"amount","label":"Amount","type":"slider","cfg":"grain","min":0,"max":1,"step":0.01,"digits":2},
+  {"key":"size","label":"Size (px)","type":"slider","cfg":"grainSize","min":1,"max":4,"step":0.25,"digits":2,"unset_to":1.5}]},
+{"name":"delay","label":"A/V delay",
+ "tip":"Schedule-level delay, not a GPU stage: each essence's wire time shifts independently on top of the fixed capture→wire latency L (video → L + video ms, audio → L + audio ms — audio-only is a lip-sync trim). Requires fixed-latency mode (default L = 105 ms); video delay grows the RX frame store accordingly.",
+ "params":[
+  {"key":"video_ms","label":"Video (ms)","type":"slider","cfg":"delayVideoMs","min":0,"max":1000,"step":5,"digits":0},
+  {"key":"audio_ms","label":"Audio (ms)","type":"slider","cfg":"delayAudioMs","min":0,"max":1000,"step":5,"digits":0}]}
 ]})json";
 
 const char* ctype(const std::string& path) {

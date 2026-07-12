@@ -104,10 +104,10 @@ class St2110Pipeline : public holoscan::Application {
     // L=85 run; L=80's clean pass predates a stall window) + margin. Below L≈78 the RX L-store
     // drains fully and tx_margin_us becomes a true headroom signal; at higher L the arrival lead
     // pins at ~13.4 ms and margin is meaningless. SPARK_LATENCY_MS=0 restores the servo.
-    const double latency_ms = std::atof(env("SPARK_LATENCY_MS", "105").c_str());
-    const uint64_t latency_ns =
+    double latency_ms = std::atof(env("SPARK_LATENCY_MS", "105").c_str());
+    uint64_t latency_ns =
         latency_ms > 0 ? static_cast<uint64_t>(latency_ms * 1e6) : uint64_t(0);
-    const int64_t av_offset_ns =
+    int64_t av_offset_ns =
         static_cast<int64_t>(std::atof(env("SPARK_AV_OFFSET_MS", "0").c_str()) * 1e6);
     // Companion ST 2110-30 audio (relayed bit-transparent, re-timed to capture + L). Active only
     // when BOTH sides are routed and the schedule is fixed — lip-sync is undefined under the servo.
@@ -171,11 +171,45 @@ class St2110Pipeline : public holoscan::Application {
     const double pa_hue = std::atof(env("SPARK_PA_HUE", "0").c_str());
     const bool with_procamp =
         pa_bright != 0.0 || pa_contrast != 1.0 || pa_sat != 1.0 || pa_hue != 0.0;
+    // Film grain (GrainOp): amount 0..1 (0 = stage off), cell size 1..4 px, mono|color. 0/negative
+    // size reads as "unset" -> the 1.5 default (proto3 zero-default, same rationale as contrast).
+    const double grain_amt = std::atof(env("SPARK_GRAIN", "0").c_str());
+    double grain_size = std::atof(env("SPARK_GRAIN_SIZE", "1.5").c_str());
+    if (grain_size <= 0.0) grain_size = 1.5;
+    std::string grain_mode = env("SPARK_GRAIN_MODE", "mono");
+    if (grain_mode != "color") grain_mode = "mono";
+    // A/V delay: a SCHEDULE-level stage, not a frame op. Video delay rides the fixed latency L
+    // (wire = capture + L + Dv for both essences), audio delay rides the A/V offset — so audio
+    // lands at capture + L + Da. Gated on the 'delay' chain token below; needs fixed-latency mode.
+    const double delay_v_ms = std::atof(env("SPARK_DELAY_VIDEO_MS", "0").c_str());
+    const double delay_a_ms = std::atof(env("SPARK_DELAY_AUDIO_MS", "0").c_str());
     std::string filters = env("SPARK_FILTERS", "");
     if (filters.empty()) {
       filters = with_frc ? "frc,scale" : "scale";
       if (sharpen_amt > 0.0) filters += ",sharpen";
       if (with_procamp) filters += ",procamp";
+      if (grain_amt > 0.0) filters += ",grain";
+      if (delay_v_ms > 0.0 || delay_a_ms > 0.0) filters += ",delay";
+    }
+    // Resolve the delay marker before anything consumes latency_ns: the standing frame store
+    // (q_depth), the TX schedule, and the audio relay all read the adjusted values.
+    const bool with_delay = [&filters] {
+      std::stringstream ss(filters);
+      for (std::string tok; std::getline(ss, tok, ',');)
+        if (tok == "delay") return true;
+      return false;
+    }();
+    if (with_delay) {
+      if (latency_ns == 0) {
+        HOLOSCAN_LOG_WARN(
+            "delay: requires the fixed-latency schedule (SPARK_LATENCY_MS>0) — ignored");
+      } else {
+        latency_ms += delay_v_ms;  // q_depth (the standing frame store) sizes from this too
+        latency_ns += static_cast<uint64_t>(delay_v_ms * 1e6);
+        av_offset_ns += static_cast<int64_t>((delay_a_ms - delay_v_ms) * 1e6);
+        HOLOSCAN_LOG_INFO("delay: video +{} ms, audio +{} ms (L -> {} ms, av_offset -> {} ms)",
+                          delay_v_ms, delay_a_ms, latency_ns / 1e6, av_offset_ns / 1e6);
+      }
     }
 
     // Announce which op receives FRC's multi-frame burst (the only hop that needs burst-deep input
@@ -187,7 +221,10 @@ class St2110Pipeline : public holoscan::Application {
         std::map<std::string, int> seen_pre;
         bool after_frc = false;
         for (std::string tok; std::getline(pre, tok, ',');) {
-          if (tok != "frc" && tok != "scale" && tok != "sharpen" && tok != "procamp") continue;
+          // real GpuFrame operators only — 'delay' is a schedule marker, never an input queue
+          if (tok != "frc" && tok != "scale" && tok != "sharpen" && tok != "procamp" &&
+              tok != "grain")
+            continue;
           const int nth = seen_pre[tok]++;
           const std::string name = nth ? tok + std::to_string(nth + 1) : tok;
           if (after_frc) {
@@ -302,6 +339,12 @@ class St2110Pipeline : public holoscan::Application {
         chain.push_back(make_operator<ops::ProcAmpOp>(
             name, Arg("brightness", pa_bright), Arg("contrast", pa_contrast),
             Arg("saturation", pa_sat), Arg("hue_deg", pa_hue)));
+      } else if (tok == "grain") {
+        chain.push_back(make_operator<ops::GrainOp>(name, Arg("amount", grain_amt),
+                                                    Arg("size", grain_size),
+                                                    Arg("mode", grain_mode)));
+      } else if (tok == "delay") {
+        continue;  // schedule-level stage, already folded into latency/av_offset above
       } else {
         HOLOSCAN_LOG_WARN("chain: unknown filter '{}' in SPARK_FILTERS — skipping", tok);
         continue;
