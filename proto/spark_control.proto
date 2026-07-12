@@ -81,6 +81,33 @@ message PipelineConfig {
   // Explicit chain order override, comma list of frc|scale|sharpen|procamp (advanced; "" = automatic
   // order frc,scale,sharpen,procamp with per-stage activation). Maps to SPARK_FILTERS. JSON: filters
   string filters = 36;
+  // Dashboard filter-panel row order: ALL filters (enabled AND disabled), top to bottom. Pure GUI
+  // state — the engine never reads it (`filters` above stays the wire chain); it persists here so
+  // disabled rows keep their staged position across page reloads and browsers. The GUI ignores it
+  // when its enabled subset disagrees with `filters`. JSON: filterOrder
+  string filter_order = 37;
+
+  // Film grain (GrainOp; kernels ported from REDStreamer). amount 0..1, 0 = stage off. Maps to
+  // SPARK_GRAIN. JSON: grain
+  double grain = 38;
+  // Grain cell size in pixels, 1..4. 0 = unset -> 1.5 (proto3 zero-default). SPARK_GRAIN_SIZE.
+  // JSON: grainSize
+  double grain_size = 39;
+  // "mono" (luma-only grain, silver-halide look) | "color" (independent chroma fields). "" ->
+  // mono. Maps to SPARK_GRAIN_MODE. JSON: grainMode
+  string grain_mode = 40;
+  // A/V delay — a schedule-level chain stage ('delay' token in `filters`), not a GPU op: each
+  // essence's wire time shifts independently on top of the fixed latency L (video -> capture + L +
+  // delay_video_ms, audio -> capture + L + delay_audio_ms). Requires fixed-latency mode; the video
+  // delay also grows the RX standing frame store. Map to SPARK_DELAY_VIDEO_MS/SPARK_DELAY_AUDIO_MS.
+  // JSON: delayVideoMs delayAudioMs
+  double delay_video_ms = 41;
+  double delay_audio_ms = 42;
+  // Spatial noise reduction (NrOp): edge-preserving 5x5 bilateral at the native input resolution
+  // (auto-order places it before scale). Separate strengths 0..1 per plane group; 0 = that plane
+  // untouched, both 0 = stage off. Map to SPARK_NR_LUMA/SPARK_NR_CHROMA. JSON: nrLuma nrChroma
+  double nr_luma = 43;
+  double nr_chroma = 44;
 }
 
 enum PipelineState {

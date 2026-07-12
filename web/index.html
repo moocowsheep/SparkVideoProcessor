@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<!-- Spark Video Processor — control dashboard. Vanilla; served by the control daemon
-     (control/daemon.cpp) over HTTP/JSON. The Discover panel talks directly to the NMOS registry
-     (IS-04 Query API) and our NMOS node (IS-05 Connection API) — both CORS-enabled. No build step. -->
+<!-- Spark Video Processor — control dashboard, REDStreamer-style. Vanilla; served by the control
+     daemon (control/daemon.cpp) over HTTP/JSON. The Filters panel renders from the daemon's
+     /api/filters descriptors (see the REDStreamer filter panel this mirrors); the Routing panel
+     talks to the NMOS registry (IS-04) and nodes (IS-05) via the daemon's same-origin proxy. -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -10,87 +11,79 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header>
-    <h1>Spark Video Processor</h1>
-    <span id="state" class="badge">…</span>
-  </header>
+<header>
+  <div class="brand">SPARK<span>Video Processor</span></div>
+  <div id="conn" class="chip off">offline</div>
+  <div id="state" class="chip">—</div>
+  <div id="ptp" class="chip" title="live PTP grandmaster (pmc)" hidden>PTP —</div>
+  <span id="meta" class="dim"></span>
+  <div class="spacer"></div>
+  <span id="msg" class="dim"></span>
+  <button id="save" title="Apply the panels below to the daemon config (engine must be stopped; takes effect at next start)">Save config</button>
+  <button id="power" class="power">&#9654; START</button>
+</header>
 
-  <main>
-    <section class="card">
-      <h2>Discover sources <span class="sub">(NMOS IS-04 / IS-05)</span></h2>
-      <div class="nmos-cfg">
-        <label>Registry <input id="nmos_registry" type="text" placeholder="http://host:3211"></label>
-        <label>Node <input id="nmos_node" type="text" placeholder="http://host:3242"></label>
-        <label class="chk" title="Discover over mDNS via the proxy — no registry needed"><input id="nmos_p2p" type="checkbox"> mDNS (registry-free)</label>
-        <button id="nmos_refresh" class="btn">Refresh</button>
-      </div>
-      <div id="nmos_status" class="nmos-status">…</div>
-      <h3 class="subhead">Sources → processor input</h3>
-      <div id="sources" class="sources"></div>
-      <h3 class="subhead">Processor output → destinations</h3>
-      <div id="dests" class="sources"></div>
-      <p class="hint" id="nmos_hint">Connect a sender to feed this processor; Send pushes our output's SDP to a destination receiver (IS-05). No PCIe/MAC needed.</p>
-    </section>
+<main>
+  <section class="panel" id="panel-route">
+    <h2>Routing <span class="right dim">NMOS IS-04 / IS-05</span></h2>
+    <div class="nmos-cfg">
+      <label>Registry <input id="nmos_registry" type="text" placeholder="http://host:3211"></label>
+      <label>Node <input id="nmos_node" type="text" placeholder="http://host:3242"></label>
+      <label class="chk toggle" title="Discover over mDNS via the proxy — no registry needed"><input id="nmos_p2p" type="checkbox"><span>mDNS</span></label>
+      <button id="nmos_refresh">Refresh</button>
+    </div>
+    <div id="nmos_status" class="nmos-status">…</div>
+    <h3 class="subhead">Sources → processor input</h3>
+    <div id="sources" class="sources"></div>
+    <h3 class="subhead">Processor output → destinations</h3>
+    <div id="dests" class="sources"></div>
+    <p class="hint" id="nmos_hint">Connect routes a sender into this processor; Send pushes our output's SDP to a destination receiver (IS-05).</p>
+  </section>
 
-    <section class="card">
-      <h2>Pipeline</h2>
-      <p class="sub">st2110_rx → unpack → [frc · scale · sharpen · procamp] → pack → st2110_tx</p>
-      <div class="row">
-        <button id="start" class="btn go">Start</button>
-        <button id="stop" class="btn stop">Stop</button>
-        <span id="msg" class="msg"></span>
-      </div>
-      <p class="meta">pid <span id="pid">–</span> · uptime <span id="uptime">0</span>s</p>
-    </section>
+  <section class="panel" id="panel-format">
+    <h2>Format</h2>
+    <div class="row">
+      <label for="profile" title="Input resolution fallback when no SDP-routed source sets the real format">Input profile</label>
+      <select id="profile"><option>1080p</option><option>2160p</option></select>
+    </div>
+    <div class="row">
+      <label for="frames">Frames</label>
+      <input id="frames" type="number" min="0" step="1" title="0 = run until stopped (live); >0 = bounded run">
+      <span class="dim">0 = continuous</span>
+    </div>
+    <div class="row">
+      <label class="toggle" style="width:auto" title="Blackmagic IP10 10:8 output (ST 2110-22). Required for Blackmagic receivers to accept 2160p59.94/60 over 10G."><input id="ip10" type="checkbox"><span>IP10 output</span></label>
+      <label class="toggle" title="Source stream is Blackmagic IP10 (decode on RX). Auto-detected from the SDP when routed via NMOS."><input id="in_ip10" type="checkbox"><span>source is IP10</span></label>
+    </div>
+    <details class="advanced">
+      <summary>Transport (advanced — overridden by NMOS routing)</summary>
+      <div class="row"><label for="rx_pci">RX PCI</label><input id="rx_pci" type="text"></div>
+      <div class="row"><label for="tx_pci">TX PCI</label><input id="tx_pci" type="text"></div>
+      <div class="row"><label for="dst_mac">Dest MAC</label><input id="dst_mac" type="text"></div>
+    </details>
+  </section>
 
-    <section class="card">
-      <h2>Configuration</h2>
-      <div class="grid">
-        <label>Input profile
-          <select id="profile"><option>1080p</option><option>2160p</option></select></label>
-        <label title="fsrcnn / fsrcnn-s / espcn: AI super-resolution on luma — exact ×2 upscales only (1080p → 2160p); other geometries fall back to cubic. fsrcnn = best, fsrcnn-s = fastest.">Interpolation
-          <select id="interp"><option>auto</option><option>cubic</option><option>linear</option><option>lanczos</option><option>super</option><option value="fsrcnn">fsrcnn (AI ×2)</option><option value="fsrcnn-s">fsrcnn-s (AI ×2 fast)</option><option value="espcn">espcn (AI ×2)</option></select></label>
-        <label>Out width <input id="out_width" type="number"></label>
-        <label>Out height <input id="out_height" type="number"></label>
-        <label>FRC (motion-comp)
-          <select id="frc_mode"><option value="0">off</option><option value="1">retime (1:1)</option><option value="2">up-convert (2×)</option><option value="3" title="Interpolates onto a rigid nominal output grid using the true capture times — absorbs erratic source frame timing (motion wobble) at the cost of synthesizing most frames.">up-convert 2× (uniform grid)</option></select></label>
-        <label>Frames (0 = continuous) <input id="frames" type="number"></label>
-        <label class="chk" title="Blackmagic IP10 10:8 (ST 2110-22). Required for Blackmagic receivers to accept 2160p59.94/60 over 10G — uncompressed 4K60 won't fit.">
-          <input id="ip10" type="checkbox"> Blackmagic IP10 codec <span class="sub">(2160p59.94/60)</span></label>
-        <label title="Luma unsharp mask, applied after scaling. 0 disables the stage.">Sharpen (0 = off)
-          <input id="sharpen" type="number" step="0.1" min="0" max="4"></label>
-        <label title="Proc amp black-level offset; ±1 = ±full swing. 0 = neutral.">Brightness
-          <input id="pa_brightness" type="number" step="0.01" min="-1" max="1"></label>
-        <label title="Proc amp video gain about black. 1 = neutral (0 also reads as neutral).">Contrast
-          <input id="pa_contrast" type="number" step="0.05" min="0" max="4"></label>
-        <label title="Chroma gain. 1 = neutral (0 also reads as neutral; use 0.01 for mono).">Saturation
-          <input id="pa_saturation" type="number" step="0.05" min="0" max="4"></label>
-        <label title="Chroma phase rotation in degrees. 0 = neutral.">Hue (°)
-          <input id="pa_hue_deg" type="number" step="1" min="-180" max="180"></label>
-      </div>
-      <details class="advanced">
-        <summary>Advanced — manual transport (overridden by NMOS routing)</summary>
-        <div class="grid">
-          <label>RX PCI <input id="rx_pci" type="text"></label>
-          <label>TX PCI <input id="tx_pci" type="text"></label>
-          <label>Dest MAC <input id="dst_mac" type="text"></label>
-          <label class="chk" title="Source stream is Blackmagic IP10 (decode on RX). Auto-detected from the SDP when routed via NMOS; set manually for direct transport.">
-            <input id="in_ip10" type="checkbox"> Source is IP10</label>
-          <label title="Explicit filter-chain order (comma list of frc,scale,sharpen,procamp). Empty = automatic: each stage activates from its own parameters, in that order.">
-            Filter order <input id="filters" type="text" placeholder="auto"></label>
-        </div>
-      </details>
-      <div class="row">
-        <button id="save" class="btn">Save config</button>
-        <span class="hint">config is locked while running</span>
-      </div>
-    </section>
+  <section class="panel" id="panel-filters">
+    <h2>Filter chain <span class="right dim" title="GPU stages between unpack and pack, run top to bottom. Enable, reorder and tune here; the chain applies when the pipeline starts (config is locked while running).">unpack → … → pack · applies at start</span></h2>
+    <div id="filter-list"></div>
+  </section>
+</main>
 
-    <section class="card">
-      <h2>Stats <span class="sub">(last run)</span></h2>
-      <div class="stats" id="stats"></div>
-    </section>
-  </main>
-  <script src="/app.js"></script>
+<footer id="stats">
+  <div class="stat"><span id="st-rxf">0</span><label>rx frames</label></div>
+  <div class="stat"><span id="st-rxlost">0</span><label>rx lost</label></div>
+  <div class="stat"><span id="st-txf">0</span><label>tx frames</label></div>
+  <div class="stat" title="frames skipped unsent (late vs the fixed schedule — receiver repeats)"><span id="st-skip">0</span><label>tx skip</label></div>
+  <div class="stat" title="tx past / future pacing errors"><span id="st-errs">0 / 0</span><label>tx errs</label></div>
+  <div class="stat"><span id="st-frc">0</span><label>frc interp</label></div>
+  <div class="stat" title="capture→wire latency: fixed L (ms) or adaptive servo"><span id="st-lat">—</span><label>latency</label></div>
+  <div class="stat" title="min schedule headroom over the last window (fixed mode; pinned/meaningless at high L)"><span id="st-margin">—</span><label>margin <i>µs</i></label></div>
+  <div class="stat" title="unpack→pack GPU-chain latency, current"><span id="st-pipe">0</span><label>pipe ms</label></div>
+  <div class="stat" title="RX ingest latency"><span id="st-ingest">0</span><label>ingest <i>µs</i></label></div>
+  <div class="stat" title="ST 2110-30 packets relayed rx / tx"><span id="st-audio">0 / 0</span><label>audio pkts</label></div>
+  <div class="stat" title="audio relayed late or dropped"><span id="st-avlate">0</span><label>a/v late</label></div>
+</footer>
+
+<script src="/app.js"></script>
 </body>
 </html>
