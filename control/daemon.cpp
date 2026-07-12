@@ -362,6 +362,11 @@ std::string json_of(const google::protobuf::Message& m) {
 // param maps to. Adding a stage here (+ its engine op + env plumbing in start_locked) puts it in
 // the GUI with zero JS changes. Membership + order travel as the config `filters` token list.
 const char* kFilterCatalog = R"json({"filters":[
+{"name":"nr","label":"Noise reduction",
+ "tip":"Edge-preserving spatial denoise (5×5 bilateral) with separate luma / chroma strengths; 0 leaves that plane untouched. Runs best first — before FRC (optical flow matches clean frames, at the input rate) and before Scale, at the native input resolution where the noise lives.",
+ "params":[
+  {"key":"luma","label":"Luma","type":"slider","cfg":"nrLuma","min":0,"max":1,"step":0.01,"digits":2},
+  {"key":"chroma","label":"Chroma","type":"slider","cfg":"nrChroma","min":0,"max":1,"step":0.01,"digits":2}]},
 {"name":"frc","label":"FRC — motion interpolation",
  "tip":"Motion-compensated frame-rate conversion (NVOF). Runs at native input resolution, before scale.",
  "params":[
@@ -369,13 +374,8 @@ const char* kFilterCatalog = R"json({"filters":[
    {"value":1,"label":"retime (1:1)"},
    {"value":2,"label":"up-convert 2×"},
    {"value":3,"label":"up-convert 2× — uniform grid"}]}]},
-{"name":"nr","label":"Noise reduction",
- "tip":"Edge-preserving spatial denoise (5×5 bilateral) with separate luma / chroma strengths; 0 leaves that plane untouched. Runs best before Scale, at the native input resolution where the noise lives.",
- "params":[
-  {"key":"luma","label":"Luma","type":"slider","cfg":"nrLuma","min":0,"max":1,"step":0.01,"digits":2},
-  {"key":"chroma","label":"Chroma","type":"slider","cfg":"nrChroma","min":0,"max":1,"step":0.01,"digits":2}]},
-{"name":"scale","label":"Scale",
- "tip":"Resize to the delivery resolution. auto = anti-aliased supersampling on downscale, cubic on upscale, passthrough at 1:1.",
+{"name":"scale","label":"Scale","required":true,
+ "tip":"Resize to the delivery resolution (always on: the output raster advertised on the wire/SDP rides Width×Height). auto = anti-aliased supersampling on downscale, cubic on upscale, passthrough at 1:1.",
  "params":[
   {"key":"out_width","label":"Width","type":"number","cfg":"outWidth","int":true,"min":320,"max":7680,"step":2},
   {"key":"out_height","label":"Height","type":"number","cfg":"outHeight","int":true,"min":240,"max":4320,"step":2},
@@ -647,13 +647,21 @@ MHD_Result http_handler(void*, struct MHD_Connection* conn, const char* url, con
         msg = "cannot change config while running";
       } else {
         SetConfigRequest req;
-        google::protobuf::util::JsonParseOptions jopt;
-        jopt.ignore_unknown_fields = true;  // a newer dashboard may post fields this build lacks
-        auto st = google::protobuf::util::JsonStringToMessage(*owned, req.mutable_config(), jopt);
+        // Strict parse first, so a typo'd key is never silently dropped; only unknown fields
+        // (a newer dashboard posting fields this build lacks) fall back to the lenient parse,
+        // and the ack message flags them so version skew / misspellings stay visible.
+        auto st = google::protobuf::util::JsonStringToMessage(*owned, req.mutable_config());
+        if (!st.ok()) {
+          req.Clear();
+          google::protobuf::util::JsonParseOptions jopt;
+          jopt.ignore_unknown_fields = true;
+          st = google::protobuf::util::JsonStringToMessage(*owned, req.mutable_config(), jopt);
+          if (st.ok()) msg = "config updated (unknown fields ignored — dashboard/daemon version skew or a typo?)";
+        }
         if (st.ok()) {
           g_state.config = req.config();
           ack.set_ok(true);
-          msg = "config updated";
+          if (msg.empty()) msg = "config updated";
         } else {
           ack.set_ok(false);
           msg = "bad JSON config";

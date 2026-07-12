@@ -64,8 +64,11 @@ class AudioBridge {
   }
 
  private:
-  // ~4 s of 1 ms-ptime audio: far above any sane latency L, small enough to bound memory.
-  static constexpr size_t kCap = 4096;
+  // Must hold the full L + audio-delay backlog: audio_loop holds each packet until
+  // capture + L + Da, so a class-A 125 us-ptime stream (8000 pkt/s) at the panel's 1000 ms max
+  // delay plus L~105 ms queues ~8840 packets here. 16384 covers ~2 s of 125 us ptime (worst case
+  // ~25 MB at max RTP size, and a deque only allocates what the backlog actually uses).
+  static constexpr size_t kCap = 16384;
   mutable std::mutex mu_;
   std::condition_variable cv_;
   std::deque<Pkt> q_;
