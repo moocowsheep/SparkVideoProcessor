@@ -81,6 +81,11 @@ message PipelineConfig {
   // Explicit chain order override, comma list of frc|scale|sharpen|procamp (advanced; "" = automatic
   // order frc,scale,sharpen,procamp with per-stage activation). Maps to SPARK_FILTERS. JSON: filters
   string filters = 36;
+  // Dashboard filter-panel row order: ALL filters (enabled AND disabled), top to bottom. Pure GUI
+  // state — the engine never reads it (`filters` above stays the wire chain); it persists here so
+  // disabled rows keep their staged position across page reloads and browsers. The GUI ignores it
+  // when its enabled subset disagrees with `filters`. JSON: filterOrder
+  string filter_order = 37;
 }
 
 enum PipelineState {

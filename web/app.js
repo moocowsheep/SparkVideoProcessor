@@ -255,12 +255,22 @@ function fillForm(c) {
   }
   const chain = deriveChain(c);
   enabled = new Set(chain);
-  // Keep existing row positions when they already express this chain (only enablement changed);
-  // rebuild only on first load or when the config's order genuinely differs (e.g. set elsewhere).
-  const expressed = order.filter((n) => enabled.has(n));
-  if (!order.length || expressed.join() !== chain.join()) {
-    const rest = (order.length ? order : CATALOG.map((d) => d.name)).filter((n) => !enabled.has(n));
-    order = [...chain, ...rest];
+  // Row order preference: (1) the persisted full order (config.filterOrder — covers disabled rows
+  // too), trusted only while its enabled subset agrees with the wire chain; (2) the current
+  // in-session order when it still expresses the chain (only enablement changed); (3) rebuilt as
+  // chain + rest. Unknown names drop, catalog filters missing from a stale order append at the end.
+  const known = new Set(CATALOG.map((d) => d.name));
+  const seen = new Set();
+  const saved = (c.filterOrder || '').split(',').map((t) => t.trim())
+    .filter((t) => known.has(t) && !seen.has(t) && seen.add(t));
+  if (saved.length && saved.filter((n) => enabled.has(n)).join() === chain.join()) {
+    order = [...saved, ...CATALOG.map((d) => d.name).filter((n) => !seen.has(n))];
+  } else {
+    const expressed = order.filter((n) => enabled.has(n));
+    if (!order.length || expressed.join() !== chain.join()) {
+      const rest = (order.length ? order : CATALOG.map((d) => d.name)).filter((n) => !enabled.has(n));
+      order = [...chain, ...rest];
+    }
   }
   applyChainState();
   formLoaded = true;
@@ -292,6 +302,7 @@ function readForm() {
   // would re-enable it, so both are forced together.
   const chain = chainNow();
   c.filters = chain.length ? chain.join(',') : ',';
+  c.filterOrder = order.join(',');  // full row order incl. disabled rows (GUI state; see proto)
   c.frc = chain.includes('frc');
   c.frcMode = c.frc ? (c.frcMode || 1) : 0;
   return c;
