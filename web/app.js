@@ -21,7 +21,12 @@ const SIMPLE = ['profile', 'frames', 'ip10', 'in_ip10', 'rx_pci', 'tx_pci', 'dst
 const CAMEL = { in_ip10: 'inIp10', rx_pci: 'rxPci', tx_pci: 'txPci', dst_mac: 'dstMac' };
 
 let CATALOG = null;     // filter descriptors from /api/filters (or the fallback below)
-let chain = [];         // enabled filters in run order -> config.filters
+// Display order is decoupled from enablement so toggling a filter never moves its row:
+// `order` is the top-to-bottom row order of ALL filters, `enabled` marks which ones run.
+// The wire chain (config.filters) = the enabled subset of `order`, in order.
+let order = [];
+let enabled = new Set();
+const chainNow = () => order.filter((n) => enabled.has(n));
 const sliders = {};     // cfg key -> {update(v), setDisabled(b)}
 let formLoaded = false;
 let dirty = false;      // unsaved edits: the poll must not clobber them
@@ -103,8 +108,9 @@ function mkSlider(el, { label, cfg, min, max, step, digits = 2 }) {
 }
 
 // ---------------- filter chain panel ----------------
-// Rows display in chain order (enabled stages first, run top to bottom), then the disabled rest in
-// catalog order. Enabling appends at the end of the chain; disabled filters keep their params.
+// Rows keep their position when toggled: enabling a filter inserts it into the chain at its
+// displayed spot, disabling collapses it in place. Only the ▲▼ buttons reorder (any row, so a
+// disabled row's future position can be staged too). Disabled filters keep their params.
 
 async function loadCatalog() {
   try {
@@ -165,9 +171,8 @@ function buildFilterPanel() {
     list.appendChild(row);
 
     $(`fen-${d.name}`).addEventListener('change', () => {
-      const on = $(`fen-${d.name}`).checked;
-      chain = chain.filter((n) => n !== d.name);
-      if (on) chain.push(d.name);
+      if ($(`fen-${d.name}`).checked) enabled.add(d.name);
+      else enabled.delete(d.name);
       markDirty();
       applyChainState();
     });
@@ -177,10 +182,10 @@ function buildFilterPanel() {
 }
 
 function moveFilter(name, dir) {
-  const i = chain.indexOf(name);
+  const i = order.indexOf(name);
   const j = i + dir;
-  if (i < 0 || j < 0 || j >= chain.length) return;
-  [chain[i], chain[j]] = [chain[j], chain[i]];
+  if (i < 0 || j < 0 || j >= order.length) return;
+  [order[i], order[j]] = [order[j], order[i]];
   markDirty();
   applyChainState();
 }
@@ -188,23 +193,21 @@ function moveFilter(name, dir) {
 function applyChainState() {
   if (!CATALOG) return;
   const list = $('filter-list');
-  const rest = CATALOG.map((d) => d.name).filter((n) => !chain.includes(n));
-  const want = [...chain, ...rest];
   // Only reorder when the DOM differs: this runs from the 1 s poll, and moving a node
   // (appendChild) closes its open <select> popup mid-click.
   const cur = [...list.children].map((el) => el.id.replace('frow-', ''));
-  if (want.some((n, i) => cur[i] !== n)) {
-    for (const n of want) {
+  if (order.some((n, i) => cur[i] !== n)) {
+    for (const n of order) {
       const row = $(`frow-${n}`);
       if (row) list.appendChild(row);  // appendChild moves existing nodes
     }
   }
   for (const d of CATALOG) {
-    const i = chain.indexOf(d.name);
-    $(`frow-${d.name}`).classList.toggle('off', i < 0);
-    $(`fen-${d.name}`).checked = i >= 0;
+    const i = order.indexOf(d.name);
+    $(`frow-${d.name}`).classList.toggle('off', !enabled.has(d.name));
+    $(`fen-${d.name}`).checked = enabled.has(d.name);
     $(`fup-${d.name}`).disabled = running || i <= 0;
-    $(`fdn-${d.name}`).disabled = running || i < 0 || i === chain.length - 1;
+    $(`fdn-${d.name}`).disabled = running || i === order.length - 1;
   }
 }
 
@@ -250,7 +253,15 @@ function fillForm(c) {
       else $(`fp-${p.cfg}`).value = v;
     }
   }
-  chain = deriveChain(c);
+  const chain = deriveChain(c);
+  enabled = new Set(chain);
+  // Keep existing row positions when they already express this chain (only enablement changed);
+  // rebuild only on first load or when the config's order genuinely differs (e.g. set elsewhere).
+  const expressed = order.filter((n) => enabled.has(n));
+  if (!order.length || expressed.join() !== chain.join()) {
+    const rest = (order.length ? order : CATALOG.map((d) => d.name)).filter((n) => !enabled.has(n));
+    order = [...chain, ...rest];
+  }
   applyChainState();
   formLoaded = true;
 }
@@ -275,9 +286,11 @@ function readForm() {
       }
     }
   }
-  // Chain membership + order. "," = explicitly-empty chain (the engine parses zero tokens; a truly
-  // empty string would re-trigger its automatic composition). FRC enable rides frcMode: the daemon
-  // defaults frc_mode=1, and a stale frc:true would re-enable it, so both are forced together.
+  // Chain membership + order = the enabled subset of the displayed row order. "," = explicitly-
+  // empty chain (the engine parses zero tokens; a truly empty string would re-trigger its automatic
+  // composition). FRC enable rides frcMode: the daemon defaults frc_mode=1, and a stale frc:true
+  // would re-enable it, so both are forced together.
+  const chain = chainNow();
   c.filters = chain.length ? chain.join(',') : ',';
   c.frc = chain.includes('frc');
   c.frcMode = c.frc ? (c.frcMode || 1) : 0;
