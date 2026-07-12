@@ -623,7 +623,9 @@ MHD_Result http_handler(void*, struct MHD_Connection* conn, const char* url, con
         msg = "cannot change config while running";
       } else {
         SetConfigRequest req;
-        auto st = google::protobuf::util::JsonStringToMessage(*owned, req.mutable_config());
+        google::protobuf::util::JsonParseOptions jopt;
+        jopt.ignore_unknown_fields = true;  // a newer dashboard may post fields this build lacks
+        auto st = google::protobuf::util::JsonStringToMessage(*owned, req.mutable_config(), jopt);
         if (st.ok()) {
           g_state.config = req.config();
           ack.set_ok(true);
