@@ -534,20 +534,20 @@ async function loadSources() {
   }
 
   // ---- inputs: external RTP senders we can route INTO the processor ----
-  // match the whole RTP family: urn:x-nmos:transport:rtp, rtp.mcast, rtp.ucast
-  const rtp = senders.filter((s) => (s.transport || '').split(':').pop().startsWith('rtp') && !ourSndIds.has(s.id));
+  // match the whole RTP family: urn:x-nmos:transport:rtp, rtp.mcast, rtp.ucast.
+  // video/audio flows only — ANC/data (e.g. Blackmagic smpte291) isn't routable here, so hide it.
+  const kindOf = (s) => (((flowById[s.flow_id] || {}).format) || '').split(':').pop();
+  const rtp = senders.filter((s) => (s.transport || '').split(':').pop().startsWith('rtp') &&
+    !ourSndIds.has(s.id) && (kindOf(s) === 'video' || kindOf(s) === 'audio'));
   box.innerHTML = rtp.length ? rtp.map((s) => {
     const fl = flowById[s.flow_id] || {};
     const media = fl.media_type || '';
-    const kind = (fl.format || '').split(':').pop();     // 'video' | 'audio' | ...
-    const routable = kind === 'video' || kind === 'audio';
+    const kind = kindOf(s);                              // 'video' | 'audio'
     const connected = !!connectedSender[s.id];
     const label = s.label || s.id.slice(0, 8);
-    const btn = !routable
-      ? `<span class="hint">unsupported</span>`
-      : connected
-        ? `<button class="btn stop" data-disc="${ourRx[kind]}">Disconnect</button>`
-        : `<button class="btn go" data-sender="${s.id}" data-kind="${kind}">Connect</button>`;
+    const btn = connected
+      ? `<button class="btn stop" data-disc="${ourRx[kind]}">Disconnect</button>`
+      : `<button class="btn go" data-sender="${s.id}" data-kind="${kind}">Connect</button>`;
     return `<div class="src ${connected ? 'on' : ''}">
         <div class="src-main"><b>${label}</b><span class="src-fmt">${fmtLabel(media)}</span></div>
         <div class="src-act">${connected ? '<span class="badge">routed</span>' : ''}${btn}</div>
@@ -565,18 +565,21 @@ async function loadSources() {
   // Routing = PATCH the TARGET node's IS-05 with our sender's SDP (via the daemon proxy — the
   // Blackmagic connection APIs have no CORS). Its Connection API base comes from its device controls.
   for (const k of Object.keys(DESTS)) delete DESTS[k];
-  const drtp = receivers.filter((r) => (r.transport || '').split(':').pop().startsWith('rtp') && !ourRxIds.has(r.id));
+  // video/audio receivers only (ANC/data hidden, same as the input side)
+  const drtp = receivers.filter((r) => (r.transport || '').split(':').pop().startsWith('rtp') &&
+    !ourRxIds.has(r.id) &&
+    ((r.format || '').endsWith(':video') || (r.format || '').endsWith(':audio')));
   dbox.innerHTML = drtp.length ? drtp.map((r) => {
     const kind = (r.format || '').split(':').pop();
     const href = connectionHref(deviceById[r.device_id]);
-    const routable = (kind === 'video' || kind === 'audio') && !!href && !!ourSnd[kind];
+    const routable = !!href && !!ourSnd[kind];
     const sub = r.subscription || {};
     const fromUs = !!(sub.active && sub.sender_id && ourSndIds.has(sub.sender_id));
     const busy = !!(sub.active && sub.sender_id && !fromUs);  // routed to some other sender
     const label = r.label || r.id.slice(0, 8);
     DESTS[r.id] = { id: r.id, kind, href };
     const btn = !routable
-      ? `<span class="hint">${href ? 'unsupported' : 'no connection API'}</span>`
+      ? `<span class="hint">${href ? 'no engine sender' : 'no connection API'}</span>`
       : fromUs
         ? `<button class="btn stop" data-drop="${r.id}">Release</button>`
         : `<button class="btn go" data-dest="${r.id}">Send</button>`;
