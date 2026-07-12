@@ -20,13 +20,14 @@ Two strictly separated planes (the real-time video path is never stalled by cont
   GPU tensors, PTP-locked. *(No Rivermax — see `docs/M0-feasibility-findings.md` "Networking IO".)*
 - **Control daemon** (`control/`) — native C++ gRPC service owning pipeline lifecycle + telemetry,
   with a REST/WebSocket gateway.
-- **Web UI** (`web/`) — React/TypeScript dashboard to configure streams, pick resolution/frame rate,
-  start/stop processing, and watch telemetry.
+- **Web UI** (`web/`) — vanilla-JS dashboard (no build step): NMOS routing, format config, a
+  filter-chain panel rendered from the daemon's `/api/filters` descriptors (enable/reorder/tune
+  each GPU stage), start/stop, and a live stats bar.
 
 ```
 engine/    C++/CUDA Holoscan engine (operators = modules)
 control/   C++ control daemon (gRPC + REST/WS)
-web/       React/TypeScript frontend
+web/       vanilla-JS dashboard (served by the daemon)
 proto/     shared gRPC/protobuf contracts
 deploy/    systemd units, container, NIC/PTP/core tuning
 spike/     M0 validation scripts

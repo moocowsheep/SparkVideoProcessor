@@ -104,10 +104,10 @@ class St2110Pipeline : public holoscan::Application {
     // L=85 run; L=80's clean pass predates a stall window) + margin. Below L≈78 the RX L-store
     // drains fully and tx_margin_us becomes a true headroom signal; at higher L the arrival lead
     // pins at ~13.4 ms and margin is meaningless. SPARK_LATENCY_MS=0 restores the servo.
-    const double latency_ms = std::atof(env("SPARK_LATENCY_MS", "105").c_str());
-    const uint64_t latency_ns =
+    double latency_ms = std::atof(env("SPARK_LATENCY_MS", "105").c_str());
+    uint64_t latency_ns =
         latency_ms > 0 ? static_cast<uint64_t>(latency_ms * 1e6) : uint64_t(0);
-    const int64_t av_offset_ns =
+    int64_t av_offset_ns =
         static_cast<int64_t>(std::atof(env("SPARK_AV_OFFSET_MS", "0").c_str()) * 1e6);
     // Companion ST 2110-30 audio (relayed bit-transparent, re-timed to capture + L). Active only
     // when BOTH sides are routed and the schedule is fixed — lip-sync is undefined under the servo.
@@ -139,8 +139,8 @@ class St2110Pipeline : public holoscan::Application {
     const uint32_t in_h = static_cast<uint32_t>(std::atoll(env("SPARK_IN_H", "0").c_str()));
     const double in_fps = parse_rate(env("SPARK_IN_FPS", ""));
     const double base_fps = in_fps > 0.0 ? in_fps : 60000.0 / 1001.0;
-    // Up-convert doubles the media rate; the TX pacer + RTP media clock track out_fps (e.g. 30->60).
-    const double out_fps = frc_2x ? base_fps * 2.0 : base_fps;
+    // out_fps is resolved after the filter chain below: up-convert doubles the media rate only
+    // when an FrcOp actually runs (mode > 0 AND 'frc' in the effective chain).
     // Flow runs at INPUT resolution (frc sits before scale in the chain). At <=1080p, grid 1 is
     // realtime with the same TX margin as grid 4 and a clearly better picture (on-air A/B
     // 2026-07-06: 1 >> 2 >> 4); larger formats keep 4 for headroom. Unknown dims -> conservative 4.
@@ -157,9 +157,10 @@ class St2110Pipeline : public holoscan::Application {
     // Optional GPU stages between unpack and pack, each enabled by its own parameters:
     //   sharpen: luma unsharp amount (SPARK_SHARPEN, 0 = off)
     //   procamp: brightness/contrast/saturation/hue (SPARK_PA_BRIGHT/CONTRAST/SAT/HUE; neutral = off)
-    // Default order frc,scale,sharpen,procamp — flow estimation at native input resolution, sharpen
-    // at the delivery resolution, levels trimmed last. SPARK_FILTERS overrides the set/order
-    // explicitly (comma list of frc|scale|sharpen|procamp; unpack/pack/tx stay implicit).
+    // Default order nr,frc,scale,sharpen,procamp — denoise then flow estimation at native input
+    // resolution, sharpen at the delivery resolution, levels trimmed last. SPARK_FILTERS overrides
+    // the set/order explicitly (comma list of nr|frc|scale|sharpen|procamp|grain|delay; unpack/
+    // pack/tx stay implicit).
     const double sharpen_amt = std::atof(env("SPARK_SHARPEN", "0").c_str());
     const double pa_bright = std::atof(env("SPARK_PA_BRIGHT", "0").c_str());
     // 0/negative contrast+saturation read as "unset" -> neutral: a proto3/JSON config that omits the
@@ -171,23 +172,87 @@ class St2110Pipeline : public holoscan::Application {
     const double pa_hue = std::atof(env("SPARK_PA_HUE", "0").c_str());
     const bool with_procamp =
         pa_bright != 0.0 || pa_contrast != 1.0 || pa_sat != 1.0 || pa_hue != 0.0;
+    // Spatial noise reduction (NrOp): edge-preserving bilateral, separate luma/chroma strengths
+    // 0..1 (0 = that plane untouched; both 0 = stage off).
+    const double nr_luma = std::atof(env("SPARK_NR_LUMA", "0").c_str());
+    const double nr_chroma = std::atof(env("SPARK_NR_CHROMA", "0").c_str());
+    // Film grain (GrainOp): amount 0..1 (0 = stage off), cell size 1..4 px, mono|color. 0/negative
+    // size reads as "unset" -> the 1.5 default (proto3 zero-default, same rationale as contrast).
+    const double grain_amt = std::atof(env("SPARK_GRAIN", "0").c_str());
+    double grain_size = std::atof(env("SPARK_GRAIN_SIZE", "1.5").c_str());
+    if (grain_size <= 0.0) grain_size = 1.5;
+    std::string grain_mode = env("SPARK_GRAIN_MODE", "mono");
+    if (grain_mode != "color") grain_mode = "mono";
+    // A/V delay: a SCHEDULE-level stage, not a frame op. Video delay rides the fixed latency L
+    // (wire = capture + L + Dv for both essences), audio delay rides the A/V offset — so audio
+    // lands at capture + L + Da. Gated on the 'delay' chain token below; needs fixed-latency mode.
+    double delay_v_ms = std::atof(env("SPARK_DELAY_VIDEO_MS", "0").c_str());
+    double delay_a_ms = std::atof(env("SPARK_DELAY_AUDIO_MS", "0").c_str());
+    // Config/env arrive unvalidated; a negative value would hit UB in the uint64 schedule casts
+    // below (wrap on x86, saturate-to-0 on aarch64 — either desyncs latency_ns from latency_ms
+    // and av_offset). 1000 ms is the panel's advertised max and what AudioBridge is sized for.
+    // The !(>=0) form also catches NaN.
+    for (double* d : {&delay_v_ms, &delay_a_ms}) {
+      if (!(*d >= 0.0 && *d <= 1000.0)) {
+        const double c = (*d > 0.0) ? 1000.0 : 0.0;
+        HOLOSCAN_LOG_WARN("delay: {} ms out of range — clamped to {}", *d, c);
+        *d = c;
+      }
+    }
     std::string filters = env("SPARK_FILTERS", "");
     if (filters.empty()) {
-      filters = with_frc ? "frc,scale" : "scale";
+      // NR first: denoise at the input rate BEFORE flow estimation/interpolation — half the NR
+      // invocations in 2x modes, and NVOF matches clean frames instead of noise.
+      filters = (nr_luma > 0.0 || nr_chroma > 0.0) ? "nr," : "";
+      if (with_frc) filters += "frc,";
+      filters += "scale";
       if (sharpen_amt > 0.0) filters += ",sharpen";
       if (with_procamp) filters += ",procamp";
+      if (grain_amt > 0.0) filters += ",grain";
+      if (delay_v_ms > 0.0 || delay_a_ms > 0.0) filters += ",delay";
     }
+    auto chain_has = [&filters](const char* want) {
+      std::stringstream ss(filters);
+      for (std::string tok; std::getline(ss, tok, ',');)
+        if (tok == want) return true;
+      return false;
+    };
+    // Resolve the delay marker before anything consumes latency_ns: the standing frame store
+    // (q_depth), the TX schedule, and the audio relay all read the adjusted values.
+    const bool with_delay = chain_has("delay");
+    if (with_delay) {
+      if (latency_ns == 0) {
+        HOLOSCAN_LOG_WARN(
+            "delay: requires the fixed-latency schedule (SPARK_LATENCY_MS>0) — ignored");
+      } else {
+        latency_ms += delay_v_ms;  // q_depth (the standing frame store) sizes from this too
+        latency_ns += static_cast<uint64_t>(delay_v_ms * 1e6);
+        av_offset_ns += static_cast<int64_t>((delay_a_ms - delay_v_ms) * 1e6);
+        HOLOSCAN_LOG_INFO("delay: video +{} ms, audio +{} ms (L -> {} ms, av_offset -> {} ms)",
+                          delay_v_ms, delay_a_ms, latency_ns / 1e6, av_offset_ns / 1e6);
+      }
+    }
+
+    // FRC is active only when BOTH hold: mode > 0 AND 'frc' in the effective chain. A mode left
+    // staged in the config (SPARK_FRC>0) while the chain omits the token must not double the TX
+    // rate — the chain would emit base_fps frames against a 2x pacer and skip half the schedule.
+    const bool frc_active = with_frc && chain_has("frc");
+    // Up-convert doubles the media rate; the TX pacer + RTP media clock track out_fps (e.g. 30->60).
+    const double out_fps = (frc_active && frc_2x) ? base_fps * 2.0 : base_fps;
 
     // Announce which op receives FRC's multi-frame burst (the only hop that needs burst-deep input
     // capacity; see pipeline_queue_cap). Must happen BEFORE any make_operator — setup() runs there.
     {
       std::string sink;
-      if (with_frc) {
+      if (frc_active) {
         std::stringstream pre(filters);
         std::map<std::string, int> seen_pre;
         bool after_frc = false;
         for (std::string tok; std::getline(pre, tok, ',');) {
-          if (tok != "frc" && tok != "scale" && tok != "sharpen" && tok != "procamp") continue;
+          // real GpuFrame operators only — 'delay' is a schedule marker, never an input queue
+          if (tok != "frc" && tok != "scale" && tok != "sharpen" && tok != "procamp" &&
+              tok != "grain" && tok != "nr")
+            continue;
           const int nth = seen_pre[tok]++;
           const std::string name = nth ? tok + std::to_string(nth + 1) : tok;
           if (after_frc) {
@@ -302,11 +367,30 @@ class St2110Pipeline : public holoscan::Application {
         chain.push_back(make_operator<ops::ProcAmpOp>(
             name, Arg("brightness", pa_bright), Arg("contrast", pa_contrast),
             Arg("saturation", pa_sat), Arg("hue_deg", pa_hue)));
+      } else if (tok == "nr") {
+        chain.push_back(make_operator<ops::NrOp>(name, Arg("luma", nr_luma),
+                                                 Arg("chroma", nr_chroma)));
+      } else if (tok == "grain") {
+        chain.push_back(make_operator<ops::GrainOp>(name, Arg("amount", grain_amt),
+                                                    Arg("size", grain_size),
+                                                    Arg("mode", grain_mode)));
+      } else if (tok == "delay") {
+        continue;  // schedule-level stage, already folded into latency/av_offset above
       } else {
         HOLOSCAN_LOG_WARN("chain: unknown filter '{}' in SPARK_FILTERS — skipping", tok);
         continue;
       }
       composed += " -> " + name;
+    }
+    // An explicit chain with no 'scale' would put input-raster frames on a wire whose SDP/NMOS
+    // manifest advertises out_w x out_h — a raster mismatch every receiver rejects. ResizeOp is a
+    // passthrough at 1:1, so appending one is always safe.
+    if (!seen.count("scale")) {
+      HOLOSCAN_LOG_WARN("chain: no 'scale' stage — appending one (the advertised raster is {}x{})",
+                        ow, oh);
+      chain.push_back(make_operator<ops::ResizeOp>("scale", Arg("out_width", ow),
+                                                   Arg("out_height", oh), Arg("interp", interp)));
+      composed += " -> scale";
     }
     chain.push_back(pack);
     add_flow(rx, unpack);

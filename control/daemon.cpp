@@ -56,9 +56,8 @@ struct State {
     config.set_out_width(3840);
     config.set_out_height(2160);
     config.set_interp("auto");  // supersampling on downscale, cubic on upscale, 1:1 passthrough
-    config.set_frc(true);
-    config.set_frc_mode(1);  // 1=retime; web UI / NMOS can pick 2=up-convert (30->60) or
-                             // 3=uniform-grid up-convert (2x on a rigid grid; erratic-source-proof)
+    // FRC defaults OFF (frc=false, frc_mode=0 via proto3 defaults) — enable per run from the web
+    // UI / NMOS (1=retime, 2=up-convert 30->60, 3=uniform-grid up-convert).
     config.set_pa_contrast(1.0);    // proc amp neutral (0 would read as "unset" -> 1.0 anyway)
     config.set_pa_saturation(1.0);
     config.set_rx_pci("0000:01:00.0");
@@ -224,6 +223,14 @@ bool start_locked(State& s, std::string& msg) {
     setenv("SPARK_PA_CONTRAST", std::to_string(c.pa_contrast()).c_str(), 1);
     setenv("SPARK_PA_SAT", std::to_string(c.pa_saturation()).c_str(), 1);
     setenv("SPARK_PA_HUE", std::to_string(c.pa_hue_deg()).c_str(), 1);
+    // Spatial NR, film grain + A/V delay (0 grain size/mode = unset -> engine defaults 1.5/mono).
+    setenv("SPARK_NR_LUMA", std::to_string(c.nr_luma()).c_str(), 1);
+    setenv("SPARK_NR_CHROMA", std::to_string(c.nr_chroma()).c_str(), 1);
+    setenv("SPARK_GRAIN", std::to_string(c.grain()).c_str(), 1);
+    setenv("SPARK_GRAIN_SIZE", std::to_string(c.grain_size()).c_str(), 1);
+    setenv("SPARK_GRAIN_MODE", c.grain_mode().c_str(), 1);
+    setenv("SPARK_DELAY_VIDEO_MS", std::to_string(c.delay_video_ms()).c_str(), 1);
+    setenv("SPARK_DELAY_AUDIO_MS", std::to_string(c.delay_audio_ms()).c_str(), 1);
     setenv("SPARK_FILTERS", c.filters().c_str(), 1);
     setenv("SPARK_RX_PCI", c.rx_pci().c_str(), 1);
     setenv("SPARK_TX_PCI", c.tx_pci().c_str(), 1);
@@ -348,6 +355,61 @@ std::string json_of(const google::protobuf::Message& m) {
   google::protobuf::util::MessageToJsonString(m, &s, o);
   return s;
 }
+
+// ---------------- /api/filters — filter-chain descriptors ----------------
+// The dashboard's Filter chain panel renders entirely from these (REDStreamer-style): each entry
+// is one GPU stage of the M9 chain with its UI params; `cfg` names the PipelineConfig JSON field a
+// param maps to. Adding a stage here (+ its engine op + env plumbing in start_locked) puts it in
+// the GUI with zero JS changes. Membership + order travel as the config `filters` token list.
+const char* kFilterCatalog = R"json({"filters":[
+{"name":"nr","label":"Noise reduction",
+ "tip":"Edge-preserving spatial denoise (5×5 bilateral) with separate luma / chroma strengths; 0 leaves that plane untouched. Runs best first — before FRC (optical flow matches clean frames, at the input rate) and before Scale, at the native input resolution where the noise lives.",
+ "params":[
+  {"key":"luma","label":"Luma","type":"slider","cfg":"nrLuma","min":0,"max":1,"step":0.01,"digits":2},
+  {"key":"chroma","label":"Chroma","type":"slider","cfg":"nrChroma","min":0,"max":1,"step":0.01,"digits":2}]},
+{"name":"frc","label":"FRC — motion interpolation",
+ "tip":"Motion-compensated frame-rate conversion (NVOF). Runs at native input resolution, before scale.",
+ "params":[
+  {"key":"mode","label":"Mode","type":"select","cfg":"frcMode","choices":[
+   {"value":1,"label":"retime (1:1)"},
+   {"value":2,"label":"up-convert 2×"},
+   {"value":3,"label":"up-convert 2× — uniform grid"}]}]},
+{"name":"scale","label":"Scale","required":true,
+ "tip":"Resize to the delivery resolution (always on: the output raster advertised on the wire/SDP rides Width×Height). auto = anti-aliased supersampling on downscale, cubic on upscale, passthrough at 1:1.",
+ "params":[
+  {"key":"out_width","label":"Width","type":"number","cfg":"outWidth","int":true,"min":320,"max":7680,"step":2},
+  {"key":"out_height","label":"Height","type":"number","cfg":"outHeight","int":true,"min":240,"max":4320,"step":2},
+  {"key":"interp","label":"Interpolation","type":"select","cfg":"interp","choices":[
+   {"value":"auto","label":"auto"},{"value":"cubic","label":"cubic"},
+   {"value":"linear","label":"linear"},{"value":"lanczos","label":"lanczos"},
+   {"value":"super","label":"super (AA downscale)"},
+   {"value":"fsrcnn","label":"fsrcnn (AI ×2)"},
+   {"value":"fsrcnn-s","label":"fsrcnn-s (AI ×2 fast)"},
+   {"value":"espcn","label":"espcn (AI ×2)"}]}]},
+{"name":"sharpen","label":"Sharpen",
+ "tip":"Luma unsharp mask at the delivery resolution. 0 = identity.",
+ "params":[
+  {"key":"amount","label":"Amount","type":"slider","cfg":"sharpen","min":0,"max":4,"step":0.05,"digits":2}]},
+{"name":"procamp","label":"Proc amp",
+ "tip":"Classic video corrector on the native 10-bit YCbCr. Neutral = 0 / 1 / 1 / 0.",
+ "params":[
+  {"key":"brightness","label":"Brightness","type":"slider","cfg":"paBrightness","min":-1,"max":1,"step":0.01,"digits":2},
+  {"key":"contrast","label":"Contrast","type":"slider","cfg":"paContrast","min":0,"max":4,"step":0.05,"digits":2,"unset_to":1},
+  {"key":"saturation","label":"Saturation","type":"slider","cfg":"paSaturation","min":0,"max":4,"step":0.05,"digits":2,"unset_to":1},
+  {"key":"hue","label":"Hue (°)","type":"slider","cfg":"paHueDeg","min":-180,"max":180,"step":1,"digits":0}]},
+{"name":"grain","label":"Film grain",
+ "tip":"Photochemical-style grain: strongest in the mid-tones, vanishing at pure black/white, re-drawn every frame. mono = one luma grain field (silver-halide look); color adds independent chroma fields (color-negative look). Size is the grain cell in pixels.",
+ "params":[
+  {"key":"mode","label":"Mode","type":"select","cfg":"grainMode","choices":[
+   {"value":"mono","label":"mono"},{"value":"color","label":"color"}]},
+  {"key":"amount","label":"Amount","type":"slider","cfg":"grain","min":0,"max":1,"step":0.01,"digits":2},
+  {"key":"size","label":"Size (px)","type":"slider","cfg":"grainSize","min":1,"max":4,"step":0.25,"digits":2,"unset_to":1.5}]},
+{"name":"delay","label":"A/V delay",
+ "tip":"Schedule-level delay, not a GPU stage: each essence's wire time shifts independently on top of the fixed capture→wire latency L (video → L + video ms, audio → L + audio ms — audio-only is a lip-sync trim). Requires fixed-latency mode (default L = 105 ms); video delay grows the RX frame store accordingly.",
+ "params":[
+  {"key":"video_ms","label":"Video (ms)","type":"slider","cfg":"delayVideoMs","min":0,"max":1000,"step":5,"digits":0},
+  {"key":"audio_ms","label":"Audio (ms)","type":"slider","cfg":"delayAudioMs","min":0,"max":1000,"step":5,"digits":0}]}
+]})json";
 
 const char* ctype(const std::string& path) {
   if (path.size() > 5 && path.substr(path.size() - 5) == ".html") return "text/html";
@@ -585,11 +647,21 @@ MHD_Result http_handler(void*, struct MHD_Connection* conn, const char* url, con
         msg = "cannot change config while running";
       } else {
         SetConfigRequest req;
+        // Strict parse first, so a typo'd key is never silently dropped; only unknown fields
+        // (a newer dashboard posting fields this build lacks) fall back to the lenient parse,
+        // and the ack message flags them so version skew / misspellings stay visible.
         auto st = google::protobuf::util::JsonStringToMessage(*owned, req.mutable_config());
+        if (!st.ok()) {
+          req.Clear();
+          google::protobuf::util::JsonParseOptions jopt;
+          jopt.ignore_unknown_fields = true;
+          st = google::protobuf::util::JsonStringToMessage(*owned, req.mutable_config(), jopt);
+          if (st.ok()) msg = "config updated (unknown fields ignored — dashboard/daemon version skew or a typo?)";
+        }
         if (st.ok()) {
           g_state.config = req.config();
           ack.set_ok(true);
-          msg = "config updated";
+          if (msg.empty()) msg = "config updated";
         } else {
           ack.set_ok(false);
           msg = "bad JSON config";
@@ -604,6 +676,7 @@ MHD_Result http_handler(void*, struct MHD_Connection* conn, const char* url, con
 
   // GET
   if (u == "/api/nmos") return nmos_proxy(conn, "GET", "");
+  if (u == "/api/filters") return reply(conn, 200, kFilterCatalog, "application/json");
   if (u == "/api/status") {
     std::lock_guard<std::mutex> lk(g_state.mu);
     return reply(conn, 200, json_of(build_status_locked(g_state)), "application/json");

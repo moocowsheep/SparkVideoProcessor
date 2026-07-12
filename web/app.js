@@ -1,108 +1,496 @@
-// Spark Video Processor dashboard.
-//   * Engine control: talks to the control daemon's HTTP/JSON API (/api/*).
-//   * Discover: talks DIRECTLY to the NMOS registry (IS-04 Query API) and our NMOS node (IS-05
-//     Connection API) — both CORS-enabled — to list 2110 senders and route one to this processor.
+// Spark Video Processor dashboard (REDStreamer-style).
+//   * Engine control: HTTP/JSON to the control daemon (/api/*), 1 s status poll.
+//   * Filter chain: the panel renders entirely from /api/filters descriptors (same idea as the
+//     REDStreamer filters panel — a new stage appears here with zero JS changes). The chain array
+//     (membership + order) maps onto config.filters; per-stage params map onto their config fields.
+//     The daemon locks config while the engine runs, so edits apply at the next pipeline start.
+//   * Routing: NMOS registry (IS-04) + nodes (IS-05) via the daemon's same-origin /api/nmos proxy.
 // protobuf JSON: enums are strings, fields are camelCase, 64-bit ints are strings.
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const CFG = ['profile', 'interp', 'out_width', 'out_height', 'frc_mode', 'ip10', 'frames',
-  'sharpen', 'pa_brightness', 'pa_contrast', 'pa_saturation', 'pa_hue_deg',
-  'rx_pci', 'tx_pci', 'dst_mac', 'in_ip10', 'filters'];
-const CAMEL = { out_width: 'outWidth', out_height: 'outHeight', frc_mode: 'frcMode', rx_pci: 'rxPci',
-  tx_pci: 'txPci', dst_mac: 'dstMac', in_ip10: 'inIp10', pa_brightness: 'paBrightness',
-  pa_contrast: 'paContrast', pa_saturation: 'paSaturation', pa_hue_deg: 'paHueDeg' };
-// float-valued config (proc amp / sharpen) — parseInt would truncate 0.85 to 0
-const FLOAT = new Set(['sharpen', 'pa_brightness', 'pa_contrast', 'pa_saturation', 'pa_hue_deg']);
-let formLoaded = false;
-// Last full config from /api/status. The form covers only the processing knobs, but /api/config
-// REPLACES the daemon's whole config — posting the bare form would wipe the NMOS/SDP-derived
-// routing fields (rxMcastGroup, rxSrcIp, in* format, tx*...), so Save overlays the form onto this.
-let lastConfig = null;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
   return r.json();
 }
 
-// ---------------- engine config (control daemon) ----------------
+// ---------------- engine config model ----------------
+// Simple (non-filter) form fields; the filter panel owns the rest via descriptors.
+const SIMPLE = ['profile', 'frames', 'ip10', 'in_ip10', 'rx_pci', 'tx_pci', 'dst_mac'];
+const CAMEL = { in_ip10: 'inIp10', rx_pci: 'rxPci', tx_pci: 'txPci', dst_mac: 'dstMac' };
+
+let CATALOG = null;     // filter descriptors from /api/filters (or the fallback below)
+let catalogIsFallback = false;  // pre-/api/filters daemon: post only the fields its proto knows
+// Display order is decoupled from enablement so toggling a filter never moves its row:
+// `order` is the top-to-bottom row order of ALL filters, `enabled` marks which ones run.
+// The wire chain (config.filters) = the enabled subset of `order`, in order.
+let order = [];
+let enabled = new Set();
+const chainNow = () => order.filter((n) => enabled.has(n));
+const sliders = {};     // cfg key -> {update(v), setDisabled(b)}
+let formLoaded = false;
+let dirty = false;      // unsaved edits: the poll must not clobber them
+// Which fields were edited (cfg keys / simple ids; '#chain' = membership/order). Edits staged
+// while the daemon is down/restarting survive the first fillForm — it skips exactly these.
+const edited = new Set();
+let running = false;
+// Last full config from /api/status. /api/config REPLACES the daemon's whole config — posting the
+// bare form would wipe the NMOS/SDP-derived routing fields (rxMcastGroup, in* format, tx*...), so
+// Save overlays the form onto this.
+let lastConfig = null;
+
+// Catalog for a daemon binary too old to serve /api/filters. Such a build predates NR, grain,
+// delay and filterOrder, and its /api/config parses strictly (unknown JSON keys reject the whole
+// POST) — so this deliberately lists ONLY the stages that daemon's proto knows, and readForm
+// gates the newer fields on catalogIsFallback. cfg = the PipelineConfig JSON key a param maps to.
+const FALLBACK_CATALOG = [
+  { name: 'frc', label: 'FRC — motion interpolation',
+    tip: 'Motion-compensated frame-rate conversion (NVOF). Runs at native input resolution, before scale.',
+    params: [
+      { key: 'mode', label: 'Mode', type: 'select', cfg: 'frcMode', choices: [
+        { value: 1, label: 'retime (1:1)' },
+        { value: 2, label: 'up-convert 2×' },
+        { value: 3, label: 'up-convert 2× — uniform grid' }] }] },
+  { name: 'scale', label: 'Scale', required: true,
+    tip: 'Resize to the delivery resolution (always on: the output raster advertised on the wire/SDP rides Width×Height). auto = anti-aliased supersampling on downscale, cubic on upscale, passthrough at 1:1.',
+    params: [
+      { key: 'out_width', label: 'Width', type: 'number', cfg: 'outWidth', int: true, min: 320, max: 7680, step: 2 },
+      { key: 'out_height', label: 'Height', type: 'number', cfg: 'outHeight', int: true, min: 240, max: 4320, step: 2 },
+      { key: 'interp', label: 'Interpolation', type: 'select', cfg: 'interp', choices: [
+        { value: 'auto', label: 'auto' }, { value: 'cubic', label: 'cubic' },
+        { value: 'linear', label: 'linear' }, { value: 'lanczos', label: 'lanczos' },
+        { value: 'super', label: 'super (AA downscale)' },
+        { value: 'fsrcnn', label: 'fsrcnn (AI ×2)' },
+        { value: 'fsrcnn-s', label: 'fsrcnn-s (AI ×2 fast)' },
+        { value: 'espcn', label: 'espcn (AI ×2)' }] }] },
+  { name: 'sharpen', label: 'Sharpen',
+    tip: 'Luma unsharp mask at the delivery resolution. 0 = identity.',
+    params: [
+      { key: 'amount', label: 'Amount', type: 'slider', cfg: 'sharpen', min: 0, max: 4, step: 0.05, digits: 2 }] },
+  { name: 'procamp', label: 'Proc amp',
+    tip: 'Classic video corrector on the native 10-bit YCbCr. Neutral = 0 / 1 / 1 / 0.',
+    params: [
+      { key: 'brightness', label: 'Brightness', type: 'slider', cfg: 'paBrightness', min: -1, max: 1, step: 0.01, digits: 2 },
+      { key: 'contrast', label: 'Contrast', type: 'slider', cfg: 'paContrast', min: 0, max: 4, step: 0.05, digits: 2, unset_to: 1 },
+      { key: 'saturation', label: 'Saturation', type: 'slider', cfg: 'paSaturation', min: 0, max: 4, step: 0.05, digits: 2, unset_to: 1 },
+      { key: 'hue', label: 'Hue (°)', type: 'slider', cfg: 'paHueDeg', min: -180, max: 180, step: 1, digits: 0 }] },
+];
+
+function markDirty(key) {
+  if (running) return;
+  dirty = true;
+  if (key) edited.add(key);
+  $('msg').textContent = 'unsaved changes — Save applies at next start';
+}
+
+// ---------------- widgets ----------------
+function setChip(el, text, cls) {
+  el.textContent = text;
+  el.classList.remove('on', 'off', 'warn');
+  if (cls) el.classList.add(cls);
+}
+
+function mkSlider(el, { label, cfg, min, max, step, digits = 2 }) {
+  el.innerHTML = `
+    <div class="top"><label>${label}</label><input type="number" id="fp-${cfg}"></div>
+    <input type="range">`;
+  const num = el.querySelector('input[type=number]');
+  const rng = el.querySelector('input[type=range]');
+  for (const i of [num, rng]) { i.min = min; i.max = max; i.step = step; }
+  rng.addEventListener('input', () => {
+    num.value = Number(rng.value).toFixed(digits);
+    markDirty(cfg);
+  });
+  num.addEventListener('change', () => {
+    const v = Math.min(max, Math.max(min, Number(num.value) || 0));
+    num.value = Number(v).toFixed(digits);
+    rng.value = v;
+    markDirty(cfg);
+  });
+  sliders[cfg] = {
+    update(v) { rng.value = v; num.value = Number(v).toFixed(digits); },
+    setDisabled(b) { el.classList.toggle('disabled', b); num.disabled = rng.disabled = b; },
+  };
+}
+
+// ---------------- filter chain panel ----------------
+// Rows keep their position when toggled: enabling a filter inserts it into the chain at its
+// displayed spot, disabling collapses it in place. Only the ▲▼ buttons reorder (any row, so a
+// disabled row's future position can be staged too). Disabled filters keep their params.
+
+async function loadCatalog() {
+  try {
+    const j = await api('/api/filters');
+    CATALOG = Array.isArray(j.filters) && j.filters.length ? j.filters : FALLBACK_CATALOG;
+  } catch {
+    CATALOG = FALLBACK_CATALOG;
+  }
+  catalogIsFallback = CATALOG === FALLBACK_CATALOG;
+  buildFilterPanel();
+}
+
+function buildFilterPanel() {
+  const list = $('filter-list');
+  list.innerHTML = '';
+  for (const d of CATALOG) {
+    const row = document.createElement('div');
+    row.className = 'frow off';
+    row.id = `frow-${d.name}`;
+
+    const head = document.createElement('div');
+    head.className = 'fhead';
+    head.title = d.tip || '';
+    // required stages (scale) can't be unchecked: the chain must always carry one — see deriveChain
+    head.innerHTML = `
+      <label class="toggle"><input type="checkbox" id="fen-${d.name}"${d.required ? ' checked disabled' : ''}><span>${d.label}</span></label>
+      <button class="fmove" id="fup-${d.name}" title="run earlier">&#9650;</button>
+      <button class="fmove" id="fdn-${d.name}" title="run later">&#9660;</button>`;
+    row.appendChild(head);
+
+    const body = document.createElement('div');
+    body.className = 'fbody';
+    for (const p of d.params || []) {
+      if (p.type === 'slider') {
+        const div = document.createElement('div');
+        div.className = 'slider';
+        body.appendChild(div);
+        mkSlider(div, { label: p.label, cfg: p.cfg, min: p.min, max: p.max, step: p.step, digits: p.digits ?? 2 });
+      } else {
+        const r = document.createElement('div');
+        r.className = 'row';
+        const id = `fp-${p.cfg}`;
+        r.innerHTML = p.type === 'select'
+          ? `<label for="${id}">${p.label}</label><select id="${id}"></select>`
+          : `<label for="${id}">${p.label}</label><input type="number" id="${id}" min="${p.min ?? 0}" max="${p.max ?? ''}" step="${p.step ?? 1}">`;
+        body.appendChild(r);
+        if (p.type === 'select') {
+          const sel = r.querySelector('select');
+          for (const c of p.choices || []) {
+            const o = document.createElement('option');
+            o.value = String(c.value);
+            o.textContent = c.label;
+            sel.appendChild(o);
+          }
+        }
+        r.querySelector('select, input').addEventListener('change', () => markDirty(p.cfg));
+      }
+    }
+    row.appendChild(body);
+    list.appendChild(row);
+
+    $(`fen-${d.name}`).addEventListener('change', () => {
+      if ($(`fen-${d.name}`).checked) enabled.add(d.name);
+      else enabled.delete(d.name);
+      markDirty('#chain');
+      applyChainState();
+    });
+    $(`fup-${d.name}`).addEventListener('click', () => moveFilter(d.name, -1));
+    $(`fdn-${d.name}`).addEventListener('click', () => moveFilter(d.name, +1));
+  }
+  // Placeholder state until the first config fill: full catalog order, required stages on. This
+  // also makes edits staged while the daemon is down coherent (chainNow needs a real row order).
+  order = CATALOG.map((d) => d.name);
+  enabled = new Set(CATALOG.filter((d) => d.required).map((d) => d.name));
+  applyChainState();
+}
+
+function moveFilter(name, dir) {
+  const i = order.indexOf(name);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= order.length) return;
+  [order[i], order[j]] = [order[j], order[i]];
+  markDirty('#chain');
+  applyChainState();
+}
+
+function applyChainState() {
+  if (!CATALOG) return;
+  const list = $('filter-list');
+  // Only reorder when the DOM differs: this runs from the 1 s poll, and moving a node
+  // (appendChild) closes its open <select> popup mid-click.
+  const cur = [...list.children].map((el) => el.id.replace('frow-', ''));
+  if (order.some((n, i) => cur[i] !== n)) {
+    for (const n of order) {
+      const row = $(`frow-${n}`);
+      if (row) list.appendChild(row);  // appendChild moves existing nodes
+    }
+  }
+  for (const d of CATALOG) {
+    const i = order.indexOf(d.name);
+    $(`frow-${d.name}`).classList.toggle('off', !enabled.has(d.name));
+    $(`fen-${d.name}`).checked = enabled.has(d.name);
+    $(`fup-${d.name}`).disabled = running || i <= 0;
+    $(`fdn-${d.name}`).disabled = running || i === order.length - 1;
+  }
+}
+
+// config.filters -> chain array. Empty/absent = the engine's automatic composition (mirror
+// st2110_pipeline: nr then frc at the input resolution/rate, scale always, sharpen when amount>0,
+// procamp when non-neutral). The GUI dedupes; hand-set duplicates ("procamp,procamp") stay an
+// API-only feature (readForm preserves such chains verbatim).
+function deriveChain(c) {
+  const known = new Set(CATALOG.map((d) => d.name));
+  const required = CATALOG.filter((d) => d.required).map((d) => d.name);
+  const f = (c.filters || '').trim();
+  if (f) {
+    const seen = new Set();
+    const ch = f.split(',').map((t) => t.trim())
+      .filter((t) => known.has(t) && !seen.has(t) && seen.add(t))
+      // mirror the engine: an 'frc' token with mode 0 is skipped there, so show the row disabled
+      .filter((t) => t !== 'frc' || +c.frcMode > 0 || c.frc);
+    // mirror the engine's guard: a chain with no 'scale' gets one appended
+    for (const r of required) if (!ch.includes(r)) ch.push(r);
+    return ch;
+  }
+  const ch = [];
+  if (+c.nrLuma > 0 || +c.nrChroma > 0) ch.push('nr');
+  if (+c.frcMode > 0 || c.frc) ch.push('frc');
+  ch.push('scale');
+  if (+c.sharpen > 0) ch.push('sharpen');
+  const contrast = +c.paContrast > 0 ? +c.paContrast : 1;
+  const sat = +c.paSaturation > 0 ? +c.paSaturation : 1;
+  if (+c.paBrightness !== 0 || contrast !== 1 || sat !== 1 || +c.paHueDeg !== 0) ch.push('procamp');
+  if (+c.grain > 0) ch.push('grain');
+  if (+c.delayVideoMs > 0 || +c.delayAudioMs > 0) ch.push('delay');
+  return ch;
+}
+
+// ---------------- config <-> form ----------------
 function fillForm(c) {
-  for (const id of CFG) {
+  if (!CATALOG) return;  // catalog not loaded yet; retry on the next poll
+  for (const id of SIMPLE) {
+    if (edited.has(id)) continue;  // staged (e.g. daemon-was-down) edits win until saved
     const el = $(id);
     const v = c[CAMEL[id] || id];
     if (v === undefined) continue;
     if (el.type === 'checkbox') el.checked = !!v;
     else el.value = v;
   }
+  for (const d of CATALOG) {
+    for (const p of d.params || []) {
+      if (edited.has(p.cfg)) continue;
+      let v = c[p.cfg];
+      if (v === undefined) continue;
+      // proto3 zero-default: 0 for contrast/saturation (and frcMode) means "unset", not zero
+      if (p.unset_to !== undefined && !(+v > 0)) v = p.unset_to;
+      if (p.type === 'slider') sliders[p.cfg].update(+v);
+      // proto3 string default "" matches no <option> (the select would render blank), so keep
+      // the current choice for empty strings the same way 0 is skipped for numeric selects
+      else if (p.type === 'select') { if (typeof v === 'string' ? v !== '' : +v > 0) $(`fp-${p.cfg}`).value = String(v); }
+      else $(`fp-${p.cfg}`).value = v;
+    }
+  }
+  if (!edited.has('#chain')) {
+    const chain = deriveChain(c);
+    enabled = new Set(chain);
+    // Row order preference: (1) the persisted full order (config.filterOrder — covers disabled
+    // rows too), trusted only while its enabled subset agrees with the wire chain; (2) the current
+    // in-session order when it still expresses the chain (only enablement changed); (3) rebuilt by
+    // laying the chain across the enabled slots of the current order — disabled rows keep their
+    // (catalog-default) positions, so a fresh load leaves nr/frc ABOVE scale and ticking a row on
+    // composes the intended run order, not a chain-first order with every disabled row below it.
+    const known = new Set(CATALOG.map((d) => d.name));
+    const seen = new Set();
+    const saved = (c.filterOrder || '').split(',').map((t) => t.trim())
+      .filter((t) => known.has(t) && !seen.has(t) && seen.add(t));
+    if (saved.length && saved.filter((n) => enabled.has(n)).join() === chain.join()) {
+      order = [...saved, ...CATALOG.map((d) => d.name).filter((n) => !seen.has(n))];
+    } else {
+      const expressed = order.filter((n) => enabled.has(n));
+      if (!order.length || expressed.join() !== chain.join()) {
+        const base = order.length ? order : CATALOG.map((d) => d.name);
+        let k = 0;
+        order = base.map((n) => (enabled.has(n) && k < chain.length ? chain[k++] : n));
+        if (k < chain.length) order = order.concat(chain.slice(k));  // names a stale base lacked
+      }
+    }
+    applyChainState();
+  }
+  formLoaded = true;
 }
+
 function readForm() {
   const c = {};
-  for (const id of CFG) {
+  for (const id of SIMPLE) {
     const el = $(id);
     const key = CAMEL[id] || id;
     if (el.type === 'checkbox') c[key] = el.checked;
-    else if (FLOAT.has(id)) c[key] = parseFloat(el.value) || 0;
-    else if (el.type === 'number' || id === 'frc_mode') c[key] = parseInt(el.value, 10) || 0;
+    else if (el.type === 'number') c[key] = parseInt(el.value, 10) || 0;
     else c[key] = el.value;
+  }
+  for (const d of CATALOG) {
+    for (const p of d.params || []) {
+      const el = $(`fp-${p.cfg}`);
+      if (p.type === 'select') {
+        const numeric = (p.choices || []).some((ch) => typeof ch.value === 'number');
+        c[p.cfg] = numeric ? Number(el.value) : el.value;
+      } else {
+        c[p.cfg] = p.int ? Math.round(Number(el.value) || 0) : Number(el.value) || 0;
+      }
+    }
+  }
+  // Chain membership + order = the enabled subset of the displayed row order. "," = explicitly-
+  // empty chain (the engine parses zero tokens; a truly empty string would re-trigger its automatic
+  // composition). A staged frcMode deliberately survives a disabled FRC row — the engine runs FRC
+  // only when the chain carries the 'frc' token, so membership alone turns it off.
+  const chain = chainNow();
+  // A hand-set filters string this panel can't express — duplicate stages ("procamp,procamp") or
+  // tokens from a newer build — is an API-only feature: leave the key out (Save overlays onto
+  // lastConfig, so it rides through verbatim) unless the chain was restructured right here.
+  const orig = (((lastConfig || {}).filters) || '').split(',').map((t) => t.trim()).filter(Boolean);
+  const known = new Set(CATALOG.map((d) => d.name));
+  const lossy = orig.length &&
+    (new Set(orig).size !== orig.length || orig.some((t) => !known.has(t)));
+  if (!lossy || edited.has('#chain')) {
+    c.filters = chain.length ? chain.join(',') : ',';
+    c.frc = chain.includes('frc');
+  }
+  if (catalogIsFallback) {
+    // Pre-/api/filters daemon+engine: there SPARK_FRC alone gates FRC (no chain-membership check,
+    // and the rate doubles with the mode), so a staged mode must be zeroed while the row is off.
+    // filterOrder doesn't exist in that proto — posting it would fail the strict parse.
+    c.frc = chain.includes('frc');
+    c.frcMode = c.frc ? (Number(c.frcMode) || 1) : 0;
+  } else {
+    c.filterOrder = order.join(',');  // full row order incl. disabled rows (GUI state; see proto)
   }
   return c;
 }
+
+// ---------------- status poll ----------------
 function renderStats(s) {
   const fixed = +s.fixedLatencyMs > 0;
-  const rows = [
-    ['RX frames', s.rxFrames], ['RX packets', s.rxPackets], ['RX lost', s.rxLost],
-    ['TX frames', s.txFrames], ['TX packets', s.txPackets],
-    ['TX future_err', s.txFutureErr], ['TX past_err', s.txPastErr],
-    ['TX skipped', s.txSkipped],
-    ['Latency', fixed ? `${s.fixedLatencyMs} ms fixed` : 'servo'],
-    ['Margin (µs)', fixed ? s.txMarginUs : '–'],
-    ['Pipe latency (µs)', s.pipeLatencyUs],
-    ['FRC interpolated', s.frcInterpolated], ['Ingest latency (µs)', (s.ingestLatencyUs || 0).toFixed(1)],
-    ['Audio RX pkts', s.audioRxPackets], ['Audio TX pkts', s.audioTxPackets],
-    ['Audio late/drop', s.audioLate],
-  ];
-  $('stats').innerHTML = rows.map(([k, v]) => {
-    const bad = (k === 'RX lost' && +v > 0) || (k === 'Audio late/drop' && +v > 0) ||
-                (k === 'Margin (µs)' && fixed && +v === 0);
-    return `<div class="stat"><span>${k}</span><b class="${bad ? 'bad' : ''}">${v ?? '–'}</b></div>`;
-  }).join('');
+  const put = (id, v, warn) => {
+    const el = $(id);
+    el.textContent = v;
+    el.classList.toggle('warn', !!warn);
+  };
+  put('st-rxf', s.rxFrames ?? 0);
+  put('st-rxlost', s.rxLost ?? 0, +s.rxLost > 0);
+  put('st-txf', s.txFrames ?? 0);
+  put('st-skip', s.txSkipped ?? 0, +s.txSkipped > 0);
+  put('st-errs', `${s.txPastErr ?? 0} / ${s.txFutureErr ?? 0}`, +s.txPastErr > 0 || +s.txFutureErr > 0);
+  put('st-frc', s.frcInterpolated ?? 0);
+  put('st-lat', fixed ? `${s.fixedLatencyMs} ms` : 'servo');
+  put('st-margin', fixed ? s.txMarginUs : '—', fixed && +s.txMarginUs === 0);
+  put('st-pipe', (+s.pipeLatencyUs / 1000 || 0).toFixed(1));
+  put('st-ingest', (+s.ingestLatencyUs || 0).toFixed(0));
+  put('st-audio', `${s.audioRxPackets ?? 0} / ${s.audioTxPackets ?? 0}`);
+  put('st-avlate', s.audioLate ?? 0, +s.audioLate > 0);
 }
+
+let lastRunning = null;  // called every poll tick: only touch the DOM on an actual transition
+function setRunning(r) {
+  if (!CATALOG) return;      // filter rows not built yet; retry on the next tick
+  if (r === lastRunning) return;
+  lastRunning = r;
+  running = r;
+  $('panel-format').classList.toggle('inactive', r);
+  $('panel-filters').classList.toggle('inactive', r);
+  for (const id of SIMPLE) $(id).disabled = r;
+  for (const d of CATALOG || []) {
+    $(`fen-${d.name}`).disabled = r || !!d.required;  // required stages are never toggleable
+    for (const p of d.params || []) {
+      if (p.type === 'slider') sliders[p.cfg].setDisabled(r);
+      else $(`fp-${p.cfg}`).disabled = r;
+    }
+  }
+  if (CATALOG) applyChainState();  // refresh the move buttons' disabled state
+  $('save').disabled = r;
+  const power = $('power');
+  power.textContent = r ? '■ STOP' : '▶ START';
+  power.classList.toggle('running', r);
+}
+
 async function poll() {
   let st;
-  try { st = await api('/api/status'); } catch { $('state').textContent = 'daemon offline'; return; }
+  try {
+    st = await api('/api/status');
+  } catch {
+    setChip($('conn'), 'offline', 'off');
+    // don't leave the last poll's 'running' chip + pulsing STOP up while the daemon is gone —
+    // the engine's real state is unknowable until the daemon answers again
+    setChip($('state'), 'unknown', 'warn');
+    $('meta').textContent = '';
+    setRunning(false);
+    return;
+  }
+  setChip($('conn'), 'online', 'on');
   const state = st.state || 'STOPPED';
-  const running = state === 'RUNNING';
-  const badge = $('state');
-  badge.textContent = state;
-  badge.className = 'badge ' + (running ? 'run' : state === 'ERRORED' ? 'err' : 'idle');
-  $('pid').textContent = st.pid > 0 ? st.pid : '–';
-  $('uptime').textContent = Math.round(st.uptimeS || 0);
-  $('msg').textContent = st.message || '';
+  setChip($('state'), state.toLowerCase(),
+          state === 'RUNNING' ? 'on' : state === 'ERRORED' ? 'off' : '');
+  const ptp = $('ptp');
+  ptp.hidden = !st.ptpGmid;
+  if (st.ptpGmid) ptp.textContent = `PTP ${st.ptpGmid}`;
+  $('meta').textContent = st.pid > 0 ? `pid ${st.pid} · ${Math.round(st.uptimeS || 0)}s` : '';
+  if (!dirty) $('msg').textContent = st.message || '';
   if (st.stats) renderStats(st.stats);
   if (st.config) lastConfig = st.config;
-  if (st.config && (!formLoaded || running)) { fillForm(st.config); formLoaded = true; }
-  for (const id of CFG) $(id).disabled = running;
-  $('save').disabled = running;
-  $('start').disabled = running;
-  $('stop').disabled = !running;
+  const run = state === 'RUNNING';
+  // First fill runs even with staged edits (fillForm skips exactly the edited fields); after
+  // that, only a running engine's (locked, IS-05-updatable) config keeps syncing in.
+  if (st.config && (!formLoaded || (run && !dirty))) fillForm(st.config);
+  setRunning(run);
 }
 
-$('save').onclick = async () => {
-  const a = await api('/api/config', { method: 'POST', body: JSON.stringify({ ...(lastConfig || {}), ...readForm() }) });
+async function saveConfig() {
+  // /api/config REPLACES the daemon's whole config: without lastConfig as the overlay base, a
+  // bare-form post would wipe the NMOS/SDP-derived routing fields. Refuse until a status arrived.
+  if (!lastConfig) {
+    $('msg').textContent = 'daemon config not loaded yet — cannot save';
+    return false;
+  }
+  let a;
+  try {
+    a = await api('/api/config', {
+      method: 'POST',
+      body: JSON.stringify({ ...lastConfig, ...readForm() }),
+    });
+  } catch {
+    $('msg').textContent = 'save failed: daemon unreachable';
+    return false;
+  }
+  if (a.ok) {
+    dirty = false;
+    edited.clear();
+  }
   $('msg').textContent = a.message || '';
-  poll();
-};
-$('start').onclick = async () => { const a = await api('/api/start', { method: 'POST', body: '' }); $('msg').textContent = a.message || ''; poll(); };
-$('stop').onclick = async () => { const a = await api('/api/stop', { method: 'POST', body: '' }); $('msg').textContent = a.message || ''; poll(); };
+  return !!a.ok;
+}
 
-// ---------------- NMOS discovery (registry OR mDNS proxy + node, direct) ----------------
+$('save').onclick = async () => { await saveConfig(); poll(); };
+$('power').onclick = async () => {
+  const power = $('power');
+  power.disabled = true;
+  try {
+    if (running) {
+      const a = await api('/api/stop', { method: 'POST', body: '' });
+      $('msg').textContent = a.message || '';
+    } else {
+      if (dirty && !(await saveConfig())) return;  // unsaved edits ride along on START
+      const a = await api('/api/start', { method: 'POST', body: '' });
+      $('msg').textContent = a.message || '';
+    }
+  } catch {
+    // a rejected fetch must not vanish into an unhandled rejection with the stale msg text
+    // still promising the action — the START/STOP did NOT happen
+    $('msg').textContent = (running ? 'stop' : 'start') + ' failed: daemon unreachable';
+  } finally {
+    power.disabled = false;
+    poll();
+  }
+};
+for (const id of SIMPLE) $(id).addEventListener('change', () => markDirty(id));
+
+// ---------------- NMOS discovery (registry OR mDNS proxy + node, via the daemon proxy) ----------
 // `registry` is the IS-04 Query API base the dashboard reads. In registry-free (P2P) mode it
 // points at the mDNS proxy (deploy/nmos_mdns_proxy.py), which browses _nmos-node._tcp and
 // re-serves the Query API shape — so no registry is needed. The Node base (IS-05) is unchanged.
 const NMOS = { registry: '', registryUrl: '', node: '', proxy: '', p2p: false, receivers: null, senders: null };
 
 // Facility NMOS registry (IS-04 Query API). External registry on registry-host.
-// Per-browser override: edit the Registry field in the Discover card (saved to localStorage).
+// Per-browser override: edit the Registry field in the Routing panel (saved to localStorage).
 const DEFAULT_REGISTRY = 'http://192.0.2.41:8010';
 
 function nmosDefaults() {
@@ -246,23 +634,28 @@ async function loadSources() {
   }
 
   // ---- inputs: external RTP senders we can route INTO the processor ----
-  // match the whole RTP family: urn:x-nmos:transport:rtp, rtp.mcast, rtp.ucast
-  const rtp = senders.filter((s) => (s.transport || '').split(':').pop().startsWith('rtp') && !ourSndIds.has(s.id));
+  // match the whole RTP family: urn:x-nmos:transport:rtp, rtp.mcast, rtp.ucast.
+  // ANC/data flows (e.g. Blackmagic smpte291) aren't routable here, so hide those — but a sender
+  // whose flow record is missing from the query result (pagination, propagation lag, proxy gap)
+  // must stay LISTED, not silently vanish from Discover: it renders as 'format unknown' below.
+  const kindOf = (s) => (((flowById[s.flow_id] || {}).format) || '').split(':').pop();
+  const rtp = senders.filter((s) => (s.transport || '').split(':').pop().startsWith('rtp') &&
+    !ourSndIds.has(s.id) && kindOf(s) !== 'data');
   box.innerHTML = rtp.length ? rtp.map((s) => {
     const fl = flowById[s.flow_id] || {};
     const media = fl.media_type || '';
-    const kind = (fl.format || '').split(':').pop();     // 'video' | 'audio' | ...
+    const kind = kindOf(s);                 // 'video' | 'audio' | '' (flow unresolved) | 'mux'...
     const routable = kind === 'video' || kind === 'audio';
-    const connected = !!connectedSender[s.id];
+    const connected = routable && !!connectedSender[s.id];
     const label = s.label || s.id.slice(0, 8);
     const btn = !routable
-      ? `<span class="hint">unsupported</span>`
+      ? `<span class="hint">${kind ? 'unsupported' : 'format unknown'}</span>`
       : connected
         ? `<button class="btn stop" data-disc="${ourRx[kind]}">Disconnect</button>`
         : `<button class="btn go" data-sender="${s.id}" data-kind="${kind}">Connect</button>`;
     return `<div class="src ${connected ? 'on' : ''}">
         <div class="src-main"><b>${label}</b><span class="src-fmt">${fmtLabel(media)}</span></div>
-        <div class="src-act">${connected ? '<span class="badge run">routed</span>' : ''}${btn}</div>
+        <div class="src-act">${connected ? '<span class="badge">routed</span>' : ''}${btn}</div>
       </div>`;
   }).join('') : '<p class="hint">no ST 2110 (RTP) senders discovered.</p>';
 
@@ -277,24 +670,27 @@ async function loadSources() {
   // Routing = PATCH the TARGET node's IS-05 with our sender's SDP (via the daemon proxy — the
   // Blackmagic connection APIs have no CORS). Its Connection API base comes from its device controls.
   for (const k of Object.keys(DESTS)) delete DESTS[k];
-  const drtp = receivers.filter((r) => (r.transport || '').split(':').pop().startsWith('rtp') && !ourRxIds.has(r.id));
+  // video/audio receivers only (ANC/data hidden, same as the input side)
+  const drtp = receivers.filter((r) => (r.transport || '').split(':').pop().startsWith('rtp') &&
+    !ourRxIds.has(r.id) &&
+    ((r.format || '').endsWith(':video') || (r.format || '').endsWith(':audio')));
   dbox.innerHTML = drtp.length ? drtp.map((r) => {
     const kind = (r.format || '').split(':').pop();
     const href = connectionHref(deviceById[r.device_id]);
-    const routable = (kind === 'video' || kind === 'audio') && !!href && !!ourSnd[kind];
+    const routable = !!href && !!ourSnd[kind];
     const sub = r.subscription || {};
     const fromUs = !!(sub.active && sub.sender_id && ourSndIds.has(sub.sender_id));
     const busy = !!(sub.active && sub.sender_id && !fromUs);  // routed to some other sender
     const label = r.label || r.id.slice(0, 8);
     DESTS[r.id] = { id: r.id, kind, href };
     const btn = !routable
-      ? `<span class="hint">${href ? 'unsupported' : 'no connection API'}</span>`
+      ? `<span class="hint">${href ? 'no engine sender' : 'no connection API'}</span>`
       : fromUs
         ? `<button class="btn stop" data-drop="${r.id}">Release</button>`
         : `<button class="btn go" data-dest="${r.id}">Send</button>`;
     return `<div class="src ${fromUs ? 'on' : ''}">
         <div class="src-main"><b>${label}</b><span class="src-fmt">${kind}${busy ? ' · routed elsewhere' : ''}</span></div>
-        <div class="src-act">${fromUs ? '<span class="badge run">receiving us</span>' : ''}${btn}</div>
+        <div class="src-act">${fromUs ? '<span class="badge">receiving us</span>' : ''}${btn}</div>
       </div>`;
   }).join('') : '<p class="hint">no ST 2110 (RTP) receivers discovered.</p>';
 
@@ -396,6 +792,6 @@ $('nmos_p2p').onchange = () => { saveNmosCfg(); refreshNmos(); };
 // ---------------- boot ----------------
 loadNmosCfg();
 refreshNmos();
-poll();
+loadCatalog().then(poll);
 setInterval(poll, 1000);
 setInterval(refreshNmos, 5000);

@@ -51,6 +51,29 @@ void cpu_unsharp(const std::vector<uint16_t>& y, std::vector<uint16_t>& yo, floa
     }
 }
 
+// Bilateral 5x5 reference, matching nr_y/nr_c: spatial sigma 1.5 px, range sigma 4 + 60*strength.
+void cpu_nr(const std::vector<uint16_t>& in, std::vector<uint16_t>& out, uint32_t w, uint32_t h,
+            float strength) {
+  const float sr = 4.0f + 60.0f * strength;
+  const float inv2sr2 = 1.0f / (2.0f * sr * sr);
+  for (int y = 0; y < (int)h; ++y)
+    for (int x = 0; x < (int)w; ++x) {
+      const float c = in[(size_t)y * w + x];
+      float acc = 0, wsum = 0;
+      for (int dy = -2; dy <= 2; ++dy)
+        for (int dx = -2; dx <= 2; ++dx) {
+          const int xx = std::min(std::max(x + dx, 0), (int)w - 1);
+          const int yy = std::min(std::max(y + dy, 0), (int)h - 1);
+          const float v = in[(size_t)yy * w + xx];
+          const float d = v - c;
+          const float wt = std::exp(-(dx * dx + dy * dy) / 4.5f) * std::exp(-d * d * inv2sr2);
+          acc += wt * v;
+          wsum += wt;
+        }
+      out[(size_t)y * w + x] = clamp10(acc / wsum);
+    }
+}
+
 // GPU float rounding may differ from the CPU by one code value right at the .5 boundary — allow ±1.
 int diff_count(const std::vector<uint16_t>& a, const std::vector<uint16_t>& b, int tol) {
   int bad = 0;
@@ -116,6 +139,81 @@ int main() {
   run_unsharp(0.f, "amount=0", true);
   run_unsharp(1.0f, "amount=1", false);
   run_unsharp(2.0f, "amount=2 (clamps)", false);
+
+  // NR vs the CPU bilateral reference. __expf on the GPU is a fast approximation, so the tap
+  // weights differ slightly from std::exp — allow ±2 code values instead of the usual ±1.
+  {
+    std::vector<uint16_t> ncb(nc), ncr(nc);
+    spark::filters::nr_y(dy, dyo, W, H, 0.6f, nullptr);
+    spark::filters::nr_c(dcb, dcr, dcbo, dcro, W, H, 0.8f, nullptr);
+    CK(cudaDeviceSynchronize());
+    CK(cudaMemcpy(gy.data(), dyo, ny * 2, cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(gcb.data(), dcbo, nc * 2, cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(gcr.data(), dcro, nc * 2, cudaMemcpyDeviceToHost));
+    cpu_nr(y, ry, W, H, 0.6f);
+    cpu_nr(cb, ncb, W / 2, H, 0.8f);
+    cpu_nr(cr, ncr, W / 2, H, 0.8f);
+    const int bad = diff_count(gy, ry, 2) + diff_count(gcb, ncb, 2) + diff_count(gcr, ncr, 2);
+    std::printf("nr      %-24s vs-ref bad=%d\n", "y=0.6 c=0.8", bad);
+    failures += bad;
+  }
+
+  // Grain is hash noise, so instead of a CPU reference: determinism (same seed -> bit-identical),
+  // frame-to-frame variation (different seed -> different field), the film response (black/white
+  // bit-exact, mid-tones perturbed within the amplitude bound), and mono leaving chroma to the
+  // caller while color writes both planes.
+  {
+    std::vector<uint16_t> g2(ny);
+    spark::filters::grain_y(dy, dyo, W, H, 1.0f, 1.5f, 7u, nullptr);
+    CK(cudaDeviceSynchronize());
+    CK(cudaMemcpy(gy.data(), dyo, ny * 2, cudaMemcpyDeviceToHost));
+    spark::filters::grain_y(dy, dyo, W, H, 1.0f, 1.5f, 7u, nullptr);
+    CK(cudaDeviceSynchronize());
+    CK(cudaMemcpy(g2.data(), dyo, ny * 2, cudaMemcpyDeviceToHost));
+    const int nondet = diff_count(gy, g2, 0);
+    spark::filters::grain_y(dy, dyo, W, H, 1.0f, 1.5f, 8u, nullptr);
+    CK(cudaDeviceSynchronize());
+    CK(cudaMemcpy(g2.data(), dyo, ny * 2, cudaMemcpyDeviceToHost));
+    int reseed_same = 0;  // fields from different seeds must actually differ
+    for (size_t i = 0; i < ny; ++i) reseed_same += gy[i] == g2[i];
+    int resp_bad = 0, moved = 0;
+    const float bound = 0.08f * 876.0f + 1.0f;  // peak amplitude at amount 1 (+1 rounding)
+    for (size_t i = 0; i < ny; ++i) {
+      const float d = std::abs((int)gy[i] - (int)y[i]);
+      if (y[i] <= 64 || y[i] >= 940) resp_bad += d != 0;  // black/white: bit-exact
+      else resp_bad += d > bound;                          // mid-tones: bounded amplitude
+      moved += d != 0;
+    }
+    // >90% of mid-tone pixels should carry grain at amount 1 (weight only nulls the extremes).
+    const int bad = nondet + resp_bad + (reseed_same > (int)ny * 95 / 100 ? 1 : 0) +
+                    (moved < (int)ny / 2 ? 1 : 0);
+    std::printf("grain   %-24s det=%d resp_bad=%d moved=%d/%zu\n", "y (amount=1)", nondet,
+                resp_bad, moved, ny);
+    failures += bad;
+  }
+  {
+    spark::filters::grain_c(dy, dcb, dcr, dcbo, dcro, W, H, 1.0f, 1.5f, 7u, nullptr);
+    CK(cudaDeviceSynchronize());
+    CK(cudaMemcpy(gcb.data(), dcbo, nc * 2, cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(gcr.data(), dcro, nc * 2, cudaMemcpyDeviceToHost));
+    int moved_cb = 0, moved_cr = 0, indep = 0, resp_bad = 0;
+    const float bound = 0.08f * 448.0f + 1.0f;
+    for (size_t i = 0; i < nc; ++i) {
+      const int db = std::abs((int)gcb[i] - (int)cb[i]), dr = std::abs((int)gcr[i] - (int)cr[i]);
+      const uint16_t yv = y[(i / (W / 2)) * W + (i % (W / 2)) * 2];  // co-sited luma
+      if (yv <= 64 || yv >= 940) resp_bad += (db != 0) + (dr != 0);
+      else resp_bad += (db > bound) + (dr > bound);
+      moved_cb += db != 0;
+      moved_cr += dr != 0;
+      indep += ((int)gcb[i] - (int)cb[i]) != ((int)gcr[i] - (int)cr[i]);
+    }
+    // Cb/Cr fields must be independent (different salts), not one field applied twice.
+    const int bad = resp_bad + (moved_cb < (int)nc / 2 ? 1 : 0) + (moved_cr < (int)nc / 2 ? 1 : 0) +
+                    (indep < (int)nc / 4 ? 1 : 0);
+    std::printf("grain   %-24s resp_bad=%d moved=%d/%d indep=%d\n", "chroma (color mode)", resp_bad,
+                moved_cb, moved_cr, indep);
+    failures += bad;
+  }
 
   std::printf(failures ? "FAIL (%d)\n" : "PASS\n", failures);
   return failures ? 1 : 0;
