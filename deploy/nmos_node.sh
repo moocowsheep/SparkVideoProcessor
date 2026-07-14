@@ -18,7 +18,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NODE="$ROOT/control/build/spark_nmos_node"
+NODE="${NODE:-$ROOT/control/build/spark_nmos_node}"   # env-overridable (packaged installs)
 
 # ---- config (env-overridable) ----
 REGISTRY_HOST="${REGISTRY_HOST:-192.0.2.41}"   # facility registry (registry-host)

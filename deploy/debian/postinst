@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+if [ "$1" = "configure" ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    # Enable at boot but do not start: the operator decides when the daemon
+    # takes ownership of the NICs/GPU, and an already-running manually
+    # launched instance must not be clobbered by an install.
+    systemctl enable spark-video-processor.service >/dev/null 2>&1 || true
+    echo "spark-video-processor: enabled at boot. Start now with:"
+    echo "    systemctl start spark-video-processor"
+    echo "Dashboard: http://<host>:8080/   Optional NMOS node:"
+    echo "    systemctl enable --now spark-nmos-node"
+fi
+exit 0

@@ -1,0 +1,13 @@
+# /etc/default/spark-video-processor — environment for spark-video-processor.service
+#
+# Engine knobs are documented in docs/ (M8-latency.md, M9-filters.md,
+# M10-audio-fixed-latency.md). Common ones:
+#
+# Fixed end-to-end latency in ms (0 = legacy AIMD trim servo):
+#SPARK_LATENCY_MS=105
+#
+# Filter chain order override, e.g. "frc,scale,sharpen,procamp":
+#SPARK_FILTERS=
+#
+# PTP domain used for grandmaster auto-tracking via pmc (default 127):
+#SPARK_PTP_DOMAIN=127

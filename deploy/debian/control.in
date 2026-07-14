@@ -1,0 +1,24 @@
+Package: spark-video-processor
+Version: @VERSION@
+Architecture: arm64
+Maintainer: Devin Block <devin@devinblock.com>
+Installed-Size: @SIZE@
+Section: video
+Priority: optional
+Homepage: https://github.com/moocowsheep/SparkVideoProcessor
+Depends: @DEPENDS@
+Recommends: python3, avahi-daemon
+Description: Real-time ST 2110 video processor for NVIDIA DGX Spark (GB10)
+ DPDK-based SMPTE ST 2110-20/-30 receive/transmit with hardware-paced TX,
+ PTP (ST 2059-2) genlock, fixed end-to-end latency with an ST 2110-30 audio
+ relay, Blackmagic IP10 (10:8) codec for 2160p59.94/60 over 10G, optical-flow
+ 2x frame-rate conversion, and a CUDA filter chain (AI super-resolution,
+ scaling, sharpen, proc-amp, noise reduction, film grain).
+ .
+ Ships the engine (st2110_pipeline), the control daemon with web dashboard
+ (spark_controld, systemd unit spark-video-processor.service) and an NMOS
+ IS-04/IS-05 node (spark_nmos_node, unit spark-nmos-node.service).
+ .
+ Requires the NVIDIA driver (libcuda, libnvidia-opticalflow) on a GB10 /
+ DGX Spark class system. Holoscan, GXF, UCX, RMM and CUDA runtime libraries
+ are bundled under /usr/lib/spark-video-processor/lib.

@@ -1,0 +1,17 @@
+[Unit]
+Description=Spark NMOS IS-04/IS-05 node
+Documentation=https://github.com/moocowsheep/SparkVideoProcessor
+Wants=network-online.target
+After=network-online.target spark-video-processor.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/spark-nmos-node
+Environment=NODE=/usr/lib/spark-video-processor/spark_nmos_node
+Environment=LD_LIBRARY_PATH=/usr/lib/spark-video-processor/lib
+ExecStart=/bin/bash /usr/share/spark-video-processor/deploy/nmos_node.sh run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
