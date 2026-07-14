@@ -1,0 +1,17 @@
+# /etc/default/spark-nmos-node — environment for spark-nmos-node.service
+# All variables are read by deploy/nmos_node.sh (run mode); see that script
+# for the full list and defaults.
+
+# NMOS registry (registration API):
+#REGISTRY_HOST=192.0.2.41
+#REGISTRY_PORT=8010
+#REGISTRY_VER=v1.3
+
+# Address this node advertises itself on, and its node API port:
+#HOST_ADDR=
+#HTTP_PORT=3242
+
+# Initial PTP grandmaster seed (EUI-64, lower-case, dash-separated). The
+# control daemon auto-tracks the live GM via pmc and updates the node, so
+# this only matters before the daemon's first poll:
+#GMID=

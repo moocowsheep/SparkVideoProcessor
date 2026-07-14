@@ -1,0 +1,24 @@
+[Unit]
+Description=Spark Video Processor control daemon (ST 2110 engine supervisor)
+Documentation=https://github.com/moocowsheep/SparkVideoProcessor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Daemon and the engine it spawns need root: DPDK on mlx5, hugepages, GPU clock locking.
+EnvironmentFile=-/etc/default/spark-video-processor
+# Bundled Holoscan/CUDA runtime closure; overrides the build-tree RUNPATH in the binaries.
+Environment=LD_LIBRARY_PATH=/usr/lib/spark-video-processor/lib
+ExecStart=/usr/lib/spark-video-processor/spark_controld \
+    --pipeline /usr/lib/spark-video-processor/st2110_pipeline \
+    --web /usr/share/spark-video-processor/web
+Restart=on-failure
+RestartSec=5
+LimitMEMLOCK=infinity
+LimitNOFILE=1048576
+StateDirectory=spark-video-processor
+WorkingDirectory=/var/lib/spark-video-processor
+
+[Install]
+WantedBy=multi-user.target

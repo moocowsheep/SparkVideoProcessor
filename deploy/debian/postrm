@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+case "$1" in
+  remove|purge)
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    ;;
+esac
+if [ "$1" = "purge" ]; then
+    rm -rf /var/lib/spark-video-processor
+fi
+exit 0
