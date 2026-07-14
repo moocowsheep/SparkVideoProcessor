@@ -87,8 +87,16 @@ uint64_t grab(const std::string& s, const std::string& key, uint64_t def = 0) {
 // and format it as an NMOS gmid: EUI-64, lower-case, dash-separated (e.g. 34-84-e4-ff-fe-aa-d9-88).
 // Returns "" if ptp4l/pmc is unavailable or has no lock, so callers keep the last known value.
 std::string read_ptp_gmid() {
+  // pmc must be told the PTP domain — it defaults to 0 and ptp4l (ST 2059-2 media domain 127,
+  // deploy/ptp4l.conf) silently ignores management messages for other domains, so an unqualified
+  // query returns nothing and the gmid poll runs empty forever (the NMOS node then keeps its
+  // stale launch seed). SPARK_PTP_DOMAIN overrides.
+  const char* dom_env = std::getenv("SPARK_PTP_DOMAIN");
+  const int domain = dom_env ? std::atoi(dom_env) : 127;
   // absolute path: a root daemon's popen PATH may not include /usr/sbin where pmc lives
-  FILE* p = popen("timeout 2 /usr/sbin/pmc -u -b 0 'GET PARENT_DATA_SET' 2>/dev/null", "r");
+  const std::string cmd = "timeout 2 /usr/sbin/pmc -u -b 0 -d " + std::to_string(domain) +
+                          " 'GET PARENT_DATA_SET' 2>/dev/null";
+  FILE* p = popen(cmd.c_str(), "r");
   if (!p) return "";
   std::string gmid;
   char buf[512];
