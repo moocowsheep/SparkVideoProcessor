@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Fused CUDA executor for SRW1 super-resolution nets (see sr_net.hpp for the contract).
 //
 // Layout/precision choices, sized for 1080p->2160p at 59.94 fps on the GB10:

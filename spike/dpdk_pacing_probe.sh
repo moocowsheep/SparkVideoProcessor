@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Devin Block
+# SPDX-License-Identifier: Apache-2.0
+
 # M0 gate 2 (Rivermax-free) — DPDK / mlx5 ST 2110-21 pacing capability probe.
 #
 # Validates the open networking path chosen in docs/M0-feasibility-findings.md ("Networking IO"):

@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // AI super-resolution engine: runs an SRW1 net (sr_model.hpp) on the luma plane of a 10-bit
 // GpuFrame, in (w x h) uint16 -> out (2w x 2h) uint16, entirely on the GPU. Hand-rolled CUDA —
 // this box (GB10 aarch64) has no TensorRT/cuDNN, and the nets are tiny stacks of small convs

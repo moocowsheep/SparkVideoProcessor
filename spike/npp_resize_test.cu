@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // M0 / M2 prep: validate the NPP resize path on GB10 and measure latency.
 // Resizes a 16-bit single-channel image (stand-in for 10-bit-in-16-bit luma) 1080p -> 2160p and
 // times several interpolation modes. Confirms the NPP toolchain works and gives a latency baseline.

@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // NvofFlow — thin wrapper over the raw NVIDIA Optical Flow CUDA API (libnvidia-opticalflow), the
 // hardware OFA proven in M0 (spike/nvof_probe.cpp). Computes a dense-ish flow field between two 8-bit
 // luma frames; the FRC operator warps along it to synthesize interpolated frames (NvOFFRUC isn't

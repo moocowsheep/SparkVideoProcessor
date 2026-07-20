@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Video filter CUDA kernels — proc amp (levels/color) and unsharp sharpening on the planar 10-bit
 // GpuFrame planes (uint16 storage, 10-bit video range: Y 64..940, chroma centered on 512). Plane
 // pointers + stream only, no GpuFrame/Holoscan deps, so the unit test drives them standalone.

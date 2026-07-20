@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // FlowView — device pointers + geometry for one bidirectional NVOF flow field (and its optional
 // per-vector matching cost), decoupled from who produced it: NvofFlow::view() fills one straight
 // from the NVOF buffers; FrcOp swaps in median-filtered copies before handing it to interpolate().

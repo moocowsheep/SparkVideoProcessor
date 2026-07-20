@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Transport backend interface for ST 2110 TX (keeps DPDK out of the operator's translation unit).
 //
 // The St2110TxOp talks only to this interface, so the IO plane is swappable: the v1 implementation

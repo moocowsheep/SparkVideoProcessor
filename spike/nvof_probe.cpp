@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // M0 gate 3 probe: confirm the NVIDIA Optical Flow Accelerator (NVOFA) works on GB10 (aarch64).
 // Runs HW optical flow (NV_OF_MODE_OPTICALFLOW) between two synthetic frames using the CUDA driver
 // API + the on-system libnvidia-opticalflow.so. Success here confirms the v1 motion-comp FRC path.

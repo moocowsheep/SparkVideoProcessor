@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // FRC CUDA kernels: 10-bit luma -> 8-bit (for NVOF input), a 3x3 median post-filter for the flow
 // grids, forward-splatting of the flow to the output phase, and an occlusion-aware
 // motion-compensated warp/blend that synthesizes an interpolated frame at phase t in [0,1] from

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Devin Block
+# SPDX-License-Identifier: Apache-2.0
+
 # M0 feasibility diagnostics — read-only. Safe to run anytime.
 # Produces the evidence behind docs/M0-feasibility-findings.md.
 set -u

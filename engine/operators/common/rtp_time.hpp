@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // RTP <-> absolute-time conversion (ST 2110-10: RTP timestamps count media-clock ticks since the
 // PTP epoch, modulo 2^32). Pure header, no DPDK/Holoscan — unit-tested in test_rtp_time.cpp.
 //

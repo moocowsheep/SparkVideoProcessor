@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Spark Video Processor — engine entry point.
 //
 // Milestone status: M1 skeleton. This currently runs a PLACEHOLDER ping graph to validate the

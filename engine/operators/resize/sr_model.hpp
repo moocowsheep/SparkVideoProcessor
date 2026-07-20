@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // SRW1 super-resolution model definitions: a shuffle2-terminated stack of SAME/stride-1 convs on
 // the luma plane (the shape both embedded model families — FSRCNN and ESPCN — reduce to). Pure
 // C++ (no CUDA/Holoscan) so the loader is testable anywhere; sr_net.cu compiles a NetDef into

@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // One-process ST 2110 loopback: test_pattern -> st2110_tx (port .0) AND st2110_rx (port .1), sharing
 // ONE EAL across both CX-7 ports. Self-contained (no second process): TX generates, the switched
 // fabric returns it to the RX port, RX measures loss + ingest latency.

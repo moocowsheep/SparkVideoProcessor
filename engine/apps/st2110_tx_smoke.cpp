@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // ST 2110 TX bring-up app: test_pattern -> st2110_tx (tx_pp paced).
 //
 // This is the gate-4 follow-on the spike pointed to — a *real* media generator (one packet per

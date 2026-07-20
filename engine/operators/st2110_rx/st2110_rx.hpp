@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // St2110RxOp — Holoscan operator that receives an ST 2110-20 stream and measures it.
 //
 // Pipeline role (eventual):  [st2110_rx] -> unpack -> ...

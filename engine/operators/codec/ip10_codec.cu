@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // CUDA kernels for the Blackmagic IP10 (10:8) codec — the GPU counterpart of the CPU reference
 // (ip10_codec.cpp). The per-sample arithmetic (make_cfg / encode_sample / decode_sample / next_table)
 // is shared verbatim from ip10_codec.hpp as __host__ __device__ inlines, so the kernels can't drift

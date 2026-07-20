@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Filter kernel round-trip tests: GPU procamp / unsharp vs simple CPU references on a synthetic
 // 10-bit pattern, plus neutral-parameter identity checks. Raw device buffers (no GpuFrame/Holoscan),
 // runs on any CUDA box without NIC/root.

@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // ST 2110-30 audio (RFC 3190 L16/L24 PCM) framing + lip-sync delay — pure, no DPDK/Holoscan, so it
 // unit-tests without a NIC. The processor passes audio through unchanged but DELAYED to match the
 // video processing latency (FRC/resize add frames of delay; lip-sync needs the audio held the same).

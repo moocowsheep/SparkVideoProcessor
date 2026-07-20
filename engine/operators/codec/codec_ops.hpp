@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // UnpackOp / PackOp — bridge the network frame format (packed ST 2110-20 octets, host) and the GPU
 // processing format (planar GpuFrame). They wrap the RFC 4175 CUDA codec (pixel_codec) so the graph
 // reads:  st2110_rx -> [unpack] -> resize/frc -> [pack] -> st2110_tx.

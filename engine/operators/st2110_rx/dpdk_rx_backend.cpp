@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Raw DPDK + mlx5 implementation of ISt2110RxBackend. Receives ST 2110-20 UDP/IP frames on the RX
 // port, returns the RTP payload (zero-copy, pointing into the mbuf) plus the NIC HW RX timestamp.
 // All DPDK headers confined to this TU. Two-process loopback partner of dpdk_tx_backend.cpp.

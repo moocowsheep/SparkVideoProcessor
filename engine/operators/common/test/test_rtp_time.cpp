@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Unit test: RTP timestamp <-> absolute time (rtp_time.hpp). Pure CPU, no NIC/root.
 //
 // The properties the fixed-latency schedule and the audio relay stand on:

@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // ST 2110-30 audio packetizer/depacketizer implementation (pure; see audio_st2110.hpp).
 #include "audio_st2110.hpp"
 

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Devin Block
+# SPDX-License-Identifier: Apache-2.0
+
 # M1 task 1 — detect which ConnectX-7 QSFP ports are physically cabled together.
 #
 # The DGX Spark's CX-7 exposes 4× 100G ports; for the M1 loopback self-test some pair (or

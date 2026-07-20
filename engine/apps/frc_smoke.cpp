@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // FRC validation (pure GPU, no NIC/root), three synthetic cases through the production path
 // (NVOF fwd+bwd + cost, 3x3 flow median, occlusion-aware interpolate at t=0.5):
 //   A translation    — cur = prev shifted by DX; also reads back the center flow vector.

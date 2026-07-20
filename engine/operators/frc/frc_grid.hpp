@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // UniformGrid — the tick/phase math for FRC uniform-grid up-convert (SPARK_FRC=3), kept free of
 // CUDA/Holoscan so it unit-tests standalone (test/test_frc_grid.cpp).
 //

@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // AI super-resolution tests, three layers of proof:
 //   1. GPU == CPU: every embedded net (and a synthetic net exercising the generic-fallback
 //      kernels) vs a CPU reference forward of the same NetDef, on a deterministic 10-bit pattern

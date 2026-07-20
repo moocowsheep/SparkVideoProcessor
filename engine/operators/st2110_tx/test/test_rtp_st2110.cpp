@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Unit test for the ST 2110-20 / RFC 4175 packetizer + depacketizer. Pure CPU, no NIC/root.
 // Strategy: packetize a synthetic frame, then run each packet through the *real* Depacketizer (the
 // same parse/scatter the RX operator uses) and assert the reconstruction is byte-identical. That

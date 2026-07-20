@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 #include "pixel_codec.hpp"
 
 namespace spark::codec {

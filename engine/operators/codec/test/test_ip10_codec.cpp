@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Unit test for the Blackmagic IP10 (10:8) codec reference (operators/codec/ip10_codec.{hpp,cpp}).
 // Pure CPU — no GPU/NIC/root. Verifies: (1) hand-computed golden codewords from the published spec's
 // worked example, (2) the strictly bounded ±3 reconstruction error, (3) lossless on smooth content,

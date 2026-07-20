@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // ResizeOp — scales a GpuFrame (planar YCbCr 4:2:2 10-bit) to a target resolution via NPP, plus a
 // synthetic GPU source and sink for standalone benchmarking. Pipeline role:  ... unpack -> [resize]
 // -> frc ... The M0 spike measured nppiResize 1080p->2160p 16u at ~0.1 ms/frame; this is that as a

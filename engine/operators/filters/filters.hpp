@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // ProcAmpOp / SharpenOp — GpuFrame -> GpuFrame video filters for the modular processing chain.
 // Pipeline role:  unpack -> [frc] -> [resize] -> [sharpen] -> [procamp] -> pack  (any subset active;
 // st2110_pipeline composes the chain from config). Both follow the house operator contract: own CUDA

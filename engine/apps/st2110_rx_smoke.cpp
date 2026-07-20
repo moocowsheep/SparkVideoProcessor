@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // ST 2110 RX bring-up app: a single st2110_rx operator that receives the loopback stream and reports
 // loss + zero-copy ingest latency. Run as the RX half of the two-process loopback (mirrors gate-4):
 //

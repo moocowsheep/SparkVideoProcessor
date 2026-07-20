@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // CPU reference for the Blackmagic IP10 (10:8) codec — see ip10_codec.hpp for the algorithm.
 //
 // This is the authoritative, unit-tested definition of the row walk; the CUDA kernels (ip10_codec.cu)

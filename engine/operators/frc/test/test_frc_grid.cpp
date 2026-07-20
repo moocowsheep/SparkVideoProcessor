@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Unit tests for UniformGrid — the tick/phase math behind FRC uniform-grid mode (SPARK_FRC=3).
 // Pure host code, no CUDA/Holoscan.
 #include "../frc_grid.hpp"

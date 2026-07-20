@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Spark Video Processor — NMOS Node (IS-04 discovery/registration + IS-05 connection management).
 //
 // This makes the processor a first-class NMOS Node so 2110 sources are discovered/routed over the

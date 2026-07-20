@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Raw DPDK + mlx5 tx_pp implementation of ISt2110TxBackend — the production-bound IO grown directly
 // from spike/st2110_loopback_gate4.sh (same mechanism: send_on_timestamp Tx offload + per-packet HW
 // send-scheduling on the CX-7). All DPDK headers are confined to this translation unit.

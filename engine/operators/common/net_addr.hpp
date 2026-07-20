@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // ST 2110 multicast addressing — pure, header-only, no DPDK (so it unit-tests without a NIC/root).
 //
 // Two jobs the M6 multicast path needs and that are easy to get subtly wrong:

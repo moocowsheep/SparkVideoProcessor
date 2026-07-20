@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // TestPatternOp — synthetic VideoFrame source for ST 2110 TX bring-up (no RX path needed).
 //
 // Emits a fixed packed ST 2110-20 frame buffer each compute(), stamping a synthetic capture time that

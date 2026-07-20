@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // ST 2110-20 / RFC 4175 pixel codec — CUDA bridge between packed octets and the planar GpuFrame.
 //
 // Format: YCbCr 4:2:2 10-bit. A pgroup = 2 pixels = 5 octets packing {Cb0,Y0,Cr0,Y1} (each 10-bit,

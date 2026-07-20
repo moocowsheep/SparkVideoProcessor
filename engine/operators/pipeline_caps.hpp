@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Shared pipeline sizing helper. The only operator that emits more than one frame per compute is FRC
 // in up-convert mode (real + mid = 2). In retime (SPARK_FRC=1) and passthrough (SPARK_FRC=0) every
 // stage emits exactly one frame per compute, so the inter-operator queues only need to be 1 deep —

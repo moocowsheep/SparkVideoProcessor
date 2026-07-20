@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // AudioBridge — in-process handoff of received ST 2110-30 packets from the video RX op's poll
 // thread (which drains the shared DPDK queue and classifies audio by flow) to the TX op's audio
 // relay thread (which re-times each packet to capture_ts + L and submits it tx_pp-paced).

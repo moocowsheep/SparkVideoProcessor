@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Spark Video Processor — control daemon (M4).
 // Exposes the pipeline control as gRPC (SparkControl) AND HTTP/JSON + static web (libmicrohttpd) so
 // the vanilla web dashboard can drive it with fetch() — no gRPC-web proxy. Manages the

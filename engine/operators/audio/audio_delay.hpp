@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // AudioDelayOp — holds audio by a fixed lip-sync delay so it stays aligned with the video path's
 // added latency (resize + FRC). One AudioBlock in, zero-or-one (the delayed block) out.
 #pragma once

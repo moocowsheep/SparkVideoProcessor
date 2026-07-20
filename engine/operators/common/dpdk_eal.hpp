@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Process-wide DPDK EAL ownership. rte_eal_init() may run only ONCE per process, so when several
 // backends live in one process (the rx -> tx pass-through, or the one-process loopback), they cannot
 // each init EAL. Instead the app registers every port with add_device() and calls init() once; the

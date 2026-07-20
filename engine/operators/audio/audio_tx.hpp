@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // AudioTxOp — packetize each AudioBlock into one ST 2110-30 RTP packet and transmit it, tx_pp-paced
 // (packets evenly spaced at the packet time). Mirrors St2110TxOp but one packet per block.
 #pragma once

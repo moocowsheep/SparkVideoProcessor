@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Unit test for the ST 2110-30 audio framing + lip-sync delay (audio_st2110.hpp). Pure CPU, no NIC.
 // Round-trips PCM through the real Packetizer/Depacketizer (byte-exact), checks the RTP header and
 // packet geometry for L24/L16 + packet times, and verifies the delay line's fixed-lag behaviour.

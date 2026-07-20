@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // FrcOp — motion-compensated frame interpolation (the headline FRC stage). Holds the previous frame;
 // for each new frame it computes NVOF optical flow (prev->cur) and warps/blends interpolated frames.
 // Pipeline role:  ... resize -> [frc] -> pack ...

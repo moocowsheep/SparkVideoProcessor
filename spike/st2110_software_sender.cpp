@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Software ST 2110 sender/receiver for P5 bench testing — no DPDK, no root, runs on any NIC.
 //
 // Reuses the engine's PURE framing (spark_st2110_core Packetizer/Depacketizer and spark_audio_core

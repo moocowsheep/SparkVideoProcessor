@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Devin Block
+# SPDX-License-Identifier: Apache-2.0
+
 # Build + run the M0 gate probes (OFA optical flow, NPP resize). No sudo required.
 set -euo pipefail
 cd "$(dirname "$0")"

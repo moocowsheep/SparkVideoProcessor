@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Resize bring-up/benchmark: test_gpu_source -> resize (NPP) -> sink. Pure GPU — no NIC, no root.
 //   ./engine/build/resize_smoke                       # 1080p -> 2160p cubic, 300 frames
 //   SPARK_PROFILE=1080p SPARK_OUT_W=3840 SPARK_OUT_H=2160 SPARK_INTERP=lanczos ./engine/build/resize_smoke

@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // FrameSinkOp — trivial VideoFrame sink (drops frames, counts them). Header-only.
 //
 // st2110_rx always declares a "frame" output (it can't know its mode until after setup()), and

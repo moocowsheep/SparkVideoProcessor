@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Devin Block
+# SPDX-License-Identifier: Apache-2.0
+
 # M1 gate 4 — paced ST 2110-20-rate loopback over the CX-7 (Rivermax-free, raw DPDK).
 #
 # Builds directly on the M0-proven mechanism (dpdk-testpmd + mlx5 tx_pp HW send-scheduling).

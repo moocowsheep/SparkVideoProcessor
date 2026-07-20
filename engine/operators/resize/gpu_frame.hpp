@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // GpuFrame — the engine's intermediate GPU image format between unpack and pack.
 //
 // Planar YCbCr 4:2:2, 10-bit samples stored in uint16 (the M0 resize spike used 16u; ST 2110-20's

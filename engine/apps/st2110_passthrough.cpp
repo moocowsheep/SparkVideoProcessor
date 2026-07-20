@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // ST 2110 pass-through: st2110_rx -> st2110_tx in ONE process (shared EAL across two ports). RX
 // receives a stream on one port, reassembles each frame, and TX re-transmits it paced on another —
 // the M1 "first deliverable" graph (processing operators graft between rx and tx later).

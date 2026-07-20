@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 #define _GNU_SOURCE
 #include "dpdk_eal.hpp"
 

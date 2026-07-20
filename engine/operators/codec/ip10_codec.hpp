@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Blackmagic IP10 (10:8) codec — clean-room implementation of the published, license-free codec.
 //
 // IP10 is a Context-Adaptive Mixed Lossy/Lossless, Absolutely-Constant-Bit-Rate (ACBR) codec: every

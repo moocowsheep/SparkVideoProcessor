@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Transport backend interface for ST 2110 RX (keeps DPDK out of the operator's translation unit).
 // Mirrors tx_backend.hpp: the St2110RxOp talks only to this vtable, so a raw-DPDK/mlx5 implementation
 // (v1) can later be replaced by an advanced_network-backed one without touching the operator. All

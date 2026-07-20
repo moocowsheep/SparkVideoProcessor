@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // St2110TxOp — Holoscan sink operator that transmits VideoFrames as ST 2110-20, tx_pp-paced.
 //
 // Pipeline role:  ... -> pack -> [st2110_tx]

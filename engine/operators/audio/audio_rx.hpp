@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // AudioRxOp — receive an ST 2110-30 stream and emit one AudioBlock per RTP packet (source mode).
 // Mirrors St2110RxOp's emit path: a dedicated thread drains the NIC into a bounded queue so polling
 // never stalls while the downstream paces; compute() pops one block and emits it.

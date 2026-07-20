@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Full M1/M2 processing pipeline in one process:
 //   st2110_rx -> unpack -> resize -> pack -> st2110_tx
 // Receives an ST 2110-20 stream, unpacks to the GPU, NPP-resizes (default 1080p->2160p), repacks, and

@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Round-trip test for the RFC 4175 pixel codec: packed -> planar -> packed must be byte-identical
 // (the 5-byte pgroup <-> 4x10-bit mapping is a bijection). Needs a GPU; no NIC/root.
 #include <cstdint>

@@ -1,3 +1,6 @@
+// Copyright 2026 Devin Block
+// SPDX-License-Identifier: Apache-2.0
+
 // Unit test for the ST 2110 multicast addressing helpers (net_addr.hpp). Pure CPU, no NIC/root.
 // Covers the RFC 1112 MAC mapping (incl. the 23-bit overlap) and the IGMPv3 join frame layout +
 // checksums (IP header and IGMP message must each checksum to zero when verified).
