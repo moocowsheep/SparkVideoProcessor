@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright 2026 Devin Block
+# SPDX-License-Identifier: Apache-2.0
+
 # M9 picture-check runner: (re)launch the pipeline with one filter variant (root; run via sudo).
 # Kills any running st2110_pipeline, locks GPU clocks, launches the variant, logs to
 # /tmp/spark_m9_<variant>.log. BD2 routing is separate (bd2_route_sr.sh — 2160p variants use the

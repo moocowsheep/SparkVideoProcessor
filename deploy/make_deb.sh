@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Devin Block
+# SPDX-License-Identifier: Apache-2.0
+
 # deploy/make_deb.sh — build the spark-video-processor Debian package for
 # DGX Spark (arm64). Run from anywhere inside the repo; needs built trees
 # (engine/build, control/build incl. spark_nmos_node) and dpkg-deb.

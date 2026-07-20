@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright 2026 Devin Block
+# SPDX-License-Identifier: Apache-2.0
+
 # Point BD2's monitor receiver at our raw 2160p29.97 SR output (IS-05 PATCH).
 # Usage: bd2_route.sh [sdp-file]   (default: tx_2160p2997_raw.sdp next to this script)
 set -e

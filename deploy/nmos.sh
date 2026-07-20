@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Devin Block
+# SPDX-License-Identifier: Apache-2.0
+
 # Spark Video Processor — NMOS (IS-04/IS-05) toolchain bring-up (P0).
 #
 # Builds Sony's nmos-cpp against Ubuntu 24.04 SYSTEM packages (NO conan), so the control daemon can

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Devin Block
+# SPDX-License-Identifier: Apache-2.0
+
 """
 nmos_mdns_proxy.py — a registry-free "virtual registry" for the Spark dashboard.
 

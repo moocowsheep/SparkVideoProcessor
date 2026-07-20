@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Devin Block
+# SPDX-License-Identifier: Apache-2.0
+
 # Spark Video Processor — P5 bench harness (software ST 2110 sender + NMOS advertisement).
 #
 # Lets you validate the NMOS path without a real camera: a dependency-free software sender

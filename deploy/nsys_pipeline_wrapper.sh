@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Devin Block
+# SPDX-License-Identifier: Apache-2.0
+
 # nsys_pipeline_wrapper.sh — stand-in for engine/build/st2110_pipeline that captures a CPU-side
 # trace alongside the engine, for chasing the residual ~1/10min pipeline stall (M8 determinism).
 #

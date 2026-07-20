@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Devin Block
+# SPDX-License-Identifier: Apache-2.0
+
 # Spark Video Processor — host provisioning for the ST 2110 IO plane (M1 open item #5).
 #
 # Makes a fresh DGX Spark reproduce the runtime the engine needs, idempotently:

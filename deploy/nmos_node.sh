@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Devin Block
+# SPDX-License-Identifier: Apache-2.0
+
 # nmos_node.sh — launch the Spark NMOS Node (control/build/spark_nmos_node) pinned to the
 # facility registry. The node registers its IS-04 Senders/Receivers there and exposes IS-05
 # connection management so a controller (or our dashboard) can route to/from us.
