@@ -1,0 +1,34 @@
+Spark Video Processor
+Copyright 2026 Devin Block
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE.md).
+
+------------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------------
+
+This software is designed to build and run against the following third-party
+components. Their source is NOT distributed as part of this repository; they
+are obtained separately at build/run time (see docs/SETUP.md). Each remains
+under its own license.
+
+  - NVIDIA Holoscan SDK ......................... Apache License 2.0
+  - gRPC ....................................... Apache License 2.0
+  - DPDK ....................................... BSD-3-Clause
+  - Protocol Buffers (protobuf) ................ BSD-3-Clause
+  - libmicrohttpd .............................. LGPL-2.1-or-later
+  - nmos-cpp (optional) ........................ Apache License 2.0
+  - C++ REST SDK / cpprestsdk (optional) ....... MIT License
+  - Boost (optional) ........................... Boost Software License 1.0
+
+The following NVIDIA components are proprietary and used under the terms of
+their respective NVIDIA license agreements. They are not redistributed here:
+
+  - NVIDIA CUDA Toolkit (cudart, NPP)
+  - NVIDIA Optical Flow SDK / libnvidia-opticalflow
+
+NVIDIA, CUDA, Holoscan, and DGX Spark are trademarks and/or registered
+trademarks of NVIDIA Corporation. SMPTE and ST 2110 are trademarks of the
+Society of Motion Picture and Television Engineers. All trademarks are the
+property of their respective owners; their mention here is for identification
+purposes only and does not imply endorsement.
