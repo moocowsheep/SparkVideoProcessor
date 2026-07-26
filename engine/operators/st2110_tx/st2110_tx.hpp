@@ -115,6 +115,7 @@ class St2110TxOp : public holoscan::Operator {
   uint64_t packets_sent_ = 0;
   uint64_t reanchors_ = 0;  // grid resyncs (should be near-zero; high = a real upstream stall)
   uint64_t skipped_late_ = 0;  // late frames dropped unsent to purge queue backlog (genlock catch-up)
+  uint64_t codec_mismatch_ = 0;  // frames refused: wire codec != the latched packetizer (wiring bug)
   uint32_t skip_streak_ = 0;   // consecutive late-skips; caps at ~32 then re-anchors (new latency floor)
   // Skip-rate window (two 64-frame buckets) for the chronic-clipping guard, and the AIMD trim
   // state. Lead-based trim servos were tried and removed: with standing upstream queues the

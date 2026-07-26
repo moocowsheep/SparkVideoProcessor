@@ -148,7 +148,10 @@ inline uint32_t seq16_extend(uint32_t state, uint16_t seq, bool have_state) {
   if (!have_state) return seq;
   const uint16_t prev = static_cast<uint16_t>(state);
   const int16_t delta = static_cast<int16_t>(seq - prev);  // wrap-safe signed distance
-  return static_cast<uint32_t>(static_cast<int64_t>(state) + delta);
+  const int64_t ext = static_cast<int64_t>(state) + delta;
+  // A straggler from before the seed (state 2, seq 65535) would extend below zero and wrap wild
+  // (~2^32), poisoning the loss accounting; clamp at the epoch instead.
+  return ext < 0 ? 0u : static_cast<uint32_t>(ext);
 }
 
 }  // namespace spark::st2110

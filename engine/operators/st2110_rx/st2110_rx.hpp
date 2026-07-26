@@ -122,6 +122,9 @@ class St2110RxOp : public holoscan::Operator {
   uint64_t jxs_corrupt_ = 0;      // frames dropped: missing/reordered fragment or buffer overrun
   uint64_t jxs_incomplete_ = 0;   // frames abandoned: a new RTP timestamp arrived before the marker
   uint64_t jxs_slice_mode_ = 0;   // packets rejected: slice packetization mode (K=1), unsupported
+  uint64_t jxs_interlaced_ = 0;   // packets rejected: interlaced (I != 00) — progressive-only pipeline
+  uint32_t jxs_done_ts_ = 0;      // RTP ts of the last frame delivered or dropped WHOLE: stragglers
+  bool jxs_have_done_ = false;    //   and duplicates of it are ignored, not treated as a new frame
   // Broken-sender-epoch guard for the VIDEO stamps (poll-thread only), mirroring the audio one
   // below: same device fault observed on both essences (video epoch seen +2.0s off TAI).
   uint32_t video_ts_delta_ = 0;      // latched correction (0 = verbatim stamps)

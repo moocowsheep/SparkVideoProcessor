@@ -372,6 +372,19 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
     return;
   }
   ensure_pacer(frame.format);
+  // The pacer latches to the first frame's wire codec. Nothing in-process changes codec mid-run
+  // (the RX latches its format at start; config changes restart the engine), so a mismatch here is
+  // a wiring bug — refuse the frame rather than walk the wrong packetizer over the buffer (the raw
+  // walker would read raster offsets out of a smaller, differently-shaped codestream buffer).
+  if (frame.format.is_jxs() != static_cast<bool>(jxs_pktz_)) {
+    ++codec_mismatch_;
+    if (codec_mismatch_ == 1 || (codec_mismatch_ % 256) == 0)
+      HOLOSCAN_LOG_ERROR("st2110_tx: {} frame does not match the latched {} packetizer — dropped "
+                         "({} total)",
+                         frame.format.is_jxs() ? "JPEG XS" : "raw", jxs_pktz_ ? "JPEG XS" : "raw",
+                         codec_mismatch_);
+    return;
+  }
   emit_live();  // 1 Hz live stats (throttled)
 
   if (!warmed_) {  // one-time: give a co-located/peer RX time to enter its poll loop before flooding

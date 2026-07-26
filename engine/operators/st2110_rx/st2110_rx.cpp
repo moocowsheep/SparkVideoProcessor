@@ -319,8 +319,23 @@ bool St2110RxOp::ingest_jxs(const spark::net::RxPacket& pkt, uint64_t now_ns) {
     cur_bad_ = true;
     return false;
   }
+  if (!info.progressive) {
+    // Interlaced JPEG XS (I != 00) packetizes each FIELD as its own unit; assembling fields as if
+    // they were frames would hand the decoder half-height codestreams. Progressive-only pipeline:
+    // report it once, by name, rather than decode garbage.
+    ++jxs_interlaced_;
+    if (jxs_interlaced_ == 1)
+      HOLOSCAN_LOG_WARN(
+          "st2110_rx: sender emits INTERLACED JPEG XS (I != 00), which this progressive-only "
+          "pipeline does not assemble — ask the sender for progressive scan");
+    cur_bad_ = true;
+    return false;
+  }
 
   if (cur_first_) {
+    // A straggler or duplicate from the frame just delivered/dropped — e.g. a duplicated marker
+    // packet — is not the start of a new frame; ignore it rather than latching a bogus corrupt drop.
+    if (jxs_have_done_ && info.rtp_timestamp == jxs_done_ts_) return false;
     cur_ts_ = info.rtp_timestamp;
     cur_arrival_ns_ = pkt.has_timestamp ? pkt.hw_timestamp_ns : now_ns;
     cur_first_ = false;
@@ -339,6 +354,10 @@ bool St2110RxOp::ingest_jxs(const spark::net::RxPacket& pkt, uint64_t now_ns) {
     cur_len_ = 0;
     cur_bad_ = false;
     jxs_next_pkt_ = 0;
+  } else if (jxs_next_pkt_ > 0 && info.packet_counter + 1 == jxs_next_pkt_) {
+    // Exact duplicate of the fragment just concatenated (a duplicating switch, or ST 2022-7 legs
+    // without a merge): the bytes are already in the buffer, so the copy is not a discontinuity.
+    return false;
   }
 
   if (info.packet_counter != jxs_next_pkt_) cur_bad_ = true;  // gap or reorder: position is lost
@@ -359,6 +378,8 @@ bool St2110RxOp::ingest_jxs(const spark::net::RxPacket& pkt, uint64_t now_ns) {
   }
 
   if (!info.marker) return false;
+  jxs_done_ts_ = cur_ts_;  // delivered or dropped, this frame is DONE — its stragglers are ignored
+  jxs_have_done_ = true;
   if (cur_bad_ || cur_len_ == 0) {
     ++jxs_corrupt_;
     if (jxs_corrupt_ == 1 || (jxs_corrupt_ % 60) == 0)
@@ -517,8 +538,9 @@ void St2110RxOp::emit_live(bool force) {
   HOLOSCAN_LOG_INFO("spark_live rx_frames={} rx_packets={} rx_lost={} rx_latency_us={} rx_relatch={}",
                     frames_, packets_, lost_, avg_us, video_relatch_);
   if (fmt_.is_jxs())
-    HOLOSCAN_LOG_INFO("spark_live jxs_rx_corrupt={} jxs_rx_incomplete={} jxs_rx_slicemode={}",
-                      jxs_corrupt_, jxs_incomplete_, jxs_slice_mode_);
+    HOLOSCAN_LOG_INFO(
+        "spark_live jxs_rx_corrupt={} jxs_rx_incomplete={} jxs_rx_slicemode={} jxs_rx_interlaced={}",
+        jxs_corrupt_, jxs_incomplete_, jxs_slice_mode_, jxs_interlaced_);
   if (audio_enabled_)
     HOLOSCAN_LOG_INFO("spark_live audio_rx_pkts={} audio_rx_bad={} audio_rx_drop={} audio_rx_relatch={}",
                       audio_pkts_, audio_bad_, audio_drop_, audio_relatch_);
@@ -536,9 +558,10 @@ void St2110RxOp::print_stats() {
       rs.rx_nombuf, (lat_min_ == UINT64_MAX ? 0 : lat_min_), avg, lat_max_, lat_cnt_);
   if (fmt_.is_jxs())
     HOLOSCAN_LOG_INFO(
-        "st2110_rx JPEG XS: corrupt={} incomplete={} slice_mode_pkts={} (corrupt/incomplete frames "
-        "are dropped whole — a JPEG XS codestream cannot be partially decoded)",
-        jxs_corrupt_, jxs_incomplete_, jxs_slice_mode_);
+        "st2110_rx JPEG XS: corrupt={} incomplete={} slice_mode_pkts={} interlaced_pkts={} "
+        "(corrupt/incomplete frames are dropped whole — a JPEG XS codestream cannot be partially "
+        "decoded)",
+        jxs_corrupt_, jxs_incomplete_, jxs_slice_mode_, jxs_interlaced_);
 }
 
 void St2110RxOp::stop() {

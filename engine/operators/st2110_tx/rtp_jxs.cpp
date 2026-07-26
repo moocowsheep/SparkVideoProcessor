@@ -127,9 +127,11 @@ size_t jxs_codestream_offset(const uint8_t* data, size_t len) {
 bool JxsDepacketizer::parse(const uint8_t* p, uint32_t len, JxsRxPacketInfo& info) const {
   if (len < kJxsHeaderOctets) return false;      // RTP(12) + JXS payload header(4)
   if ((p[0] & 0xC0) != 0x80) return false;       // RTP version 2
-  // CSRC list / header extension would shift the payload header; this pipeline's senders emit
-  // neither, and silently mis-parsing one into codestream bytes would corrupt a whole frame.
-  if ((p[0] & 0x0f) != 0 || (p[0] & 0x10) != 0) return false;
+  // CSRC list / header extension would shift the payload header; padding (P=1) would count its pad
+  // octets into the codestream fragment. This pipeline's senders emit none of the three, and
+  // silently mis-parsing any of them turns header/pad bytes into codestream bytes and corrupts a
+  // whole frame — reject, so the RX drops the frame cleanly instead of feeding the decoder garbage.
+  if ((p[0] & 0x3f) != 0) return false;
 
   info.marker = (p[1] & 0x80) != 0;
   info.sequence = static_cast<uint16_t>((p[2] << 8) | p[3]);

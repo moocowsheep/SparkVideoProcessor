@@ -167,6 +167,9 @@ void test_rejects() {
 
   buf[0] = 0x90;  // X=1: a header extension would shift the payload header
   check(!depkt.parse(buf, 32, info), "rejects a packet carrying a header extension");
+
+  buf[0] = 0xa0;  // P=1: the pad octets would be counted into the codestream fragment
+  check(!depkt.parse(buf, 32, info), "rejects a padded packet");
 }
 
 // seq16_extend must unwrap the 16-bit sequence monotonically (JPEG XS has no RFC 4175 ESN).
@@ -178,6 +181,7 @@ void test_seq_extend() {
   check(s == 65540, "extends monotonically across the 16-bit wrap");
   const uint32_t back = seq16_extend(s, static_cast<uint16_t>(s - 2), true);
   check(back == s - 2, "a reordered packet resolves backwards, not a cycle forward");
+  check(seq16_extend(2, 65535, true) == 0, "a straggler from before the seed clamps at zero");
 }
 
 // RFC 9134 codestream mode carries the ISO/IEC 21122-3 video support boxes ahead of the SOC, so the

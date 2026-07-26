@@ -12,7 +12,9 @@
 // and either side can be chosen independently — decode JPEG XS in and send uncompressed out, or the
 // reverse, or transcode both ways. The codec is MooCUDAJXS (CUDA JPEG XS, zero-copy device planes),
 // driven through its asynchronous frame API: one persistent handle per operator owns all workspace,
-// and frame submission allocates nothing and — on the decode side — never synchronizes.
+// and frame submission allocates nothing; the decode side never synchronizes while decodes succeed
+// (a rejected codestream flips it into a per-frame-checked recovery mode until the decoder accepts
+// again, so a sick stream freezes on the last good frame rather than airing stale ones).
 //
 // Format: GpuFrame is planar 10-bit YCbCr 4:2:2 in uint16, which is MooCUDAJXS's YUV422P at
 // bit_depth 10 with no conversion — Y is (w x h), Cb/Cr are (w/2 x h), all tightly pitched.

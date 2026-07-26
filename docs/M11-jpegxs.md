@@ -80,11 +80,15 @@ raw in :  st2110_rx -> [unpack]     -> nr,frc,scale,sharpen,... -> [pack]       
 jxs in :  st2110_rx -> [jxs_decode] -> nr,frc,scale,sharpen,... -> [jxs_encode] -> st2110_tx
 ```
 
-- **`JxsDecodeOp`** — host codestream → `GpuFrame`. Never synchronizes: downstream operators order on
-  `GpuFrame::ready`, and the decode status is checked one frame later off a completion event (a ring
-  of pinned status words). In zero-copy mode it also holds the RX ring buffer behind that event, since
-  the decoder kernels read the codestream in place and the RX recycles any buffer whose `use_count`
-  drops to 1.
+- **`JxsDecodeOp`** — host codestream → `GpuFrame`. Never synchronizes while decodes succeed:
+  downstream operators order on `GpuFrame::ready`, and the decode status is checked one frame later
+  off a completion event (a ring of pinned status words). In zero-copy mode it also holds the RX ring
+  buffer behind that event, since the decoder kernels read the codestream in place and the RX
+  recycles any buffer whose `use_count` drops to 1. A **rejected** decode flips the operator into a
+  recovery mode that checks each frame's status *before* emitting (one stream sync per frame) and
+  emits nothing until the decoder accepts again — so a sick stream freezes on the last good frame
+  instead of airing partially-written or pool-stale frames; at most the one frame that revealed the
+  failure gets out. The async path resumes on the first success.
 - **`JxsEncodeOp`** — `GpuFrame` → host codestream. Must synchronize, because the codestream length is
   a device-side result the TX needs on the host to plan its packets. `PackOp`'s D2H sync costs the
   same, so the egress hop's latency profile is unchanged.
@@ -154,7 +158,17 @@ a non-dense `{SEP,P}`, a new RTP timestamp before the marker, or a codestream ov
 
 Slice packetization mode (`K=1`) is **not** reassembled: its slices carry their own headers and
 concatenating them would produce a malformed stream. A sender using it is reported once, by name,
-rather than silently mis-decoded.
+rather than silently mis-decoded. Interlaced streams (`I != 00`) are refused the same way — each
+field is its own packetization unit, and a progressive-only pipeline would assemble half-height
+codestreams (`jxs_rx_interlaced`).
+
+Two things are deliberately **tolerated** rather than latched as discontinuities: an exact duplicate
+of the fragment just concatenated (a duplicating switch, or ST 2022-7 legs without a merge — the
+bytes are already in the buffer), and a straggler or duplicate from a frame already delivered or
+dropped whole (e.g. a duplicated marker packet, which would otherwise start a phantom frame and book
+a bogus corrupt drop). Conversely the parser rejects outright any packet whose RTP header would
+shift or dilute the payload — a CSRC list, a header extension, or the padding bit — because
+mis-parsing any of them turns header/pad bytes into codestream bytes and corrupts the whole frame.
 
 ### Pacing
 
@@ -175,7 +189,7 @@ alongside the existing IP10 rewrite:
 ```
 a=rtpmap:96 jxsv/90000
 a=fmtp:96 sampling=YCbCr-4:2:2; depth=10; width=3840; height=2160; exactframerate=60000/1001; colorimetry=BT709; packetmode=0; transmode=1; SSN=ST2110-22:2022; TP=2110TPN;
-b=AS:2068
+b=AS:2068214
 ```
 
 `depth` and `sampling` describe the **decoded** image, as they do for IP10. `b=AS` is computed from

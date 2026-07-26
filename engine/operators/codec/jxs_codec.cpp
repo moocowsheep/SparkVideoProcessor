@@ -113,8 +113,8 @@ struct JxsDecodeOp::Impl {
   std::vector<spark::gpu::GpuFramePtr> pool;
   size_t idx = 0;
 
-  // One in-flight decode's deferred bookkeeping. The decode path never synchronizes — downstream
-  // ops order on GpuFrame::ready — so the codestream size, the codec's status word and (zero-copy)
+  // One in-flight decode's deferred bookkeeping. The healthy decode path never synchronizes —
+  // downstream ops order on GpuFrame::ready — so the codestream size, the status word and (zero-copy)
   // the RX buffer whose bytes the kernels are still reading all have to live until the work lands.
   // The RX recycles any ring buffer whose use_count drops to 1, so holding the shared_ptr here is
   // what stops the next frame overwriting a codestream mid-decode.
@@ -126,6 +126,7 @@ struct JxsDecodeOp::Impl {
   };
   std::deque<Slot> inflight;
   std::vector<Slot> free_slots;
+  bool unhealthy = false;  // a decode was rejected: compute() re-syncs per frame until one succeeds
 
   uint64_t frames = 0, failed = 0;
   size_t logged_skip = SIZE_MAX;  // box-prefix length last reported (log once, not per frame)
@@ -163,9 +164,11 @@ void JxsDecodeOp::drain_inflight(bool wait) {
     if (st == cudaErrorNotReady) break;
     // The status word is only meaningful now that the stream reached the copy. A bad codestream
     // (loss the RX could not see, an unsupported feature, too many precinct columns) surfaces here
-    // one frame late rather than stalling the decode path on a synchronization.
+    // one frame late rather than stalling the decode path on a synchronization — and flips
+    // compute() into its per-frame-checked recovery mode so the NEXT bad frame never airs.
     if (*f.status != MOO_JXS_OK) {
       ++s.failed;
+      s.unhealthy = true;
       if (s.failed == 1 || (s.failed % 60) == 0)
         HOLOSCAN_LOG_WARN("jxs_decode: decoder rejected a frame ({}) — {} failed so far",
                           moo_jxs_status_string(static_cast<MooJxsStatus>(*f.status)), s.failed);
@@ -218,6 +221,7 @@ void JxsDecodeOp::compute(holoscan::InputContext& op_input, holoscan::OutputCont
     s.pool.assign(kRing, nullptr);
     for (auto& f : s.pool) f = std::make_shared<spark::gpu::GpuFrame>(fmt.width, fmt.height);
     s.idx = 0;
+    s.unhealthy = false;  // fresh decoder, fresh stream: back to the async path
     HOLOSCAN_LOG_INFO("jxs_decode: {}x{} 4:2:2 10-bit{}", fmt.width, fmt.height,
                       s.zerocopy ? ", zero-copy" : "");
   }
@@ -237,8 +241,11 @@ void JxsDecodeOp::compute(holoscan::InputContext& op_input, holoscan::OutputCont
   const size_t code_bytes = bytes - skip;
 
   // Copy path: stage the codestream on our stream. cudaMemcpyAsync from pageable memory is
-  // host-synchronous, so the RX buffer is free on return and needs no lifetime hold. Zero-copy: the
-  // decoder kernels read the RX buffer in place, so the slot below holds it until they finish.
+  // host-synchronous, so the RX buffer is free on return and needs no lifetime hold. (CUDA also
+  // performs a stream sync before a pageable H2D copy, so this path runs one frame deep — frame
+  // N+1's submit waits out frame N's decode. Inside budget at 59.94; zero-copy has no such sync.)
+  // Zero-copy: the decoder kernels read the RX buffer in place, so the slot below holds it until
+  // they finish.
   const uint8_t* src = vf.data->data() + skip;
   size_t capacity = vf.data->size() - skip;
   if (!s.zerocopy) {
@@ -278,7 +285,33 @@ void JxsDecodeOp::compute(holoscan::InputContext& op_input, holoscan::OutputCont
   cuda_check(cudaEventRecord(dst->ready, s.stream), "decode record");  // consumers wait on this
   cuda_check(cudaEventRecord(slot.ev, s.stream), "decode slot record");
   if (s.zerocopy) slot.hold = vf.data;
-  s.inflight.push_back(slot);
+
+  bool healthy = true;
+  if (!s.unhealthy) {
+    s.inflight.push_back(slot);
+  } else {
+    // Recovery mode. A rejected decode leaves the pool frame partially written (or stale by the
+    // pool depth), and the async path only learns of the rejection a frame late — after that frame
+    // went on air. So from the first observed failure, wait for THIS frame's status before emitting
+    // (one stream sync per frame — the decode's own budget, not on top of it) and emit nothing
+    // until the decoder accepts again: a sick stream freezes on the last good frame instead of
+    // strobing stale/torn frames. One bad frame can still air per episode — the one that revealed
+    // the failure — which is the price of the async healthy path.
+    cuda_check(cudaEventSynchronize(slot.ev), "decode recovery sync");
+    drain_inflight(false);  // pre-recovery stragglers finished with the sync above; retire them now
+    healthy = *slot.status == MOO_JXS_OK;
+    if (healthy) {
+      s.unhealthy = false;
+    } else {
+      ++s.failed;
+      if (s.failed == 1 || (s.failed % 60) == 0)
+        HOLOSCAN_LOG_WARN("jxs_decode: decoder rejected a frame ({}) — {} failed so far",
+                          moo_jxs_status_string(static_cast<MooJxsStatus>(*slot.status)), s.failed);
+    }
+    *slot.status = MOO_JXS_OK;
+    slot.hold.reset();
+    s.free_slots.push_back(slot);
+  }
 
   dst->t_ingest_ns = now_ns();  // frame enters the GPU graph here; the egress op reads it back
   dst->capture_ts_ns = vf.capture_ts_ns;  // source frame timing -> TX genlock
@@ -291,7 +324,7 @@ void JxsDecodeOp::compute(holoscan::InputContext& op_input, holoscan::OutputCont
     HOLOSCAN_LOG_INFO("spark_live jxs_dec_frames={} jxs_dec_failed={} jxs_dec_bytes={}", s.frames,
                       s.failed, code_bytes);
   }
-  op_output.emit(dst, "out");
+  if (healthy) op_output.emit(dst, "out");
 #endif
 }
 
@@ -480,6 +513,14 @@ void JxsEncodeOp::compute(holoscan::InputContext& op_input, holoscan::OutputCont
   code.size_device = s.size_word;
   jxs_check(moo_jxs_encode_async(s.enc, &frame, &code, s.stream), "encode submit");
   jxs_check(moo_jxs_encoder_status_async(s.enc, s.status_word, s.stream), "encode status");
+  // Copy path: stage the codestream back on OUR stream, ahead of the same sync. The length is a
+  // device-side result not known until after the sync, so copy the full constant-rate capacity
+  // (produced == target for CBR). A blocking cudaMemcpy after the sync — the old shape — ran on the
+  // legacy default stream, which serializes against every other blocking stream in the pipeline.
+  if (!s.zerocopy)
+    cuda_check(
+        cudaMemcpyAsync(host->data(), s.dcode, s.target_bytes, cudaMemcpyDeviceToHost, s.stream),
+        "D2H codestream");
   cuda_check(cudaStreamSynchronize(s.stream), "encode sync");
 
   // Failure paths below all `return` without emitting, so the 1 Hz telemetry has to come FIRST —
@@ -515,8 +556,6 @@ void JxsEncodeOp::compute(holoscan::InputContext& op_input, holoscan::OutputCont
                       produced, s.target_bytes);
     return;
   }
-  if (!s.zerocopy)
-    cuda_check(cudaMemcpy(host->data(), s.dcode, produced, cudaMemcpyDeviceToHost), "D2H codestream");
   s.last_bytes = produced;
 
   if (src.t_ingest_ns) {
