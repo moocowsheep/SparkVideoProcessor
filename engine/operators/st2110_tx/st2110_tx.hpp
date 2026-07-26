@@ -23,6 +23,7 @@
 
 #include <holoscan/holoscan.hpp>
 
+#include "rtp_jxs.hpp"
 #include "rtp_st2110.hpp"
 #include "st2110_format.hpp"
 #include "tx_backend.hpp"
@@ -42,6 +43,9 @@ class St2110TxOp : public holoscan::Operator {
 
  private:
   void ensure_pacer(const spark::st2110::VideoFormat& fmt);
+  // JPEG XS egress: fragment + submit one codestream on the schedule starting at `base`. Split out
+  // because it shares nothing with the raster walk — no lines, no SRDs, and a per-frame packet count.
+  void send_jxs_frame(const spark::st2110::VideoFrame& frame, uint64_t base, uint64_t now, bool pace);
   void emit_live(bool force = false);  // periodic "spark_live tx_*" line (1 Hz) for the daemon
   void audio_loop();  // relay thread: AudioBridge -> capture+L -> tx_pp queue 1 (fixed mode only)
 
@@ -89,6 +93,10 @@ class St2110TxOp : public holoscan::Operator {
   // --- runtime state ---
   std::unique_ptr<spark::net::ISt2110TxBackend> backend_;
   std::unique_ptr<spark::st2110::Packetizer> pktz_;
+  // ST 2110-22 egress. Exactly one of pktz_/jxs_pktz_ is set, chosen from the incoming frame's
+  // VideoFormat::codec at ensure_pacer() time.
+  std::unique_ptr<spark::st2110::JxsPacketizer> jxs_pktz_;
+  double jxs_pace_span_ = 0.0;      // fraction of the frame interval a codestream is spread over
   uint64_t gap_ns_ = 0;             // per-packet pacing interval (even/linear)
   // Gapped (2110TPN) pacing for IP10: each line's packets burst early in its line slot then idle,
   // matching the Blackmagic reference. pace_gapped_ enables it; else even gap_ns_ is used.

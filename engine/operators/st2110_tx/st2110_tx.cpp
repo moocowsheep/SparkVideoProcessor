@@ -237,11 +237,36 @@ void St2110TxOp::emit_live(bool force) {
 }
 
 void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
-  if (pktz_) return;
+  if (pktz_ || jxs_pktz_) return;
+  frame_interval_ns_ = static_cast<uint64_t>(1e9 / fmt.fps);
+  if (fmt.is_jxs()) {
+    // ST 2110-22: a codestream has no raster, so none of the line-aligned/gapped shaping below
+    // applies — packets are spread EVENLY, which is what ST 2110-21 shaping reduces to without line
+    // structure. Narrow still means "finish within the active period" (a receiver decodes on the
+    // same raster clock even though the wire has no lines); wide uses the whole frame interval.
+    // The packet count varies per frame with the codestream length, so the gap is computed per frame
+    // in send_jxs_frame(); this only fixes the span it divides.
+    jxs_pktz_ = std::make_unique<spark::st2110::JxsPacketizer>(payload_size_.get(), /*pt=*/96,
+                                                               ssrc_.get());
+    const bool wide = tx_wide_.get();
+    double fill = pacing_fill_.get();
+    if (!(fill > 0.0) || fill > 1.0) fill = 1.0;
+    jxs_pace_span_ = (wide ? 1.0 : fmt.active_ratio()) * fill;
+    eff_horizon_ns_ = pacing_horizon_ns_.get();
+    if (frame_interval_ns_ > 20000000) {  // same low-rate rule as raw: submit further ahead
+      const uint64_t big = frame_interval_ns_ - 4000000;
+      if (big > eff_horizon_ns_) eff_horizon_ns_ = big;
+    }
+    HOLOSCAN_LOG_INFO(
+        "st2110_tx: JPEG XS (RFC 9134) {}x{}@{:.3f}fps, {} octet fragments, {} pacing span {:.3f}, "
+        "horizon {} ns",
+        fmt.width, fmt.height, fmt.fps, jxs_pktz_->fragment_octets(), wide ? "WIDE" : "NARROW",
+        jxs_pace_span_, eff_horizon_ns_);
+    return;
+  }
   pktz_ = std::make_unique<spark::st2110::Packetizer>(fmt, payload_size_.get(), /*pt=*/96,
                                                       ssrc_.get());
   const uint32_t ppf = pktz_->packets_per_frame();
-  frame_interval_ns_ = static_cast<uint64_t>(1e9 / fmt.fps);
   const bool wide = tx_wide_.get();
   // ST 2110-21 pacing window. Narrow (2110TPN) spreads the frame's packets over the ACTIVE period only
   // (T_frame × active/total lines) — the rate a narrow receiver drains at; pacing faster overflows its
@@ -337,7 +362,11 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
   auto maybe = op_input.receive<spark::st2110::VideoFrame>("frame");
   if (!maybe) return;
   auto& frame = maybe.value();
-  if (!frame.data || frame.data->size() != frame.format.octets_per_frame()) {
+  // Raw frames are exactly one raster; a JPEG XS codestream is variable-length inside a worst-case
+  // buffer, so the invariant is "the live bytes fit" rather than "the buffer is the frame".
+  const uint64_t wire_bytes = frame.wire_bytes();
+  if (!frame.data || wire_bytes == 0 || frame.data->size() < wire_bytes ||
+      (!frame.format.is_jxs() && frame.data->size() != frame.format.octets_per_frame())) {
     HOLOSCAN_LOG_ERROR("st2110_tx: frame buffer size mismatch — dropping frame {}",
                        frame.frame_number);
     return;
@@ -537,11 +566,13 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
   const uint64_t base = schedule_base_ns_;
   const bool pace = pacing_.get();
 
+  // The media timestamp is decided identically for both codecs — only who consumes it differs.
+  uint32_t media_rtp_ts = 0;
   if (fixed_active_) {
     // Fixed mode: the RTP timestamp derives straight from the wire schedule — a true PTP-epoch
     // stamp (capture + L), the ST 2110-10 ideal. The base never jumps (skips leave it untouched),
     // so there is no media-clock state to anchor or slew, and skipped frames are honest gaps.
-    pktz_->start_frame(spark::st2110::rtp_timestamp_90k(base));
+    media_rtp_ts = spark::st2110::rtp_timestamp_90k(base);
   } else {
     // RTP media timestamp from a MONOTONIC clock anchored once to the GM-locked egress. Decoupling it
     // from schedule_base_ns_ matters: the pacer may re-anchor base (jump), and a timestamp that jumped
@@ -549,7 +580,7 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
     // BMD-class receivers hold a solid lock. It does SLEW (bounded, below) toward base in genlock mode
     // so the two stay glued across trims and re-anchors without ever stepping.
     if (media_ts_ns_ == 0) media_ts_ns_ = base;
-    pktz_->start_frame(spark::st2110::rtp_timestamp_90k(media_ts_ns_));
+    media_rtp_ts = spark::st2110::rtp_timestamp_90k(media_ts_ns_);
     // Advance the media clock one frame — plus, in genlock mode, a bounded slew toward the wire base.
     // Without the slew, any base re-anchor or trim leaves the RTP timestamps permanently offset from
     // the wire schedule, and a timestamp-driven receiver keeps playing at the OLD latency: the trimmed
@@ -563,6 +594,15 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
     }
     media_ts_ns_ += frame_interval_ns_ + media_adj;
   }
+
+  if (jxs_pktz_) {  // ST 2110-22: fragment the codestream instead of walking a raster
+    jxs_pktz_->start_frame(media_rtp_ts, static_cast<uint32_t>(wire_bytes));
+    send_jxs_frame(frame, base, now, pace);
+    schedule_base_ns_ = base + frame_interval_ns_;
+    ++frames_sent_;
+    return;
+  }
+  pktz_->start_frame(media_rtp_ts);
 
   uint32_t i = 0;
   uint32_t pace_line = 0xffffffffu, pace_intra = 0;
@@ -635,6 +675,49 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
 
   schedule_base_ns_ = base + frame_interval_ns_;  // next frame begins exactly one interval later
   ++frames_sent_;
+}
+
+// ST 2110-22 egress. A JPEG XS frame is one variable-length codestream, so the per-packet schedule
+// is a straight even spread: gap = (frame interval x span) / packets, recomputed each frame because
+// the packet count follows the codestream length. There is no line structure to align to, so the
+// per-line-burst and gapped shapers the raw path uses have nothing to key on — even pacing IS the
+// ST 2110-21 shape here, and it is also the cheapest (one send-on-timestamp WQE per packet at a
+// packet count typically 3-5x below raw, so WQE build cost is a non-issue at any supported rate).
+void St2110TxOp::send_jxs_frame(const spark::st2110::VideoFrame& frame, uint64_t base, uint64_t now,
+                                bool pace) {
+  const uint32_t ppf = jxs_pktz_->packets_for(static_cast<uint32_t>(frame.wire_bytes()));
+  const uint64_t gap =
+      ppf ? static_cast<uint64_t>(static_cast<double>(frame_interval_ns_) * jxs_pace_span_) / ppf : 0;
+  const uint8_t* codestream = frame.data->data();
+
+  uint32_t i = 0;
+  for (spark::st2110::JxsPacketPlan p; jxs_pktz_->next(p); ++i) {
+    uint64_t send_ts = base + static_cast<uint64_t>(i) * gap;
+    if (send_ts < now) send_ts = now;  // grid briefly behind the NIC clock: send now, never past-stamp
+    // Same closed-loop throttle as the raw path (the gate-4 lesson): never let the in-flight
+    // schedule run past the tx_pp future window. Fixed-latency mode sleeps rather than spins,
+    // because there the lead can be most of L and spinning that long would peg a core for nothing.
+    if (pace && throttle_enabled_) {
+      const auto t0 = std::chrono::steady_clock::now();
+      while (send_ts > backend_->now_ns() + eff_horizon_ns_) {
+        if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(50)) {
+          HOLOSCAN_LOG_WARN(
+              "st2110_tx: pacing throttle hit 50ms cap — disabling self-throttle (check now_ns() "
+              "units / pacing_horizon_ns); NIC tx_pp still active");
+          throttle_enabled_ = false;
+          break;
+        }
+        const int64_t wait_ns =
+            static_cast<int64_t>(send_ts) - static_cast<int64_t>(backend_->now_ns() + eff_horizon_ns_);
+        if (wait_ns > 200000) std::this_thread::sleep_for(std::chrono::nanoseconds(wait_ns - 100000));
+      }
+    }
+    spark::net::TxBuf buf = backend_->reserve_packet(p.payload_len);
+    jxs_pktz_->write_payload(p, codestream, buf.payload);
+    backend_->submit(buf, send_ts);
+    ++packets_sent_;
+  }
+  backend_->flush();
 }
 
 void St2110TxOp::stop() {

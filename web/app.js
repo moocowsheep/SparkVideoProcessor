@@ -17,8 +17,16 @@ async function api(path, opts) {
 
 // ---------------- engine config model ----------------
 // Simple (non-filter) form fields; the filter panel owns the rest via descriptors.
-const SIMPLE = ['profile', 'frames', 'ip10', 'in_ip10', 'rx_pci', 'tx_pci', 'dst_mac'];
-const CAMEL = { in_ip10: 'inIp10', rx_pci: 'rxPci', tx_pci: 'txPci', dst_mac: 'dstMac' };
+const SIMPLE = ['profile', 'frames', 'ip10', 'in_ip10', 'jxs', 'in_jxs', 'jxs_bpp', 'jxs_max_bpp',
+                'rx_pci', 'tx_pci', 'dst_mac'];
+const CAMEL = { in_ip10: 'inIp10', in_jxs: 'inJxs', jxs_bpp: 'jxsBpp', jxs_max_bpp: 'jxsMaxBpp',
+                rx_pci: 'rxPci', tx_pci: 'txPci', dst_mac: 'dstMac' };
+// Fields a pre-JPEG-XS daemon's proto doesn't know. Its /api/config parses strictly (one unknown
+// JSON key rejects the whole POST), so readForm omits these when the fallback catalog is in use —
+// same rule the newer filter fields follow.
+const NEW_FIELDS = new Set(['jxs', 'in_jxs', 'jxs_bpp', 'jxs_max_bpp']);
+// Number inputs whose value is a real, not an integer count (parseInt would truncate 4.5 bpp to 4).
+const FLOAT_FIELDS = new Set(['jxs_bpp', 'jxs_max_bpp']);
 
 let CATALOG = null;     // filter descriptors from /api/filters (or the fallback below)
 let catalogIsFallback = false;  // pre-/api/filters daemon: post only the fields its proto knows
@@ -307,16 +315,19 @@ function fillForm(c) {
     }
     applyChainState();
   }
+  syncJxsRow();
   formLoaded = true;
 }
 
 function readForm() {
   const c = {};
   for (const id of SIMPLE) {
+    if (catalogIsFallback && NEW_FIELDS.has(id)) continue;
     const el = $(id);
     const key = CAMEL[id] || id;
     if (el.type === 'checkbox') c[key] = el.checked;
-    else if (el.type === 'number') c[key] = parseInt(el.value, 10) || 0;
+    else if (el.type === 'number')
+      c[key] = FLOAT_FIELDS.has(id) ? (Number(el.value) || 0) : (parseInt(el.value, 10) || 0);
     else c[key] = el.value;
   }
   for (const d of CATALOG) {
@@ -378,6 +389,12 @@ function renderStats(s) {
   put('st-ingest', (+s.ingestLatencyUs || 0).toFixed(0));
   put('st-audio', `${s.audioRxPackets ?? 0} / ${s.audioTxPackets ?? 0}`);
   put('st-avlate', s.audioLate ?? 0, +s.audioLate > 0);
+  // JPEG XS frames lost whole (a codestream cannot be partially decoded, so each one is a repeat on
+  // air). The tile only appears once either direction is JPEG XS — it reads as 0 for every raw run.
+  const jxsOn = !!(lastConfig && (lastConfig.jxs || lastConfig.inJxs));
+  $('stat-jxs').hidden = !jxsOn;
+  const jxsLost = (+s.jxsRxDropped || 0) + (+s.jxsEncodeFailed || 0);
+  put('st-jxs', jxsLost, jxsLost > 0);
 }
 
 let lastRunning = null;  // called every poll tick: only touch the DOM on an actual transition
@@ -389,6 +406,7 @@ function setRunning(r) {
   $('panel-format').classList.toggle('inactive', r);
   $('panel-filters').classList.toggle('inactive', r);
   for (const id of SIMPLE) $(id).disabled = r;
+  syncJxsRow();  // re-applies the per-direction rate-field rule on top of the running lock
   for (const d of CATALOG || []) {
     $(`fen-${d.name}`).disabled = r || !!d.required;  // required stages are never toggleable
     for (const p of d.params || []) {
@@ -482,6 +500,28 @@ $('power').onclick = async () => {
   }
 };
 for (const id of SIMPLE) $(id).addEventListener('change', () => markDirty(id));
+
+// JPEG XS and IP10 each describe a whole wire format for one direction, so per side they are one
+// choice, not two. The engine resolves a contradictory config in favour of JPEG XS and warns; the
+// panel just never lets it be typed. The rate row follows whether either direction uses the codec.
+for (const [jxsId, ip10Id] of [['jxs', 'ip10'], ['in_jxs', 'in_ip10']]) {
+  $(jxsId).addEventListener('change', () => {
+    if ($(jxsId).checked && $(ip10Id).checked) { $(ip10Id).checked = false; markDirty(ip10Id); }
+    syncJxsRow();
+  });
+  $(ip10Id).addEventListener('change', () => {
+    if ($(ip10Id).checked && $(jxsId).checked) { $(jxsId).checked = false; markDirty(jxsId); }
+    syncJxsRow();
+  });
+}
+function syncJxsRow() {
+  const on = $('jxs').checked || $('in_jxs').checked;
+  $('row-jxs-rate').classList.toggle('disabled', !on);
+  // Each side owns one knob: the encode target only matters when we send, the receive budget only
+  // when we ingest. Greying the irrelevant one keeps "which number did this run use?" unambiguous.
+  $('jxs_bpp').disabled = running || !$('jxs').checked;
+  $('jxs_max_bpp').disabled = running || !$('in_jxs').checked;
+}
 
 // ---------------- NMOS discovery (registry OR mDNS proxy + node, via the daemon proxy) ----------
 // `registry` is the IS-04 Query API base the dashboard reads. In registry-free (P2P) mode it

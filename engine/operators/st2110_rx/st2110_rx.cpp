@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "../audio/audio_bridge.hpp"
 #include "../common/rtp_time.hpp"
@@ -57,6 +58,10 @@ void St2110RxOp::setup(holoscan::OperatorSpec& spec) {
              "true: source mode (one VideoFrame per compute); false: terminal sink", false);
   spec.param(ip10_, "ip10", "IP10 source",
              "source is Blackmagic IP10 (8-bit 4:2:2 pgroups, decoded to 10-bit downstream)", false);
+  spec.param(jxs_, "jxs", "JPEG XS source",
+             "source is ST 2110-22 JPEG XS (RFC 9134); decoded to 10-bit planar downstream", false);
+  spec.param(jxs_max_bpp_, "jxs_max_bpp", "JPEG XS budget",
+             "worst-case codestream bits/pixel used to size reassembly buffers", 12.0);
   spec.param(audio_mcast_, "audio_mcast", "Audio group",
              "companion ST 2110-30 multicast group on this port (empty = no audio)", std::string(""));
   spec.param(audio_src_, "audio_src", "Audio SSM source", "audio source-specific filter",
@@ -79,8 +84,19 @@ void St2110RxOp::start() {
   // IP10 source: the wire carries 8-bit codeword pgroups (4 octets/pgroup), so the depacketizer
   // geometry + reassembly buffer must be 8-bit; UnpackOp IP10-decodes them back to 10-bit planar.
   if (ip10_.get()) fmt_.sampling = spark::st2110::Sampling::YCbCr422_8;
+  // JPEG XS source: no pgroup raster at all — the wire carries a codestream (RFC 9134). It replaces
+  // the pixel-level codec choice above rather than layering on it, so refuse the ambiguous config
+  // instead of guessing which one the operator meant.
+  if (jxs_.get()) {
+    if (ip10_.get())
+      HOLOSCAN_LOG_WARN(
+          "st2110_rx: both ip10 and jxs set for the source — they describe the same wire; using JPEG XS");
+    fmt_.codec = spark::st2110::Codec::JpegXS;
+    fmt_.sampling = spark::st2110::Sampling::YCbCr422_10;  // the DECODED sample format
+    jxs_depkt_ = std::make_unique<spark::st2110::JxsDepacketizer>();
+  }
   depkt_ = std::make_unique<spark::st2110::Depacketizer>(fmt_);
-  frame_buf_.assign(fmt_.octets_per_frame(), 0);
+  frame_buf_.assign(frame_buffer_bytes(), 0);
 
   backend_ = spark::net::make_dpdk_rx_backend();
   spark::net::RxBackendConfig cfg;
@@ -106,21 +122,24 @@ void St2110RxOp::start() {
   if (const char* d = std::getenv("SPARK_RX_DRAIN")) drain_enabled_ = d[0] == '1';
   HOLOSCAN_LOG_INFO("st2110_rx started: RX {} udp:{} group={} profile={} emit_frames={}{}{}", cfg.pci_addr,
                     cfg.udp_port, cfg.mcast_group.empty() ? "(none)" : cfg.mcast_group, profile_.get(),
-                    emit_frames_.get(), ip10_.get() ? " IP10" : "",
+                    emit_frames_.get(),
+                    fmt_.is_jxs() ? " JPEG-XS" : (ip10_.get() ? " IP10" : ""),
                     cap_target_ ? " CAPTURE" : "");
+  if (fmt_.is_jxs())
+    HOLOSCAN_LOG_INFO("st2110_rx: JPEG XS reassembly buffers {} bytes ({:.1f} bpp cap at {}x{})",
+                      frame_buffer_bytes(), jxs_max_bpp_.get(), fmt_.width, fmt_.height);
 
   // Source mode: a dedicated thread drains the NIC continuously (see poll_loop). compute() only
   // pops finished frames, so NIC polling never stalls while TX paces the previous frame.
   if (emit_frames_.get()) poll_thread_ = std::thread(&St2110RxOp::poll_loop, this);
 }
 
-void St2110RxOp::account(const spark::st2110::RxPacketInfo& info, const spark::net::RxPacket& pkt,
-                         uint64_t now_ns) {
+void St2110RxOp::account(uint32_t sequence, const spark::net::RxPacket& pkt, uint64_t now_ns) {
   if (have_last_) {
-    const uint32_t gap = info.sequence - (last_seq_ + 1);  // uint32 wrap-safe
-    if (gap != 0 && gap < 0x80000000u) lost_ += gap;       // forward gap = loss; ignore reorder
+    const uint32_t gap = sequence - (last_seq_ + 1);  // uint32 wrap-safe
+    if (gap != 0 && gap < 0x80000000u) lost_ += gap;  // forward gap = loss; ignore reorder
   }
-  last_seq_ = info.sequence;
+  last_seq_ = sequence;
   have_last_ = true;
   if (pkt.has_timestamp && now_ns >= pkt.hw_timestamp_ns) {
     const uint64_t lat = now_ns - pkt.hw_timestamp_ns;
@@ -223,10 +242,21 @@ uint64_t St2110RxOp::video_capture_ns(uint32_t rtp_ts, uint64_t ref) {
   return cap;
 }
 
+// Reassembly-buffer size. A raw frame is exactly one pixel raster; a JPEG XS frame is a
+// variable-length codestream, so the buffer is a CAP derived from the configured worst-case rate and
+// VideoFrame::payload_bytes says how much of it a given frame actually filled.
+size_t St2110RxOp::frame_buffer_bytes() const {
+  if (!fmt_.is_jxs()) return static_cast<size_t>(fmt_.octets_per_frame());
+  double bpp = jxs_max_bpp_.get();
+  if (!(bpp > 0.0)) bpp = 12.0;
+  const double bytes = static_cast<double>(fmt_.width) * fmt_.height * bpp / 8.0;
+  return static_cast<size_t>(bytes) + 4096;  // + slack for headers/markers at tiny rasters
+}
+
 std::shared_ptr<std::vector<uint8_t>> St2110RxOp::next_buffer() {
   if (buf_ring_.empty()) {
     buf_ring_.resize(8);
-    for (auto& b : buf_ring_) b = std::make_shared<std::vector<uint8_t>>(fmt_.octets_per_frame());
+    for (auto& b : buf_ring_) b = std::make_shared<std::vector<uint8_t>>(frame_buffer_bytes());
   }
   // Hand back a buffer that ONLY the ring references (use_count == 1). A buffer still held by a queued
   // or in-flight frame must never be reused — overwriting it mid-pipeline corrupts a frame that's about
@@ -237,9 +267,108 @@ std::shared_ptr<std::vector<uint8_t>> St2110RxOp::next_buffer() {
     buf_idx_ = (buf_idx_ + 1) % buf_ring_.size();
     if (b.use_count() == 1) return b;
   }
-  auto nb = std::make_shared<std::vector<uint8_t>>(fmt_.octets_per_frame());
+  auto nb = std::make_shared<std::vector<uint8_t>>(frame_buffer_bytes());
   buf_ring_.push_back(nb);
   return nb;
+}
+
+// --- per-packet reassembly ------------------------------------------------------------------------
+// Both return true when the packet completed the frame currently in cur_buf_.
+
+// RFC 4175: every packet says where its pixels go, so a lost packet leaves a hole and the frame is
+// still worth showing. Scatter and wait for the marker.
+bool St2110RxOp::ingest_raw(const spark::net::RxPacket& pkt, uint64_t now_ns) {
+  spark::st2110::RxPacketInfo info;
+  if (!depkt_->parse(pkt.payload, pkt.len, info)) {
+    ++bad_;
+    return false;
+  }
+  account(info.sequence, pkt, now_ns);
+  cap_record(info, pkt);
+  if (cur_first_) {
+    cur_ts_ = info.rtp_timestamp;
+    cur_arrival_ns_ = pkt.has_timestamp ? pkt.hw_timestamp_ns : now_ns;
+    cur_first_ = false;
+  }
+  depkt_->scatter(info, pkt.payload, cur_buf_->data());
+  return info.marker;
+}
+
+// RFC 9134 codestream mode: packets carry no offset, only the {SEP,P} counter, so the codestream is
+// rebuilt by concatenating fragments in order. That makes loss unrecoverable in a way raw loss is
+// not — a missing fragment shifts every following byte, so the decoder would either error out or
+// reconstruct plausible garbage. Any discontinuity therefore latches cur_bad_ and the whole frame is
+// dropped at the marker. Frames still arrive at the source cadence; a lost one is a repeat, not a tear.
+bool St2110RxOp::ingest_jxs(const spark::net::RxPacket& pkt, uint64_t now_ns) {
+  spark::st2110::JxsRxPacketInfo info;
+  if (!jxs_depkt_->parse(pkt.payload, pkt.len, info)) {
+    ++bad_;
+    return false;
+  }
+  seq_ext_ = spark::st2110::seq16_extend(seq_ext_, info.sequence, have_seq_ext_);
+  have_seq_ext_ = true;
+  account(seq_ext_, pkt, now_ns);
+  if (info.slice_mode) {
+    // Slice mode packetizes each slice independently with its own headers; concatenating those as
+    // if they were codestream fragments would produce a malformed stream. Report, do not guess.
+    ++jxs_slice_mode_;
+    if (jxs_slice_mode_ == 1)
+      HOLOSCAN_LOG_WARN(
+          "st2110_rx: sender uses JPEG XS SLICE packetization (K=1), which this receiver does not "
+          "reassemble — ask the sender for codestream mode (packetmode=0)");
+    cur_bad_ = true;
+    return false;
+  }
+
+  if (cur_first_) {
+    cur_ts_ = info.rtp_timestamp;
+    cur_arrival_ns_ = pkt.has_timestamp ? pkt.hw_timestamp_ns : now_ns;
+    cur_first_ = false;
+    cur_len_ = 0;
+    cur_bad_ = false;
+    jxs_next_pkt_ = 0;
+  } else if (info.rtp_timestamp != cur_ts_) {
+    // A new frame started before the previous one's marker arrived: its tail was lost. Abandon the
+    // partial frame and begin this one here, rather than splicing two codestreams together.
+    ++jxs_incomplete_;
+    if (jxs_incomplete_ == 1 || (jxs_incomplete_ % 60) == 0)
+      HOLOSCAN_LOG_WARN("st2110_rx: JPEG XS frame ended without its marker — {} incomplete so far",
+                        jxs_incomplete_);
+    cur_ts_ = info.rtp_timestamp;
+    cur_arrival_ns_ = pkt.has_timestamp ? pkt.hw_timestamp_ns : now_ns;
+    cur_len_ = 0;
+    cur_bad_ = false;
+    jxs_next_pkt_ = 0;
+  }
+
+  if (info.packet_counter != jxs_next_pkt_) cur_bad_ = true;  // gap or reorder: position is lost
+  jxs_next_pkt_ = info.packet_counter + 1;
+
+  if (cur_len_ + info.data_len > cur_buf_->size()) {
+    // The sender's rate exceeds the configured cap (jxs_max_bpp). Truncating would hand the decoder
+    // a codestream missing its tail, so drop the frame and say what to change.
+    if (!cur_bad_)
+      HOLOSCAN_LOG_WARN(
+          "st2110_rx: JPEG XS codestream exceeds the {} byte reassembly budget — raise "
+          "SPARK_JXS_MAX_BPP (currently {:.1f} bpp)",
+          cur_buf_->size(), jxs_max_bpp_.get());
+    cur_bad_ = true;
+  } else {
+    std::memcpy(cur_buf_->data() + cur_len_, pkt.payload + info.data_offset, info.data_len);
+    cur_len_ += info.data_len;
+  }
+
+  if (!info.marker) return false;
+  if (cur_bad_ || cur_len_ == 0) {
+    ++jxs_corrupt_;
+    if (jxs_corrupt_ == 1 || (jxs_corrupt_ % 60) == 0)
+      HOLOSCAN_LOG_WARN("st2110_rx: dropped a JPEG XS frame with a broken codestream — {} so far",
+                        jxs_corrupt_);
+    cur_first_ = true;  // restart reassembly on the next packet; caller sees no completed frame
+    cur_len_ = 0;
+    return false;
+  }
+  return true;
 }
 
 void St2110RxOp::compute(holoscan::InputContext&, holoscan::OutputContext& op_output,
@@ -262,12 +391,24 @@ void St2110RxOp::compute_sink() {
     if (n == 0) continue;
     const uint64_t now = backend_->now_ns();
     for (uint16_t i = 0; i < n; ++i) {
+      if (fmt_.is_jxs()) {  // sink mode only counts; no reassembly target beyond the header parse
+        spark::st2110::JxsRxPacketInfo info;
+        if (!jxs_depkt_->parse(pkts[i].payload, pkts[i].len, info)) {
+          ++bad_;
+          continue;
+        }
+        seq_ext_ = spark::st2110::seq16_extend(seq_ext_, info.sequence, have_seq_ext_);
+        have_seq_ext_ = true;
+        account(seq_ext_, pkts[i], now);
+        if (info.marker) ++frames_;
+        continue;
+      }
       spark::st2110::RxPacketInfo info;
       if (!depkt_->parse(pkts[i].payload, pkts[i].len, info)) {
         ++bad_;
         continue;
       }
-      account(info, pkts[i], now);
+      account(info.sequence, pkts[i], now);
       cap_record(info, pkts[i]);
       depkt_->scatter(info, pkts[i].payload, frame_buf_.data());
       if (info.marker) ++frames_;
@@ -296,23 +437,17 @@ void St2110RxOp::poll_loop() {
         audio_ingest(pkts[i], now);
         continue;
       }
-      spark::st2110::RxPacketInfo info;
-      if (!depkt_->parse(pkts[i].payload, pkts[i].len, info)) {
-        ++bad_;
-        continue;
-      }
-      account(info, pkts[i], now);
-      cap_record(info, pkts[i]);
-      if (cur_first_) {
-        cur_ts_ = info.rtp_timestamp;
-        cur_arrival_ns_ = pkts[i].has_timestamp ? pkts[i].hw_timestamp_ns : now;
-        cur_first_ = false;
-      }
-      depkt_->scatter(info, pkts[i].payload, cur_buf_->data());
-      if (info.marker) {  // frame complete (a burst spans < one frame, so at most once)
+      // Reassemble by wire codec (RFC 4175 raster vs RFC 9134 codestream); everything downstream of
+      // "the frame is complete" — timing, the queue, the drain governor — is identical for both.
+      const bool complete =
+          fmt_.is_jxs() ? ingest_jxs(pkts[i], now) : ingest_raw(pkts[i], now);
+      if (complete) {  // frame complete (a burst spans < one frame, so at most once)
         spark::st2110::VideoFrame f;
         f.data = cur_buf_;
         f.format = fmt_;
+        // JPEG XS: the codestream filled only part of the worst-case buffer. 0 for raw, where the
+        // whole buffer is the frame.
+        f.payload_bytes = fmt_.is_jxs() ? cur_len_ : 0;
         // ABSOLUTE capture time (PTP epoch): the 32-bit RTP ts unwrapped against the first packet's
         // PHC arrival. Restart-invariant and wrap-free, so a FIXED genlock offset (capture + L) is
         // a true end-to-end latency — and audio, unwrapped the same way, shares the timeline.
@@ -381,6 +516,9 @@ void St2110RxOp::emit_live(bool force) {
   // Unique tokens so the control daemon can grab each field unambiguously (latest-wins).
   HOLOSCAN_LOG_INFO("spark_live rx_frames={} rx_packets={} rx_lost={} rx_latency_us={} rx_relatch={}",
                     frames_, packets_, lost_, avg_us, video_relatch_);
+  if (fmt_.is_jxs())
+    HOLOSCAN_LOG_INFO("spark_live jxs_rx_corrupt={} jxs_rx_incomplete={} jxs_rx_slicemode={}",
+                      jxs_corrupt_, jxs_incomplete_, jxs_slice_mode_);
   if (audio_enabled_)
     HOLOSCAN_LOG_INFO("spark_live audio_rx_pkts={} audio_rx_bad={} audio_rx_drop={} audio_rx_relatch={}",
                       audio_pkts_, audio_bad_, audio_drop_, audio_relatch_);
@@ -396,6 +534,11 @@ void St2110RxOp::print_stats() {
       "raw_burst={} hw_missed={} nombuf={} | ingest latency min/avg/max = {}/{}/{} ns ({} samples)",
       frames_, packets_, lost_, bad_, q_dropped_, rs.rx_packets, rs.raw_received, rs.rx_missed,
       rs.rx_nombuf, (lat_min_ == UINT64_MAX ? 0 : lat_min_), avg, lat_max_, lat_cnt_);
+  if (fmt_.is_jxs())
+    HOLOSCAN_LOG_INFO(
+        "st2110_rx JPEG XS: corrupt={} incomplete={} slice_mode_pkts={} (corrupt/incomplete frames "
+        "are dropped whole — a JPEG XS codestream cannot be partially decoded)",
+        jxs_corrupt_, jxs_incomplete_, jxs_slice_mode_);
 }
 
 void St2110RxOp::stop() {

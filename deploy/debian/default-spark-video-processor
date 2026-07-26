@@ -11,3 +11,11 @@
 #
 # PTP domain used for grandmaster auto-tracking via pmc (default 127):
 #SPARK_PTP_DOMAIN=127
+#
+# ST 2110-22 JPEG XS, per direction (docs/M11-jpegxs.md). Normally set from the
+# dashboard/NMOS rather than here. Only available if the engine was built with
+# MooCUDAJXS (-DSPARK_JXS_DIR); see NOTICE for the JPEG XS licensing statement.
+#SPARK_JXS=0          # encode the output as JPEG XS
+#SPARK_IN_JXS=0       # source is JPEG XS (decode on ingest)
+#SPARK_JXS_BPP=4      # encoder constant-rate target, bits/pixel
+#SPARK_JXS_MAX_BPP=12 # decoder-side worst-case budget, bits/pixel

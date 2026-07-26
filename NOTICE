@@ -12,6 +12,7 @@ components. Their source is NOT distributed as part of this repository; they
 are obtained separately at build/run time (see docs/SETUP.md). Each remains
 under its own license.
 
+  - MooCUDAJXS (optional; JPEG XS codec) ....... see that project's license
   - NVIDIA Holoscan SDK ......................... Apache License 2.0
   - gRPC ....................................... Apache License 2.0
   - DPDK ....................................... BSD-3-Clause
@@ -26,6 +27,25 @@ their respective NVIDIA license agreements. They are not redistributed here:
 
   - NVIDIA CUDA Toolkit (cudart, NPP)
   - NVIDIA Optical Flow SDK / libnvidia-opticalflow
+
+------------------------------------------------------------------------------
+JPEG XS (ISO/IEC 21122)
+------------------------------------------------------------------------------
+
+This software can optionally encode and decode JPEG XS (ISO/IEC 21122), carried
+as SMPTE ST 2110-22 / RFC 9134. The feature is off by default and is only built
+when the separately obtained MooCUDAJXS codec is present; no JPEG XS codec
+source is distributed as part of this repository.
+
+JPEG XS is a standardized codec that may be covered by patents and may be
+subject to licensing terms independent of this software's Apache 2.0 license.
+
+  You are solely responsible for determining if your use of jpeg-xs requires
+  any additional licenses. The developer of this project is not responsible
+  for obtaining any such licenses, nor liable for any licensing fees due, in
+  connection with your use of jpeg-xs.
+
+------------------------------------------------------------------------------
 
 NVIDIA, CUDA, Holoscan, and DGX Spark are trademarks and/or registered
 trademarks of NVIDIA Corporation. SMPTE and ST 2110 are trademarks of the

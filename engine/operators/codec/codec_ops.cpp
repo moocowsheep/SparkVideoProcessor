@@ -11,6 +11,7 @@
 #include <cuda_runtime.h>
 
 #include "../pipeline_caps.hpp"
+#include "host_zerocopy.hpp"
 #include "ip10_codec.hpp"
 #include "pixel_codec.hpp"
 
@@ -27,29 +28,7 @@ uint64_t now_ns() {
       .count();
 }
 
-// Zero-copy host access: on GB10 (Grace Blackwell, cache-coherent unified LPDDR5x) the GPU can read/
-// write ordinary malloc'd host memory directly (pageableMemoryAccess), so the packed-frame staging
-// copies (H2D in unpack, D2H in pack) are pure overhead — the kernels touch each octet exactly once
-// anyway. SPARK_ZEROCOPY=0 forces the copy path (A/B or fallback), =1 forces zero-copy (testing);
-// unset auto-detects. Decided once, logged once.
-bool host_zerocopy() {
-  static const bool on = [] {
-    bool v = false;
-    const char* e = std::getenv("SPARK_ZEROCOPY");
-    if (e && *e) {
-      v = std::string(e) != "0";
-    } else {
-      cudaDeviceProp prop{};
-      int dev = 0;
-      if (cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&prop, dev) == cudaSuccess)
-        v = prop.pageableMemoryAccess != 0;
-    }
-    HOLOSCAN_LOG_INFO("codec_ops: host zero-copy {} ({})", v ? "ON" : "OFF",
-                      e && *e ? "SPARK_ZEROCOPY" : "auto: pageableMemoryAccess");
-    return v;
-  }();
-  return on;
-}
+using spark::codec::host_zerocopy;  // shared H2D/D2H staging decision (host_zerocopy.hpp)
 }  // namespace
 
 // ---- UnpackOp: VideoFrame (host packed) -> GpuFrame (device planar) ----

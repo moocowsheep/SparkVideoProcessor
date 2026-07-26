@@ -27,6 +27,7 @@
 
 #include <holoscan/holoscan.hpp>
 
+#include "../st2110_tx/rtp_jxs.hpp"
 #include "../st2110_tx/rtp_st2110.hpp"
 #include "../st2110_tx/st2110_format.hpp"
 #include "rx_backend.hpp"
@@ -50,10 +51,15 @@ class St2110RxOp : public holoscan::Operator {
   void compute_sink();                                  // emit_frames=false: loop run_seconds
   void compute_emit_one(holoscan::OutputContext& out);  // emit_frames=true: pop one frame, emit
   void poll_loop();  // emit mode: dedicated thread, continuously drains the NIC into frames
-  void account(const spark::st2110::RxPacketInfo& info, const spark::net::RxPacket& pkt,
+  void account(uint32_t sequence, const spark::net::RxPacket& pkt,
                uint64_t now_ns);  // loss + ingest-latency bookkeeping
+  // Per-packet reassembly, one function per wire codec. Both return true when the packet completed
+  // the frame now sitting in cur_buf_ (raw: the pixel raster; JPEG XS: cur_len_ codestream bytes).
+  bool ingest_raw(const spark::net::RxPacket& pkt, uint64_t now_ns);
+  bool ingest_jxs(const spark::net::RxPacket& pkt, uint64_t now_ns);
   void audio_ingest(const spark::net::RxPacket& pkt, uint64_t now_ns);  // 2110-30 -> AudioBridge
   uint64_t video_capture_ns(uint32_t rtp_ts, uint64_t ref);  // unwrap + broken-epoch guard
+  size_t frame_buffer_bytes() const;  // raw: octets_per_frame(); JPEG XS: the codestream cap
   std::shared_ptr<std::vector<uint8_t>> next_buffer();  // ring buffer for emitted frames
 
   holoscan::Parameter<std::string> pci_addr_;
@@ -71,6 +77,15 @@ class St2110RxOp : public holoscan::Operator {
   holoscan::Parameter<bool> manage_eal_;    // false in multi-backend processes (shared DpdkEal)
   holoscan::Parameter<bool> emit_frames_;   // true: source mode (emit one VideoFrame per compute)
   holoscan::Parameter<bool> ip10_;          // source carries Blackmagic IP10 (8-bit pgroups); decoded downstream
+  // Source carries ST 2110-22 JPEG XS (RFC 9134). Reassembly becomes ordered concatenation of a
+  // variable-length codestream instead of addressed writes into a pixel raster; JxsDecodeOp decodes
+  // it downstream. Mutually exclusive with ip10_ (both describe the same wire).
+  holoscan::Parameter<bool> jxs_;
+  // Worst-case codestream budget, in bits per pixel, used to size the reassembly buffers. The
+  // sender's real rate is not knowable in advance (it is not in the SDP), so this is a cap: a frame
+  // that overruns it is dropped rather than allowed to overflow. Raw 4:2:2 10-bit is 20 bpp, so the
+  // default still saves most of the memory while leaving generous headroom over typical 2110-22 rates.
+  holoscan::Parameter<double> jxs_max_bpp_;
   // Companion ST 2110-30 audio flow (M10): received on the same port/queue, classified by the
   // backend, and handed to the TX audio relay via AudioBridge. Empty group = no audio.
   holoscan::Parameter<std::string> audio_mcast_;
@@ -83,7 +98,8 @@ class St2110RxOp : public holoscan::Operator {
 
   std::unique_ptr<spark::net::ISt2110RxBackend> backend_;
   std::unique_ptr<spark::st2110::Depacketizer> depkt_;
-  std::vector<uint8_t> frame_buf_;  // reassembly target for sink mode (size == octets_per_frame())
+  std::unique_ptr<spark::st2110::JxsDepacketizer> jxs_depkt_;  // set only when jxs_ is on
+  std::vector<uint8_t> frame_buf_;  // reassembly target for sink mode (size == frame_buffer_bytes())
   spark::st2110::VideoFormat fmt_;
 
   // emit-mode reassembly: a ring of frame buffers + the in-progress one (poll-thread local).
@@ -93,6 +109,19 @@ class St2110RxOp : public holoscan::Operator {
   bool cur_first_ = true;
   uint32_t cur_ts_ = 0;
   uint64_t cur_arrival_ns_ = 0;  // first-packet NIC HW arrival — the RTP-unwrap reference
+  // --- JPEG XS reassembly (poll-thread only) ---
+  // A JPEG XS packet is position-IMPLICIT: it carries no offset, only a counter, so fragments are
+  // concatenated in order and a single gap invalidates the whole codestream. cur_bad_ latches that,
+  // and the frame is dropped instead of handed to the decoder — a torn codestream is not a torn
+  // picture, it is a decoder error (or worse, plausible garbage).
+  size_t cur_len_ = 0;            // codestream bytes accumulated into cur_buf_
+  bool cur_bad_ = false;          // this frame lost/reordered a fragment or overran the buffer
+  uint32_t jxs_next_pkt_ = 0;     // expected {SEP,P} counter of the next fragment
+  uint32_t seq_ext_ = 0;          // 16-bit RTP sequence extended to 32 bits (no RFC 4175 ESN here)
+  bool have_seq_ext_ = false;
+  uint64_t jxs_corrupt_ = 0;      // frames dropped: missing/reordered fragment or buffer overrun
+  uint64_t jxs_incomplete_ = 0;   // frames abandoned: a new RTP timestamp arrived before the marker
+  uint64_t jxs_slice_mode_ = 0;   // packets rejected: slice packetization mode (K=1), unsupported
   // Broken-sender-epoch guard for the VIDEO stamps (poll-thread only), mirroring the audio one
   // below: same device fault observed on both essences (video epoch seen +2.0s off TAI).
   uint32_t video_ts_delta_ = 0;      // latched correction (0 = verbatim stamps)

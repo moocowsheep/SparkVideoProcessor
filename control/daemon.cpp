@@ -182,6 +182,12 @@ void parse_stats(PipelineStats& st) {
   st.set_audio_tx_packets(grab(log, "audio_tx_pkts="));
   st.set_audio_late(grab(log, "audio_tx_late=") + grab(log, "audio_tx_drop=") +
                     grab(log, "audio_rx_drop="));
+  // ST 2110-22 JPEG XS (tokens absent -> 0 when that direction isn't JPEG XS). RX-side losses are
+  // counted at both ends of the reassembly (a broken codestream, and one abandoned mid-frame) plus
+  // the decoder's own rejects, because all three land on air the same way: a repeated frame.
+  st.set_jxs_rx_dropped(grab(log, "jxs_rx_corrupt=") + grab(log, "jxs_rx_incomplete=") +
+                        grab(log, "jxs_dec_failed="));
+  st.set_jxs_encode_failed(grab(log, "jxs_enc_failed="));
 }
 
 // Reap the child if it exited on its own; update state. Caller holds the lock.
@@ -227,6 +233,13 @@ bool start_locked(State& s, std::string& msg) {
     setenv("SPARK_FRC", std::to_string(frc_mode).c_str(), 1);
     setenv("SPARK_IP10", c.ip10() ? "1" : "0", 1);  // Blackmagic IP10 10:8 output (for 2160p60 to BMD)
     setenv("SPARK_IN_IP10", c.in_ip10() ? "1" : "0", 1);  // source is IP10 (decode on RX)
+    // ST 2110-22 JPEG XS, per direction. The rate knobs are only overridden when set (>0), so a
+    // config that leaves them at the proto3 zero keeps the engine defaults (4 / 12 bpp).
+    setenv("SPARK_JXS", c.jxs() ? "1" : "0", 1);           // encode the output as JPEG XS
+    setenv("SPARK_IN_JXS", c.in_jxs() ? "1" : "0", 1);     // source is JPEG XS (decode on ingest)
+    if (c.jxs_bpp() > 0.0) setenv("SPARK_JXS_BPP", std::to_string(c.jxs_bpp()).c_str(), 1);
+    if (c.jxs_max_bpp() > 0.0)
+      setenv("SPARK_JXS_MAX_BPP", std::to_string(c.jxs_max_bpp()).c_str(), 1);
     // Filter chain (M9): sharpen amount, proc amp params (0 contrast/saturation = unset -> the engine
     // treats them as neutral 1.0), and the optional explicit chain-order override.
     setenv("SPARK_SHARPEN", std::to_string(c.sharpen()).c_str(), 1);

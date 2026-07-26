@@ -108,6 +108,32 @@ message PipelineConfig {
   // untouched, both 0 = stage off. Map to SPARK_NR_LUMA/SPARK_NR_CHROMA. JSON: nrLuma nrChroma
   double nr_luma = 43;
   double nr_chroma = 44;
+
+  // --- ST 2110-22 JPEG XS (ISO/IEC 21122, RFC 9134) ---
+  // Per-direction and independent of each other, exactly like the ip10 pair above: the engine can
+  // decode JPEG XS in and send raw out, encode JPEG XS out from a raw source, or transcode both
+  // ways. JPEG XS and IP10 both describe a whole wire format, so setting both on the SAME direction
+  // is contradictory — the engine resolves it in favour of JPEG XS and logs a warning.
+  //
+  // LICENSING: you are solely responsible for determining if your use of jpeg-xs requires any
+  // additional licenses. The developer of this project is not responsible for obtaining any such
+  // licenses, nor liable for any licensing fees due, in connection with your use of jpeg-xs.
+  //
+  // Encode the output as JPEG XS. Maps to SPARK_JXS; the sender SDP then advertises video/jxsv.
+  // JSON: jxs
+  bool jxs = 45;
+  // Input source is JPEG XS — the RX reassembles RFC 9134 codestreams and the engine GPU-decodes
+  // them. Auto-set by the NMOS bridge from the connected sender's SDP. Maps to SPARK_IN_JXS.
+  // JSON: inJxs
+  bool in_jxs = 46;
+  // Encoder constant-rate target in bits per pixel (the codestream is exactly this size every
+  // frame). 0 ⇒ engine default (4.0, ~5:1 on 4:2:2 10-bit). Maps to SPARK_JXS_BPP. JSON: jxsBpp
+  double jxs_bpp = 47;
+  // Decoder-side worst-case budget in bits per pixel: sizes the RX reassembly buffers, and a source
+  // exceeding it has frames dropped rather than truncated. Separate from jxs_bpp because the
+  // incoming rate belongs to somebody else's encoder and is not carried in the SDP. 0 ⇒ engine
+  // default (12.0). Maps to SPARK_JXS_MAX_BPP. JSON: jxsMaxBpp
+  double jxs_max_bpp = 48;
 }
 
 enum PipelineState {
@@ -136,6 +162,12 @@ message PipelineStats {
   uint64 audio_rx_packets = 15;  // 2110-30 packets received (companion flow)
   uint64 audio_tx_packets = 16;  // 2110-30 packets relayed at capture + L
   uint64 audio_late = 17;        // relayed late or dropped (host stall / L too small)
+  // --- ST 2110-22 JPEG XS health (0 unless that direction is JPEG XS) ---
+  // A JPEG XS codestream cannot be partially decoded, so a lost fragment costs a whole frame: these
+  // are the frames the RX dropped whole (broken/incomplete codestream) and the frames the encoder
+  // could not produce. Nonzero here shows up on air as repeats, not tears.
+  uint64 jxs_rx_dropped = 18;
+  uint64 jxs_encode_failed = 19;
 }
 
 message PipelineStatus {

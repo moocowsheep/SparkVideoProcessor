@@ -156,6 +156,78 @@ inline bool sdp_tp_wide() {
   return s == "wide" || s == "W" || s == "2110TPW";
 }
 
+// Which codec the VIDEO sender's SDP advertises. IP10 and JPEG XS are alternatives, not layers —
+// each fully describes the wire — so this carries the choice as one value instead of two booleans
+// that could disagree. jxs_bpp is only meaningful when jxs is set (it sizes the b=AS declaration).
+struct WireCodec {
+  bool ip10 = false;
+  bool jxs = false;
+  double jxs_bpp = 0.0;
+  bool operator==(const WireCodec& o) const {
+    return ip10 == o.ip10 && jxs == o.jxs && jxs_bpp == o.jxs_bpp;
+  }
+  bool operator!=(const WireCodec& o) const { return !(*this == o); }
+  const char* name() const { return jxs ? " JPEG-XS" : (ip10 ? " IP10" : ""); }
+};
+
+// Declare b=AS (application-specific bandwidth) in kbps, computed from a per-frame octet count plus
+// ~4% header overhead. A receiver may size its buffer from it; without one, BiDirect-class receivers
+// have been seen to under-allocate and drop the frame tail.
+void set_bandwidth(nmos::sdp_parameters& sdp, double octets_per_frame, double fps) {
+  if (!(octets_per_frame > 0.0) || !(fps > 0.0)) return;
+  const uint64_t kbps = static_cast<uint64_t>(octets_per_frame * 8.0 * fps / 1000.0 * 1.04);
+  sdp.bandwidth = nmos::sdp_parameters::bandwidth_t{ sdp::bandwidth_types::application_specific, kbps };
+}
+
+// Read one fmtp value out of an sdp_parameters, as a number (handles the "60000/1001" rational form).
+double fmtp_num(const nmos::sdp_parameters& sdp, const utility::string_t& key) {
+  const auto it = std::find_if(sdp.fmtp.begin(), sdp.fmtp.end(),
+                               [&](const std::pair<utility::string_t, utility::string_t>& p) { return p.first == key; });
+  if (it == sdp.fmtp.end()) return 0.0;
+  const std::string v = utility::us2s(it->second);
+  const auto sl = v.find('/');
+  try {
+    if (sl == std::string::npos) return std::stod(v);
+    const double n = std::stod(v.substr(0, sl)), d = std::stod(v.substr(sl + 1));
+    return d != 0.0 ? n / d : 0.0;
+  } catch (...) { return 0.0; }
+}
+
+// Rewrite a raw-video SDP into ST 2110-22 JPEG XS (RFC 9134) form. Same approach as the IP10 rewrite
+// below: keep nmos-cpp's raw-video SDP for ts-refclk/mediaclk/framerate/components and swap the codec
+// signalling. Media type becomes video/jxsv; packetmode=0 (codestream) and transmode=1 (sequential)
+// are what the engine's packetizer emits (see engine rtp_jxs.hpp) and RFC 9134 requires them to be
+// declared. `depth` and `sampling` describe the DECODED image, as they do for IP10.
+//
+// Deliberately absent: profile/level/sublevel. The encoder writes PIH Ppih/Plev = 0 (unrestricted) by
+// default, and advertising a standardized profile the codestream does not actually claim would make
+// this SDP lie to a conformance-checking receiver. Set SPARK_JXS_PROFILE/LEVEL and add them here
+// together, or not at all.
+void apply_jxs_video(nmos::sdp_parameters& sdp, double bits_per_pixel) {
+  sdp.rtpmap.encoding_name = U("jxsv");
+  nmos::sdp_parameters::fmtp_t out;
+  const auto carry = [&](const utility::string_t& key) {
+    const auto it = std::find_if(sdp.fmtp.begin(), sdp.fmtp.end(),
+                                 [&](const std::pair<utility::string_t, utility::string_t>& p) { return p.first == key; });
+    if (it != sdp.fmtp.end()) out.push_back(*it);
+  };
+  carry(U("sampling"));
+  carry(U("depth"));
+  carry(U("width"));
+  carry(U("height"));
+  carry(U("exactframerate"));
+  carry(U("colorimetry"));
+  out.emplace_back(U("packetmode"), U("0"));   // codestream packetization (RFC 9134 K=0)
+  out.emplace_back(U("transmode"), U("1"));    // sequential transmission (T=1)
+  out.emplace_back(U("SSN"), U("ST2110-22:2022"));
+  out.emplace_back(U("TP"), sdp_tp_wide() ? U("2110TPW") : U("2110TPN"));
+  const double w = fmtp_num(sdp, U("width")), h = fmtp_num(sdp, U("height"));
+  const double fps = fmtp_num(sdp, U("exactframerate"));
+  sdp.fmtp = std::move(out);
+  // The encoder is constant-rate, so the frame size is exactly width x height x bpp / 8.
+  if (bits_per_pixel > 0.0) set_bandwidth(sdp, w * h * bits_per_pixel / 8.0, fps);
+}
+
 // Rewrite a raw-video SDP into Blackmagic IP10 (10:8) form. We reuse nmos-cpp's raw-video SDP for the
 // ts-refclk/mediaclk/framerate/components, then swap the codec signalling per the published IP10 spec:
 // encoding name "vnd.blackmagicdesign.ip10", SSN=ST2110-22:2022, TP=2110TPN, and the Blackmagic
@@ -187,37 +259,19 @@ void apply_ip10_video(nmos::sdp_parameters& sdp) {
 
   // Declare b=AS (application-specific bandwidth). Blackmagic's own IP10 SDP carries it (e.g. b=AS:8262000
   // for 2160p59.94) and a receiver may size its buffer from it; without it BiDirect can under-allocate and
-  // drop the frame tail (bottom-of-frame). Compute from the 8-bit IP10 geometry: (w/2)*h*4 octets/frame
-  // × 8 × fps, + ~4% header overhead, in kbps.
-  const auto fval = [&](const utility::string_t& k) -> utility::string_t {
-    const auto it = std::find_if(sdp.fmtp.begin(), sdp.fmtp.end(),
-                                 [&](const std::pair<utility::string_t, utility::string_t>& p) { return p.first == k; });
-    return it != sdp.fmtp.end() ? it->second : utility::string_t{};
-  };
-  const auto num = [](const utility::string_t& s) -> double {
-    const std::string v = utility::us2s(s);
-    const auto sl = v.find('/');
-    try {
-      if (sl == std::string::npos) return std::stod(v);
-      const double n = std::stod(v.substr(0, sl)), d = std::stod(v.substr(sl + 1));
-      return d != 0.0 ? n / d : 0.0;
-    } catch (...) { return 0.0; }
-  };
-  const double w = num(fval(U("width"))), h = num(fval(U("height"))), fps = num(fval(U("exactframerate")));
-  if (w > 0 && h > 0 && fps > 0) {
-    const uint64_t kbps = static_cast<uint64_t>((w / 2.0) * h * 4.0 * 8.0 * fps / 1000.0 * 1.04);
-    sdp.bandwidth = nmos::sdp_parameters::bandwidth_t{ sdp::bandwidth_types::application_specific, kbps };
-  }
+  // drop the frame tail (bottom-of-frame). Compute from the 8-bit IP10 geometry: (w/2)*h*4 octets/frame.
+  const double w = fmtp_num(sdp, U("width")), h = fmtp_num(sdp, U("height"));
+  set_bandwidth(sdp, (w / 2.0) * h * 4.0, fmtp_num(sdp, U("exactframerate")));
 }
 
 // Build an ST 2110 SDP transport file for a sender from its CURRENT node/source/flow + resolved
 // IS-05 transport params. The flow is read LIVE, so updating its frame_width/height/grain_rate and
-// re-running this regenerates the SDP. `ip10` rewrites the VIDEO sender's SDP to Blackmagic IP10 (10:8)
-// — required for 2160p59.94/60 into Blackmagic receivers. Returns null for an unknown sender. Caller
-// holds the model lock.
+// re-running this regenerates the SDP. `codec` rewrites the VIDEO sender's SDP to Blackmagic IP10
+// (10:8) — required for 2160p59.94/60 into Blackmagic receivers — or to ST 2110-22 JPEG XS. Returns
+// null for an unknown sender. Caller holds the model lock.
 value build_sender_transportfile(const nmos::resources& node_resources, const Ids& ids,
                                  const nmos::resource& sender, const nmos::resource& connection_sender,
-                                 bst::optional<int> ptp_domain, bool ip10) {
+                                 bst::optional<int> ptp_domain, const WireCodec& codec) {
   nmos::id source_id, flow_id;
   if (connection_sender.id == ids.sender_v) { source_id = ids.source_v; flow_id = ids.flow_v; }
   else if (connection_sender.id == ids.sender_a) { source_id = ids.source_a; flow_id = ids.flow_a; }
@@ -237,7 +291,11 @@ value build_sender_transportfile(const nmos::resources& node_resources, const Id
                                         nmos::details::payload_type_video_default, mids, ptp_domain, tp)
       : nmos::make_audio_sdp_parameters(node->data, source->data, flow->data, sender.data,
                                         nmos::details::payload_type_audio_default, mids, ptp_domain, 1.0 /*ptime ms*/);
-  if (ip10 && nmos::formats::video == format) apply_ip10_video(sdp_params);  // raw 10-bit -> IP10 10:8
+  // Video only, and at most one codec rewrite: each fully replaces the raw signalling.
+  if (nmos::formats::video == format) {
+    if (codec.jxs) apply_jxs_video(sdp_params, codec.jxs_bpp);        // raw 10-bit -> JPEG XS
+    else if (codec.ip10) apply_ip10_video(sdp_params);                // raw 10-bit -> IP10 10:8
+  }
 
   auto& transport_params = nmos::fields::transport_params(nmos::fields::endpoint_active(connection_sender.data));
   auto session_description = nmos::make_session_description(sdp_params, transport_params);
@@ -253,10 +311,11 @@ nmos::connection_sender_transportfile_setter make_spark_transportfile_setter(
   const auto ptp_domain = ptp_domain_setting(settings);
   return [&node_resources, ids, ptp_domain](const nmos::resource& sender, const nmos::resource& connection_sender,
                                 value& endpoint_transportfile) {
-    // ip10=false here: at activation the daemon's IP10 choice isn't known yet. NodeStateSync polls
-    // /api/status and rebuilds the video SDP with the real IP10 state within a few seconds (same
+    // Raw here: at activation the daemon's codec choice isn't known yet. NodeStateSync polls
+    // /api/status and rebuilds the video SDP with the real codec within a few seconds (same
     // eventual-consistency path it uses for output resolution and the PTP grandmaster).
-    auto tf = build_sender_transportfile(node_resources, ids, sender, connection_sender, ptp_domain, false);
+    auto tf = build_sender_transportfile(node_resources, ids, sender, connection_sender, ptp_domain,
+                                         WireCodec{});
     if (!tf.is_null()) endpoint_transportfile = tf;  // model mutex already held by the calling thread
   };
 }
@@ -288,7 +347,11 @@ utility::string_t active_sdp(const value& endpoint_active) {
 class EngineController {
  public:
   struct Rtp { utility::string_t group, src, iface; uint32_t port = 0; bool active = false; };
-  struct VideoFmt { uint32_t width = 0, height = 0, depth = 0; utility::string_t fps, sampling; bool ip10 = false; };
+  struct VideoFmt {
+    uint32_t width = 0, height = 0, depth = 0;
+    utility::string_t fps, sampling;
+    bool ip10 = false, jxs = false;  // source wire codec, parsed from its SDP
+  };
 
   EngineController(const utility::string_t& control_url, slog::base_gate& gate)
       : client_(control_url), gate_(gate), worker_([this] { run(); }) {}
@@ -359,7 +422,10 @@ class EngineController {
         c[U("inWidth")] = vfmt.width; c[U("inHeight")] = vfmt.height;
         c[U("inExactframerate")] = value::string(vfmt.fps);
         c[U("inDepth")] = vfmt.depth; c[U("inSampling")] = value::string(vfmt.sampling);
+        // Both ingest codecs are derived from the source SDP, so they are SET (not preserved):
+        // connecting an IP10 or JPEG XS source auto-enables the matching decode.
         c[U("inIp10")] = value::boolean(vfmt.ip10);
+        c[U("inJxs")] = value::boolean(vfmt.jxs);
       }
       // TX egress groups: set when our matching sender is activated, else clear. txSrc MUST match the
       // sender SDP's source-filter (vtx.src = the sender's resolved source_ip) or SSM receivers drop us.
@@ -441,6 +507,11 @@ void parse_video_fmtp(const utility::string_t& sdp_u, EngineController::VideoFmt
   // Match both vendor spellings ("vnd.blackmagic-design.ip10" / "...blackmagicdesign...") + the scheme.
   f.ip10 = sdp.find("scheme=10:8") != std::string::npos ||
            (sdp.find("blackmagic") != std::string::npos && sdp.find("ip10") != std::string::npos);
+  // ST 2110-22 JPEG XS source (RFC 9134): the rtpmap encoding name is "jxsv". Match the rtpmap line
+  // specifically rather than the whole SDP, so an unrelated occurrence of the token can't trip it.
+  // packetmode= is the other giveaway — it exists only in a jxsv fmtp.
+  f.jxs = sdp.find("jxsv/90000") != std::string::npos || sdp.find("packetmode=") != std::string::npos;
+  if (f.jxs) f.ip10 = false;  // one wire, one codec
 }
 
 // ----- IS-05 on-activation: translate connection state into engine control via the daemon -----
@@ -593,12 +664,14 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
 
   // ---- video receiver (ingest: ST 2110-20 raw 4:2:2 10-bit) ----
   {
-    // Accept raw AND Blackmagic IP10 (so an IP10 2160p59.94/60 sender's SDP can stage/activate on this
-    // receiver). The format params (sampling/depth/width/height/rate) match the raw constraint_sets below.
+    // Accept raw, Blackmagic IP10 and ST 2110-22 JPEG XS, so any of those senders' SDPs can stage and
+    // activate on this receiver. The format params (sampling/depth/width/height/rate) describe the
+    // DECODED image for all three, so the raw constraint_sets below apply unchanged.
     auto receiver = nmos::make_receiver(ids.receiver_v, ids.device, nmos::transports::rtp, interface_names,
                                         nmos::formats::video,
                                         { nmos::media_types::video_raw,
-                                          nmos::media_type{ U("video/vnd.blackmagicdesign.ip10") } },
+                                          nmos::media_type{ U("video/vnd.blackmagicdesign.ip10") },
+                                          nmos::media_type{ U("video/jxsv") } },
                                         settings);
     receiver.data[nmos::fields::label] = value::string(node_label + U(" - video in"));
     receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({ value_of({
@@ -691,11 +764,17 @@ class NodeStateSync {
     if (0 == w || 0 == h) return;  // daemon output not configured yet
     const auto gmid = (body.has_field(U("ptpGmid")) && body.at(U("ptpGmid")).is_string())
                           ? body.at(U("ptpGmid")).as_string() : utility::string_t{};
-    apply(w, h, output_rate(cfg_str(c, U("inExactframerate")), cfg_uint(c, U("frcMode"))), gmid,
-          cfg_bool(c, U("ip10")));
+    WireCodec codec;
+    codec.jxs = cfg_bool(c, U("jxs"));
+    codec.ip10 = !codec.jxs && cfg_bool(c, U("ip10"));  // engine resolves the clash the same way
+    // 0 (proto3 unset) means the engine default; keep the SDP's b=AS in step with it.
+    codec.jxs_bpp = cfg_num(c, U("jxsBpp"));
+    if (codec.jxs && !(codec.jxs_bpp > 0.0)) codec.jxs_bpp = 4.0;
+    apply(w, h, output_rate(cfg_str(c, U("inExactframerate")), cfg_uint(c, U("frcMode"))), gmid, codec);
   }
 
-  void apply(uint32_t w, uint32_t h, const nmos::rational& rate, const utility::string_t& gmid, bool ip10) {
+  void apply(uint32_t w, uint32_t h, const nmos::rational& rate, const utility::string_t& gmid,
+             const WireCodec& codec) {
     auto lock = model_.write_lock();
     auto flow = nmos::find_resource(model_.node_resources, { ids_.flow_v, nmos::types::flow });
     if (model_.node_resources.end() == flow) return;  // resources not inserted yet
@@ -732,9 +811,10 @@ class NodeStateSync {
       updated = true;
     }
 
-    // (2b) IP10 codec on/off -> video SDP signalling (rtpmap/fmtp). Video sender SDP only.
-    if (ip10 != ip10_) {
-      ip10_ = ip10;
+    // (2b) wire codec (raw / IP10 / JPEG XS, and the JPEG XS rate that sets b=AS) -> video SDP
+    // signalling (rtpmap/fmtp/bandwidth). Video sender SDP only.
+    if (codec != codec_) {
+      codec_ = codec;
       v_sdp_dirty_ = true;
       updated = true;
     }
@@ -747,7 +827,7 @@ class NodeStateSync {
       model_.notify();
       slog::log<slog::severities::info>(gate_, SLOG_FLF)
           << "spark nmos: advert -> " << w << "x" << h << " @ " << rate.numerator() << "/" << rate.denominator()
-          << (ip10_ ? " IP10" : "") << " gmid=" << utility::us2s(current_gmid());
+          << codec_.name() << " gmid=" << utility::us2s(current_gmid());
     }
   }
 
@@ -759,8 +839,8 @@ class NodeStateSync {
     if (model_.connection_resources.end() == csender || model_.node_resources.end() == sender) return false;
     if (!sender_resolved(*csender)) return false;
     nmos::modify_resource(model_.connection_resources, sender_id, [&](nmos::resource& cr) {
-      // ip10_ only affects the video sender (build_sender_transportfile ignores it for audio).
-      auto tf = build_sender_transportfile(model_.node_resources, ids_, *sender, cr, ptp_domain_, ip10_);
+      // codec_ only affects the video sender (build_sender_transportfile ignores it for audio).
+      auto tf = build_sender_transportfile(model_.node_resources, ids_, *sender, cr, ptp_domain_, codec_);
       if (!tf.is_null()) cr.data[nmos::fields::endpoint_transportfile] = tf;
     });
     return true;
@@ -813,6 +893,15 @@ class NodeStateSync {
   static utility::string_t cfg_str(const value& c, const utility::string_t& k) {
     return (c.has_field(k) && c.at(k).is_string()) ? c.at(k).as_string() : utility::string_t{};
   }
+  // protobuf-JSON renders a `double` field as a JSON number, but a hand-written config (or a future
+  // mapping change) may present it as a string — accept both, like cfg_uint does.
+  static double cfg_num(const value& c, const utility::string_t& k) {
+    if (!c.has_field(k)) return 0.0;
+    const auto& v = c.at(k);
+    if (v.is_double() || v.is_integer()) return v.as_double();
+    if (v.is_string()) { try { return std::stod(utility::us2s(v.as_string())); } catch (...) {} }
+    return 0.0;
+  }
   static bool cfg_bool(const value& c, const utility::string_t& k) {
     if (!c.has_field(k)) return false;
     const auto& v = c.at(k);
@@ -832,7 +921,7 @@ class NodeStateSync {
   bool stop_ = false;
   bool v_sdp_dirty_ = false;
   bool a_sdp_dirty_ = false;
-  bool ip10_ = false;  // last-applied IP10 state (from the daemon config); flips -> rebuild video SDP
+  WireCodec codec_;  // last-applied wire codec (from the daemon config); changes -> rebuild video SDP
   std::thread thread_;
 };
 

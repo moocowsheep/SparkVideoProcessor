@@ -23,11 +23,24 @@ enum class Sampling {
                 // codewords, which packetize exactly like an 8-bit raw stream (ST 2110-22). See ip10_codec.hpp.
 };
 
+// Wire codec. `Raw` covers everything that packetizes as an RFC 4175 pixel raster — uncompressed
+// 10-bit AND Blackmagic IP10, whose 8-bit codewords sit in ordinary pgroups (Sampling picks which).
+// `JpegXS` is structurally different: an ST 2110-22 / RFC 9134 codestream has no pgroups, no lines
+// and no fixed length, so the pgroup geometry below does not apply to it and the framing lives in
+// rtp_jxs.hpp instead. Anything that reads octets_per_frame() must check is_jxs() first.
+enum class Codec {
+  Raw,     // RFC 4175 pixel raster (uncompressed 10-bit, or IP10 codewords in 8-bit pgroups)
+  JpegXS,  // ISO/IEC 21122 codestream over RFC 9134 (ST 2110-22) — variable length per frame
+};
+
 struct VideoFormat {
   uint32_t width = 0;
   uint32_t height = 0;
   double fps = 0.0;                       // e.g. 59.94 (60000/1001)
   Sampling sampling = Sampling::YCbCr422_10;
+  Codec codec = Codec::Raw;
+
+  bool is_jxs() const { return codec == Codec::JpegXS; }
 
   // --- RFC 4175 pgroup geometry ---
   // 4:2:2 is always 2 pixels per pgroup ({Cb,Y0,Cr,Y1}); only the octet count depends on the sample
@@ -69,10 +82,19 @@ inline VideoFormat profile_2160p() { return VideoFormat{3840, 2160, 60000.0 / 10
 // is the only place that touches it, so that swap is localized). `capture_ts_ns` is the PTP capture
 // time that becomes the RTP media timestamp (ST 2110-10, 90 kHz).
 struct VideoFrame {
-  std::shared_ptr<std::vector<uint8_t>> data;  // size == format.octets_per_frame()
+  std::shared_ptr<std::vector<uint8_t>> data;  // raw: size == format.octets_per_frame()
   VideoFormat format;
   uint64_t capture_ts_ns = 0;
   uint64_t frame_number = 0;
+  // JPEG XS only: the codestream is variable-length, so `data` is a fixed worst-case buffer and this
+  // says how much of it is live. 0 means "raw frame — the whole buffer", which keeps every existing
+  // producer correct without touching it.
+  uint64_t payload_bytes = 0;
+
+  // Wire bytes this frame actually carries, for both codecs.
+  uint64_t wire_bytes() const {
+    return payload_bytes ? payload_bytes : format.octets_per_frame();
+  }
 };
 
 }  // namespace spark::st2110

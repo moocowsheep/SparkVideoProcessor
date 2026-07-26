@@ -55,6 +55,18 @@
       <label class="toggle" style="width:auto" title="Blackmagic IP10 10:8 output (ST 2110-22). Required for Blackmagic receivers to accept 2160p59.94/60 over 10G."><input id="ip10" type="checkbox"><span>IP10 output</span></label>
       <label class="toggle" title="Source stream is Blackmagic IP10 (decode on RX). Auto-detected from the SDP when routed via NMOS."><input id="in_ip10" type="checkbox"><span>source is IP10</span></label>
     </div>
+    <div class="row">
+      <label class="toggle" style="width:auto" title="Encode the output as JPEG XS (ISO/IEC 21122) over ST 2110-22 / RFC 9134. Mutually exclusive with IP10 output — they describe the same wire."><input id="jxs" type="checkbox"><span>JPEG XS output</span></label>
+      <label class="toggle" title="Source stream is JPEG XS (GPU-decoded on ingest). Auto-detected from the SDP when routed via NMOS."><input id="in_jxs" type="checkbox"><span>source is JPEG XS</span></label>
+    </div>
+    <div class="row" id="row-jxs-rate">
+      <label for="jxs_bpp" title="Encoder constant-rate target: the codestream is exactly this many bits per pixel every frame. 4 bpp on 4:2:2 10-bit is ~5:1.">JPEG XS rate</label>
+      <input id="jxs_bpp" type="number" min="0" max="20" step="0.5" style="width:6em">
+      <span class="dim">bits/pixel · encode</span>
+      <label for="jxs_max_bpp" style="width:auto" title="Decoder-side worst-case budget. Sizes the receive buffers; an incoming stream above this has its frames dropped rather than truncated.">max in</label>
+      <input id="jxs_max_bpp" type="number" min="0" max="20" step="0.5" style="width:6em">
+    </div>
+    <p class="hint">JPEG XS (ISO/IEC 21122) may be covered by patents. You are solely responsible for determining if your use of jpeg-xs requires any additional licenses. The developer of this project is not responsible for obtaining any such licenses, nor liable for any licensing fees due, in connection with your use of jpeg-xs.</p>
     <details class="advanced">
       <summary>Transport (advanced — overridden by NMOS routing)</summary>
       <div class="row"><label for="rx_pci">RX PCI</label><input id="rx_pci" type="text"></div>
@@ -82,6 +94,7 @@
   <div class="stat" title="RX ingest latency"><span id="st-ingest">0</span><label>ingest <i>µs</i></label></div>
   <div class="stat" title="ST 2110-30 packets relayed rx / tx"><span id="st-audio">0 / 0</span><label>audio pkts</label></div>
   <div class="stat" title="audio relayed late or dropped"><span id="st-avlate">0</span><label>a/v late</label></div>
+  <div class="stat" id="stat-jxs" title="JPEG XS frames lost whole — a codestream can't be partially decoded, so each shows on air as a repeat" hidden><span id="st-jxs">0</span><label>jxs lost</label></div>
 </footer>
 
 <script src="/app.js"></script>

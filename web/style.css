@@ -105,6 +105,9 @@ button.power.running {
 }
 .slider input[type=range] { width: 100%; accent-color: var(--accent2); height: 20px; }
 .slider.disabled { opacity: .4; }
+/* A whole row greyed because the feature it configures is off (e.g. the JPEG XS rate row while
+   neither direction uses the codec). Inputs are disabled separately — this is only the cue. */
+.row.disabled { opacity: .4; }
 
 /* filter-chain rows */
 .frow {

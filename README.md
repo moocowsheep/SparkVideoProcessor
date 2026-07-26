@@ -39,6 +39,28 @@ docs/      design + findings
 - Integrated **ConnectX-7** (2× QSFP, hot-plug, treat as 2× 100G) is the SMPTE 2110 + PTP NIC.
 - Onboard Realtek 10GbE has **no hardware PTP** — not usable for 2110 timing.
 
+## Wire codecs
+The input and output legs each pick their own wire format, independently — so the engine can ingest
+one codec and emit another, or transcode both ways:
+
+| | uncompressed | Blackmagic IP10 (10:8) | JPEG XS |
+|---|---|---|---|
+| transport | ST 2110-20 (RFC 4175) | ST 2110-22 | ST 2110-22 (RFC 9134) |
+| GUI | default | `IP10 output` / `source is IP10` | `JPEG XS output` / `source is JPEG XS` |
+| env | — | `SPARK_IP10` / `SPARK_IN_IP10` | `SPARK_JXS` / `SPARK_IN_JXS` |
+
+JPEG XS is GPU-encoded/decoded by **MooCUDAJXS** (a separate repository) and is **optional**: point
+CMake at a checkout with `-DSPARK_JXS_DIR=/path/to/MooCUDAJXS` (a sibling checkout beside this repo
+is found automatically). Without it the engine builds and runs unchanged, and only a run that
+actually asks for JPEG XS fails — with a message saying how to enable it. See
+[`docs/M11-jpegxs.md`](docs/M11-jpegxs.md).
+
+> **JPEG XS licensing.** JPEG XS (ISO/IEC 21122) is a standardized codec that may be covered by
+> patents. **You are solely responsible for determining if your use of jpeg-xs requires any
+> additional licenses. The developer of this project is not responsible for obtaining any such
+> licenses, nor liable for any licensing fees due, in connection with your use of jpeg-xs.**
+> See [`NOTICE`](NOTICE).
+
 See the full plan and milestones in `docs/`.
 
 ## Quick diagnostics

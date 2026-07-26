@@ -30,9 +30,54 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(DPDK REQUIRED IMPORTED_TARGET libdpdk)  # DPDK 23.11 mlx5 (tx_pp); PMDs dlopen'd by EAL
 find_package(CUDAToolkit REQUIRED)  # cudart + NPP (resize); NPP host API, no CUDA language needed
 
+# --- JPEG XS codec (MooCUDAJXS) -------------------------------------------------------------------
+# ST 2110-22 encode/decode is OPTIONAL: the codec lives in its own repository and is not vendored
+# here. Point -DSPARK_JXS_DIR at a checkout, or leave it beside this repo / under third_party and it
+# is found automatically. Without it the engine still builds and runs — the JPEG XS operators exist
+# but refuse to start, so only a run that actually asked for JPEG XS is affected.
+#
+# LICENSING: JPEG XS (ISO/IEC 21122) is a standardized codec that may be covered by patents. You are
+# solely responsible for determining if your use of jpeg-xs requires any additional licenses. The
+# developer of this project is not responsible for obtaining any such licenses, nor liable for any
+# licensing fees due, in connection with your use of jpeg-xs. See NOTICE.
+set(SPARK_JXS_DIR "" CACHE PATH "MooCUDAJXS source directory (JPEG XS codec; empty = auto-detect)")
+set(_spark_jxs_candidates
+  "${SPARK_JXS_DIR}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/MooCUDAJXS"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../MooCUDAJXS"     # sibling checkout beside this repo
+)
+set(SPARK_JXS_SOURCE_DIR "")
+foreach(_c IN LISTS _spark_jxs_candidates)
+  if(_c AND EXISTS "${_c}/include/moocudajxs/moocudajxs.h")
+    get_filename_component(SPARK_JXS_SOURCE_DIR "${_c}" ABSOLUTE)
+    break()
+  endif()
+endforeach()
+unset(_spark_jxs_candidates)
+
+if(SPARK_JXS_SOURCE_DIR)
+  message(STATUS "JPEG XS: MooCUDAJXS at ${SPARK_JXS_SOURCE_DIR}")
+  # Build only the library: its tests and interop/live-viewer tools are its own repo's business.
+  set(MOO_JXS_BUILD_TESTS OFF)
+  set(MOO_JXS_BUILD_INTEROP_DRIVER OFF)
+  # Its default is a wide fat binary (sm_75..sm_90); the engine targets GB10 only, and a fat build
+  # of the whole codec is minutes of nvcc for architectures this box cannot run.
+  set(MOO_JXS_CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}" CACHE STRING "" FORCE)
+  add_subdirectory("${SPARK_JXS_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/moocudajxs")
+  # The codec is built with CUDA_SEPARABLE_COMPILATION, so its device symbols must be resolved into
+  # the static library itself — the consuming targets here are plain C++ and never device-link.
+  set_target_properties(moocudajxs PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+else()
+  message(STATUS "JPEG XS: MooCUDAJXS NOT found — building without ST 2110-22 support "
+                 "(set -DSPARK_JXS_DIR=/path/to/MooCUDAJXS to enable)")
+endif()
+
 # --- ST 2110-20 framing core (pure C++; no DPDK / Holoscan) ---------------------------------------
+# Also carries the ST 2110-22 / RFC 9134 JPEG XS framing: same "pure, unit-testable wire format"
+# role, and the RX/TX operators need both packetizers side by side to switch codec per direction.
 add_library(spark_st2110_core STATIC
   operators/st2110_tx/rtp_st2110.cpp
+  operators/st2110_tx/rtp_jxs.cpp
 )
 target_include_directories(spark_st2110_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -77,6 +122,19 @@ add_library(spark_codec STATIC
 )
 target_include_directories(spark_codec PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(spark_codec PUBLIC holoscan::core spark_resize CUDA::cudart)
+
+# --- ST 2110-22 JPEG XS encode/decode operators (MooCUDAJXS) --------------------------------------
+# Always built so the pipeline app can wire the operators unconditionally; SPARK_HAVE_JXS decides
+# whether they carry a real codec or fail at start() with an actionable message.
+add_library(spark_jxs STATIC
+  operators/codec/jxs_codec.cpp
+)
+target_include_directories(spark_jxs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(spark_jxs PUBLIC holoscan::core spark_resize spark_st2110_core CUDA::cudart)
+if(SPARK_JXS_SOURCE_DIR)
+  target_link_libraries(spark_jxs PUBLIC MooCUDAJXS::moocudajxs)
+  target_compile_definitions(spark_jxs PUBLIC SPARK_HAVE_JXS)
+endif()
 
 # --- video filters: proc amp + unsharp sharpen (CUDA) — modular GpuFrame chain stages -------------
 add_library(spark_filters STATIC
@@ -157,13 +215,18 @@ target_link_libraries(frc_smoke PRIVATE spark_frc)
 # full processing pipeline: rx -> unpack -> [filter chain] -> pack -> tx (shared EAL)
 add_executable(st2110_pipeline apps/st2110_pipeline.cpp)
 target_link_libraries(st2110_pipeline
-  PRIVATE spark_operators spark_codec spark_resize spark_frc spark_filters holoscan::core)
+  PRIVATE spark_operators spark_codec spark_jxs spark_resize spark_frc spark_filters holoscan::core)
 
 # --- tests (framing round-trip; pure CPU, runs without NIC/root) -----------------------------------
 enable_testing()
 add_executable(test_rtp_st2110 operators/st2110_tx/test/test_rtp_st2110.cpp)
 target_link_libraries(test_rtp_st2110 PRIVATE spark_st2110_core)
 add_test(NAME rtp_st2110 COMMAND test_rtp_st2110)
+
+# ST 2110-22 / RFC 9134 JPEG XS framing round-trip (pure CPU, no NIC/root/codec)
+add_executable(test_rtp_jxs operators/st2110_tx/test/test_rtp_jxs.cpp)
+target_link_libraries(test_rtp_jxs PRIVATE spark_st2110_core)
+add_test(NAME rtp_jxs COMMAND test_rtp_jxs)
 
 add_executable(test_pixel_codec operators/codec/test/test_pixel_codec.cpp)
 target_link_libraries(test_pixel_codec PRIVATE spark_codec)

@@ -22,6 +22,7 @@
 #include <holoscan/holoscan.hpp>
 
 #include "operators/codec/codec_ops.hpp"
+#include "operators/codec/jxs_codec.hpp"
 #include "operators/common/dpdk_eal.hpp"
 #include "operators/filters/filters.hpp"
 #include "operators/frc/frc.hpp"
@@ -58,11 +59,52 @@ class St2110Pipeline : public holoscan::Application {
     const uint32_t oh = static_cast<uint32_t>(std::atoll(env("SPARK_OUT_H", "2160").c_str()));
     // Blackmagic IP10 (10:8) output: required for Blackmagic receivers to take 2160p59.94/60 over 10G
     // (uncompressed 4K60 ~12 Gbps won't fit). Off => uncompressed RFC 4175 (unchanged default path).
-    const bool ip10 = env("SPARK_IP10", "0") != "0";
+    bool ip10 = env("SPARK_IP10", "0") != "0";
     // IP10 on the INPUT side: the source (e.g. a Blackmagic 2160p60 sender) is IP10-coded, so the RX
     // depacketizes 8-bit pgroups and the unpack stage IP10-decodes them back to 10-bit. Independent of
     // the output codec — Spark can receive IP10 and send raw, or vice versa.
-    const bool in_ip10 = env("SPARK_IN_IP10", "0") != "0";
+    bool in_ip10 = env("SPARK_IN_IP10", "0") != "0";
+    // ST 2110-22 JPEG XS (ISO/IEC 21122, RFC 9134), per direction and fully independent: the engine
+    // can decode JPEG XS in and send uncompressed or IP10 out, encode JPEG XS out from any source,
+    // or transcode both ways. Each side simply swaps its bridge operator (unpack/pack <-> jxs
+    // decode/encode) and tells the RX/TX which wire format to speak.
+    //
+    // LICENSING: you are solely responsible for determining if your use of jpeg-xs requires any
+    // additional licenses. The developer of this project is not responsible for obtaining any such
+    // licenses, nor liable for any licensing fees due, in connection with your use of jpeg-xs.
+    const bool jxs_out = env("SPARK_JXS", "0") != "0";
+    const bool jxs_in = env("SPARK_IN_JXS", "0") != "0";
+    // Encoder constant-rate target. 4 bpp on 4:2:2 10-bit is ~5:1 (a 2160p59.94 stream lands near
+    // 2 Gbps, comfortably inside 10G where uncompressed 4K60 at ~12 Gbps does not fit at all).
+    const double jxs_bpp = std::atof(env("SPARK_JXS_BPP", "4").c_str());
+    // Decoder-side worst-case budget: the RX sizes reassembly buffers from it, and a source that
+    // exceeds it has its frames dropped rather than truncated. Independent of jxs_bpp — the incoming
+    // rate is a property of somebody else's encoder and is not carried in the SDP.
+    const double jxs_max_bpp = std::atof(env("SPARK_JXS_MAX_BPP", "12").c_str());
+    const uint32_t jxs_cols =
+        static_cast<uint32_t>(std::atoll(env("SPARK_JXS_MAX_COLUMNS", "4").c_str()));
+    // PIH Ppih/Plev, written verbatim into the codestream. Default 0 = unrestricted: the codec does
+    // not claim ISO Part 4 conformance, so stamping a standardized profile would assert something
+    // unverified. Accept hex ("0x3540", the form the spec tables use) or decimal — base 0.
+    const auto parse_base0 = [](const std::string& s) {
+      return static_cast<uint32_t>(std::strtoul(s.c_str(), nullptr, 0));
+    };
+    const uint32_t jxs_profile = parse_base0(env("SPARK_JXS_PROFILE", "0"));
+    const uint32_t jxs_level = parse_base0(env("SPARK_JXS_LEVEL", "0"));
+    // IP10 and JPEG XS both describe the whole wire format for one direction, so they cannot both
+    // apply to the same side. Resolve it here, loudly, instead of letting the RX/TX disagree.
+    if (jxs_out && ip10) {
+      HOLOSCAN_LOG_WARN("output: SPARK_JXS and SPARK_IP10 both set — using JPEG XS, IP10 ignored");
+      ip10 = false;
+    }
+    if (jxs_in && in_ip10) {
+      HOLOSCAN_LOG_WARN("input: SPARK_IN_JXS and SPARK_IN_IP10 both set — using JPEG XS, IP10 ignored");
+      in_ip10 = false;
+    }
+    if ((jxs_out || jxs_in) && !ops::jxs_available())
+      HOLOSCAN_LOG_ERROR(
+          "JPEG XS requested but this engine was built without MooCUDAJXS — the codec operator will "
+          "refuse to start. Re-run CMake with -DSPARK_JXS_DIR=/path/to/MooCUDAJXS.");
     const std::string rx_pci = env("SPARK_RX_PCI", "0000:01:00.1");
     const std::string tx_pci = env("SPARK_TX_PCI", "0002:01:00.0");
     const std::string dst_mac = env("SPARK_DST_MAC", "00:00:5e:00:53:30");
@@ -243,6 +285,11 @@ class St2110Pipeline : public holoscan::Application {
     // Up-convert doubles the media rate; the TX pacer + RTP media clock track out_fps (e.g. 30->60).
     const double out_fps = (frc_active && frc_2x) ? base_fps * 2.0 : base_fps;
 
+    // Bridge operator names. The egress name travels into SPARK_BURST_SINK and the chain log, so it
+    // has to follow whichever codec is actually wired in.
+    const std::string ingress_name = jxs_in ? "jxs_decode" : "unpack";
+    const std::string egress_name = jxs_out ? "jxs_encode" : "pack";
+
     // Announce which op receives FRC's multi-frame burst (the only hop that needs burst-deep input
     // capacity; see pipeline_queue_cap). Must happen BEFORE any make_operator — setup() runs there.
     {
@@ -264,7 +311,8 @@ class St2110Pipeline : public holoscan::Application {
           }
           if (tok == "frc") after_frc = true;
         }
-        if (after_frc && sink.empty()) sink = "pack";  // frc is the last filter -> pack takes the burst
+        // frc is the last filter -> the egress bridge takes the burst
+        if (after_frc && sink.empty()) sink = egress_name;
       }
       setenv("SPARK_BURST_SINK", sink.c_str(), 1);
     }
@@ -281,7 +329,9 @@ class St2110Pipeline : public holoscan::Application {
                                              Arg("mcast_group", rx_mcast), Arg("src_ip", rx_src),
                                              Arg("iface_ip", rx_iface), Arg("in_width", in_w),
                                              Arg("in_height", in_h), Arg("in_fps", in_fps),
-                                             Arg("ip10", in_ip10), Arg("frame_q_depth", q_depth),
+                                             Arg("ip10", in_ip10), Arg("jxs", jxs_in),
+                                             Arg("jxs_max_bpp", jxs_max_bpp),
+                                             Arg("frame_q_depth", q_depth),
                                              Arg("audio_mcast", audio ? rx_a_mcast : std::string("")),
                                              Arg("audio_src", rx_a_src),
                                              Arg("audio_port", audio ? rx_a_port : uint32_t(0)),
@@ -290,8 +340,21 @@ class St2110Pipeline : public holoscan::Application {
     // > 0 => bounded run via CountCondition. Without this guard frames=0 made CountCondition(0)
     // gate the RX to zero compute() calls, so the graph emitted nothing and exited at startup.
     if (frames > 0) rx->add_arg(make_condition<CountCondition>(frames));
-    auto unpack = make_operator<ops::UnpackOp>("unpack");
-    auto pack = make_operator<ops::PackOp>("pack", Arg("out_fps", out_fps), Arg("ip10", ip10));
+    // Ingress/egress bridges between the wire format and the planar GpuFrame the filter chain runs
+    // on. Both sides are independent: whichever codec each direction uses, the chain in between is
+    // byte-identical, so nothing below this point knows what is on the wire.
+    std::shared_ptr<Operator> unpack;
+    if (jxs_in)
+      unpack = make_operator<ops::JxsDecodeOp>(ingress_name, Arg("max_precinct_columns", jxs_cols));
+    else
+      unpack = make_operator<ops::UnpackOp>(ingress_name);
+    std::shared_ptr<Operator> pack;
+    if (jxs_out)
+      pack = make_operator<ops::JxsEncodeOp>(egress_name, Arg("out_fps", out_fps),
+                                             Arg("bits_per_pixel", jxs_bpp),
+                                             Arg("profile", jxs_profile), Arg("level", jxs_level));
+    else
+      pack = make_operator<ops::PackOp>(egress_name, Arg("out_fps", out_fps), Arg("ip10", ip10));
     // Multicast egress: pass the group as dst_ip and zero the MAC so the backend derives it (RFC 1112).
     auto tx = make_operator<ops::St2110TxOp>(
         "st2110_tx", Arg("pci_addr", tx_pci), Arg("manage_eal", false), Arg("udp_port", tx_port),
@@ -300,6 +363,8 @@ class St2110Pipeline : public holoscan::Application {
         Arg("pacing_fill", tx_fill),
         // IP10: 1300-octet UDP payload -> 1280 pixel octets -> exactly 6 packets per 2160p line, matching
         // the Blackmagic reference (line-aligned). Raw keeps the ~1420 budget.
+        // JPEG XS carries an opaque codestream with no raster to align to, so it just takes the
+        // standard ~1420 MTU budget (12 B RTP + 4 B RFC 9134 header + fragment).
         Arg("payload_size", ip10 ? uint32_t(1300) : uint32_t(1420)),
         // IP10 HW pacing: a 2160p frame is ~12960 packets, so give the ring room for a whole frame and a
         // horizon that lets compute() submit it all at once with only a small schedule lead. The NIC
@@ -318,7 +383,11 @@ class St2110Pipeline : public holoscan::Application {
         // holds the whole 15120-pkt frame: compute() dumps it and returns, the NIC tx_pp HW-paces it out,
         // and the scaled throttle horizon keeps frame-overlap ring occupancy under 16384. 1080p raw keeps
         // the small ring (its frame easily fits 8192).
-        Arg("txd", ip10 ? uint32_t(16384) : (oh >= 2160 ? uint32_t(16384) : uint32_t(8192))),
+        // JPEG XS needs no full-frame ring: at 4 bpp a 2160p codestream is ~3k packets (raw is
+        // ~15k), so the standard 8192 ring already holds a whole frame with room to spare.
+        Arg("txd", jxs_out ? uint32_t(8192)
+                           : (ip10 ? uint32_t(16384)
+                                   : (oh >= 2160 ? uint32_t(16384) : uint32_t(8192)))),
         // Genlock (BOTH codecs): anchor the send base to the source's clean capture_ts with an 8ms lead,
         // so the base is source-locked and smooth (no dips/drops from chasing the jittery local clock); it
         // only re-centers on a real >6ms latency spike. horizon 8ms gives the throttle strong backpressure
@@ -342,7 +411,7 @@ class St2110Pipeline : public holoscan::Application {
     // and the flow field is 1/4 the size); sharpen AFTER scale so it counters interpolation softness
     // at the delivery resolution; procamp last as the final levels trim.
     std::vector<std::shared_ptr<Operator>> chain{unpack};
-    std::string composed = "rx -> unpack";
+    std::string composed = "rx -> " + ingress_name;
     std::stringstream toks(filters);
     std::map<std::string, int> seen;  // operator names must be unique; "procamp,procamp" is legal
     for (std::string tok; std::getline(toks, tok, ',');) {
@@ -399,7 +468,9 @@ class St2110Pipeline : public holoscan::Application {
     add_flow(rx, unpack);
     for (size_t i = 0; i + 1 < chain.size(); ++i) add_flow(chain[i], chain[i + 1]);
     add_flow(pack, tx);
-    HOLOSCAN_LOG_INFO("chain: {} -> pack -> tx", composed);
+    HOLOSCAN_LOG_INFO("chain: {} -> {} -> tx", composed, egress_name);
+    HOLOSCAN_LOG_INFO("wire: in={} out={}", jxs_in ? "JPEG XS (ST 2110-22)" : (in_ip10 ? "IP10" : "raw 10-bit"),
+                      jxs_out ? "JPEG XS (ST 2110-22)" : (ip10 ? "IP10" : "raw 10-bit"));
   }
 };
 

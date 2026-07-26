@@ -38,13 +38,36 @@ cd ~/holoscan-sdk
 ./run build --gpu dgpu --cuda 13    # DGX Spark is sbsa/dgpu, NOT igpu (igpu has no CUDA-13 base)
 # result: ~/holoscan-sdk/install-cu13-aarch64-dgpu  (point engine CMake here)
 ```
+### 3a. Vendored SDK sources (not committed — `third_party/` is gitignored)
+
+**NVIDIA Optical Flow SDK — required.** The FRC operator (`spark_frc`) includes
+`nvOpticalFlowCuda.h`; without it the engine build fails at `nvof_flow.cpp`. These are just the
+public driver-API headers (the runtime is the on-system `libnvidia-opticalflow.so`, already
+installed with the driver — nothing to download from an NVIDIA account):
+```bash
+git clone --depth 1 https://github.com/NVIDIA/NVIDIAOpticalFlowSDK.git \
+  spike/third_party/NVIDIAOpticalFlowSDK
+```
+The two headers must land directly in that directory (they are at the repo root, which is what the
+`-I` path in `engine/CMakeLists.txt` and `spike/build_probes.sh` expects). The driver on GB10
+reports OF API 5.0 and the header advertises 2.0; the API is backward compatible, so master works.
+
+**MooCUDAJXS — optional** (ST 2110-22 JPEG XS; see `docs/M11-jpegxs.md` for the licensing notice).
+Auto-detected as a sibling checkout beside this repo, or pass `-DSPARK_JXS_DIR=/path/to/MooCUDAJXS`.
+Without it the engine builds and runs unchanged and only JPEG XS runs are affected.
+
 Then build the engine against it:
 ```bash
 cd /home/saturn/claude/SparkVideoProcessor
 cmake -G Ninja -S engine -B engine/build \
   -DCMAKE_PREFIX_PATH="$HOME/holoscan-sdk/install-cu13-aarch64-dgpu"
 cmake --build engine/build
+ctest --test-dir engine/build     # 10 tests; needs a GPU for filters/sr_net, no NIC or root
 ./engine/build/spark_engine      # placeholder ping graph until M1 wires real operators
+```
+The configure step reports whether JPEG XS is in:
+```
+-- JPEG XS: MooCUDAJXS at /home/saturn/claude/MooCUDAJXS
 ```
 
 ## 4. ST 2110 IO stack — DPDK via Holoscan `advanced_network` (for SMPTE 2110 — gate 2)
