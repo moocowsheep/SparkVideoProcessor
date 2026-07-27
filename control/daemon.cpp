@@ -65,7 +65,12 @@ struct State {
     config.set_pa_saturation(1.0);
     config.set_rx_pci("0000:01:00.0");
     config.set_tx_pci("0002:01:00.0");  // up port on this rig (re-cabled 2026-07: .1 is the down link)
-    config.set_dst_mac("00:00:5e:00:53:30");
+    // Empty on purpose: the TX backend then derives the destination MAC from the multicast group
+    // (RFC 1112), which is what every ST 2110 egress wants. An explicit MAC WINS over that
+    // derivation, so seeding a unicast one here sent the whole paced stream at a single NIC —
+    // invisible from the sender side, which reports a perfectly healthy stream while the receiver
+    // sees nothing. Set it only for a unicast loopback rig, where that is the actual intent.
+    config.set_dst_mac("");
     config.set_frames(0);  // 0 = continuous (live routing); bounded runs set an explicit count
   }
 };
