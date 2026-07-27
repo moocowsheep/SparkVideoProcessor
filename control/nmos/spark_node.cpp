@@ -57,6 +57,7 @@
 #include "nmos/settings.h"          // get_host_interfaces
 #include "nmos/slog.h"
 #include "nmos/transfer_characteristic.h"
+#include "nmos/video_jxsv.h"        // validate_video_jxsv_sdp_parameters
 #include "nmos/transport.h"
 #include "sdp/sdp.h"
 
@@ -514,6 +515,27 @@ void parse_video_fmtp(const utility::string_t& sdp_u, EngineController::VideoFmt
   if (f.jxs) f.ip10 = false;  // one wire, one codec
 }
 
+// The default connection-API transport-file parser only validates "video/raw", "audio/L",
+// "video/smpte291" and "video/SMPTE2022-6" (see nmos-cpp's sdp_utils.cpp get_format); a jxsv PATCH
+// falls through to sdp_processing_error there, which the Connection API maps to a 500 by design (a
+// transport file that can't be parsed is an IS-05 "Internal Error", per AMWA-TV/is-05 issue #40).
+// Dispatch video/jxsv to its own validator so RED V-Raptor / other JPEG XS senders can be patched in.
+nmos::transport_file_parser make_spark_transport_file_parser() {
+  return [](const nmos::resource& receiver, const nmos::resource& connection_receiver,
+            const utility::string_t& transport_file_type, const utility::string_t& transport_file_data,
+            slog::base_gate& gate) {
+    const auto validate_sdp_parameters = [](const web::json::value& receiver, const nmos::sdp_parameters& sdp_params) {
+      if (nmos::media_types::video_jxsv == nmos::get_media_type(sdp_params)) {
+        nmos::validate_video_jxsv_sdp_parameters(receiver, sdp_params);
+      } else {
+        nmos::validate_sdp_parameters(receiver, sdp_params);
+      }
+    };
+    return nmos::details::parse_rtp_transport_file(validate_sdp_parameters, receiver, connection_receiver,
+                                                    transport_file_type, transport_file_data, gate);
+  };
+}
+
 // ----- IS-05 on-activation: translate connection state into engine control via the daemon -----
 nmos::connection_activation_handler make_spark_activation_handler(
     std::shared_ptr<EngineController> ctrl, const nmos::settings& settings, slog::base_gate& gate) {
@@ -572,11 +594,26 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
   const auto host_interfaces = nmos::get_host_interfaces(settings);
   const auto interfaces = nmos::experimental::node_interfaces(host_interfaces);
 
-  // Bind senders/receivers to the media interface that owns the host_address (single leg in v1).
+  // Senders and receivers get their OWN interface leg, because the engine's egress and ingress can
+  // live on different NIC ports (rxPci != txPci — the validated two-port config). Binding both legs
+  // to one host_address, as v1 did, guarantees one of them advertises an address that is not on its
+  // port: the sender's source_ip resolves the SDP source-filter, and Blackmagic-style receivers do
+  // source-specific joins, so a mismatch there makes them discard every packet while the engine
+  // reports a clean paced stream. The receiver's interface_ip likewise selects the port that joins
+  // the group. spark_tx_address / spark_rx_address override per leg; both default to host_address,
+  // so a single-port rig behaves exactly as before.
   const auto& host_address = nmos::fields::host_address(settings);
-  const auto* media_if = find_interface(host_interfaces, host_address);
-  if (!media_if) throw std::logic_error("spark nmos: no interface for host_address " + utility::us2s(host_address));
-  const std::vector<utility::string_t> interface_names{ media_if->name };
+  const auto tx_address = str_field(settings, U("spark_tx_address"), host_address);
+  const auto rx_address = str_field(settings, U("spark_rx_address"), host_address);
+  const auto* tx_if = find_interface(host_interfaces, tx_address);
+  if (!tx_if) throw std::logic_error("spark nmos: no interface for spark_tx_address " + utility::us2s(tx_address));
+  const auto* rx_if = find_interface(host_interfaces, rx_address);
+  if (!rx_if) throw std::logic_error("spark nmos: no interface for spark_rx_address " + utility::us2s(rx_address));
+  const std::vector<utility::string_t> tx_interface_names{ tx_if->name };
+  const std::vector<utility::string_t> rx_interface_names{ rx_if->name };
+  slog::log<slog::severities::info>(gate, SLOG_FLF)
+      << "spark nmos: sender leg " << utility::us2s(tx_if->name) << " (" << utility::us2s(tx_address)
+      << "), receiver leg " << utility::us2s(rx_if->name) << " (" << utility::us2s(rx_address) << ")";
 
   // Human-readable name for controllers / the BMD source list (resources were unlabeled -> blank).
   const auto node_label = str_field(settings, U("spark_label"), U("Spark Video Processor"));
@@ -616,11 +653,11 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
     // source dropdown) filter to senders whose transport matches the receiver's rtp.mcast — a generic
     // rtp sender is hidden even though a forced IS-05 PATCH still connects.
     auto sender = nmos::make_sender(ids.sender_v, ids.flow_v, nmos::transports::rtp_mcast, ids.device,
-                                    manifest.to_string(), interface_names, settings);
+                                    manifest.to_string(), tx_interface_names, settings);
     sender.data[nmos::fields::label] = value::string(node_label + U(" - ST 2110-20 video"));
     auto connection_sender = nmos::make_connection_rtp_sender(ids.sender_v, false /*smpte2022_7*/);
     connection_sender.data[nmos::fields::endpoint_constraints][0][nmos::fields::source_ip] =
-        value_of({ { nmos::fields::constraint_enum, value_from_elements(media_if->addresses) } });
+        value_of({ { nmos::fields::constraint_enum, value_from_elements(tx_if->addresses) } });
     if (bool_field(settings, U("spark_activate_senders"), true)) {
       auto& staged = connection_sender.data[nmos::fields::endpoint_staged];
       staged[nmos::fields::master_enable] = value::boolean(true);
@@ -645,11 +682,11 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
 
     const auto manifest = nmos::experimental::make_manifest_api_manifest(ids.sender_a, settings);
     auto sender = nmos::make_sender(ids.sender_a, ids.flow_a, nmos::transports::rtp_mcast, ids.device,
-                                    manifest.to_string(), interface_names, settings);
+                                    manifest.to_string(), tx_interface_names, settings);
     sender.data[nmos::fields::label] = value::string(node_label + U(" - ST 2110-30 audio"));
     auto connection_sender = nmos::make_connection_rtp_sender(ids.sender_a, false);
     connection_sender.data[nmos::fields::endpoint_constraints][0][nmos::fields::source_ip] =
-        value_of({ { nmos::fields::constraint_enum, value_from_elements(media_if->addresses) } });
+        value_of({ { nmos::fields::constraint_enum, value_from_elements(tx_if->addresses) } });
     if (bool_field(settings, U("spark_activate_senders"), true)) {
       auto& staged = connection_sender.data[nmos::fields::endpoint_staged];
       staged[nmos::fields::master_enable] = value::boolean(true);
@@ -667,7 +704,7 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
     // Accept raw, Blackmagic IP10 and ST 2110-22 JPEG XS, so any of those senders' SDPs can stage and
     // activate on this receiver. The format params (sampling/depth/width/height/rate) describe the
     // DECODED image for all three, so the raw constraint_sets below apply unchanged.
-    auto receiver = nmos::make_receiver(ids.receiver_v, ids.device, nmos::transports::rtp, interface_names,
+    auto receiver = nmos::make_receiver(ids.receiver_v, ids.device, nmos::transports::rtp, rx_interface_names,
                                         nmos::formats::video,
                                         { nmos::media_types::video_raw,
                                           nmos::media_type{ U("video/vnd.blackmagicdesign.ip10") },
@@ -691,14 +728,14 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
     receiver.data[nmos::fields::version] = receiver.data[nmos::fields::caps][nmos::fields::version] = value(nmos::make_version());
     auto connection_receiver = nmos::make_connection_rtp_receiver(ids.receiver_v, false);
     connection_receiver.data[nmos::fields::endpoint_constraints][0][nmos::fields::interface_ip] =
-        value_of({ { nmos::fields::constraint_enum, value_from_elements(media_if->addresses) } });
+        value_of({ { nmos::fields::constraint_enum, value_from_elements(rx_if->addresses) } });
     insert(model.node_resources, std::move(receiver));
     insert(model.connection_resources, std::move(connection_receiver));
   }
 
   // ---- audio receiver (ingest: ST 2110-30 PCM L16/L24 @ 48k) ----
   {
-    auto receiver = nmos::make_audio_receiver(ids.receiver_a, ids.device, nmos::transports::rtp, interface_names, 24, settings);
+    auto receiver = nmos::make_audio_receiver(ids.receiver_a, ids.device, nmos::transports::rtp, rx_interface_names, 24, settings);
     receiver.data[nmos::fields::label] = value::string(node_label + U(" - audio in"));
     receiver.data[nmos::fields::caps][nmos::fields::constraint_sets] = value_of({ value_of({
         { nmos::caps::format::channel_count, nmos::make_caps_integer_constraint({}, 1, 8) },
@@ -709,7 +746,7 @@ void insert_spark_resources(nmos::node_model& model, slog::base_gate& gate) {
     receiver.data[nmos::fields::version] = receiver.data[nmos::fields::caps][nmos::fields::version] = value(nmos::make_version());
     auto connection_receiver = nmos::make_connection_rtp_receiver(ids.receiver_a, false);
     connection_receiver.data[nmos::fields::endpoint_constraints][0][nmos::fields::interface_ip] =
-        value_of({ { nmos::fields::constraint_enum, value_from_elements(media_if->addresses) } });
+        value_of({ { nmos::fields::constraint_enum, value_from_elements(rx_if->addresses) } });
     insert(model.node_resources, std::move(receiver));
     insert(model.connection_resources, std::move(connection_receiver));
   }
@@ -935,6 +972,7 @@ nmos::experimental::node_implementation make_spark_node_implementation(nmos::nod
       .on_load_ca_certificates(nmos::make_load_ca_certificates_handler(model.settings, gate))
       .on_resolve_auto(make_spark_auto_resolver(model.settings))
       .on_set_transportfile(make_spark_transportfile_setter(model.node_resources, model.settings))
+      .on_parse_transport_file(make_spark_transport_file_parser())
       .on_connection_activated(make_spark_activation_handler(ctrl, model.settings, gate));
 }
 

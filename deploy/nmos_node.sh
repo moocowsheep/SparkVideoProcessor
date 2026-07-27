@@ -28,6 +28,13 @@ REGISTRY_HOST="${REGISTRY_HOST:-192.0.2.41}"   # facility registry (registry-hos
 REGISTRY_PORT="${REGISTRY_PORT:-8010}"            # its registration API port
 REGISTRY_VER="${REGISTRY_VER:-v1.3}"
 HOST_ADDR="${HOST_ADDR:-192.0.2.103}"          # this box's media/mgmt IP the node advertises
+# Per-leg media addresses. The engine's ingress and egress can sit on DIFFERENT CX-7 ports (rxPci !=
+# txPci), and each NMOS leg must advertise an address that actually lives on its own port: TX_ADDR
+# resolves the sender SDP's source-filter (SSM receivers like Blackmagic discard everything on a
+# mismatch), RX_ADDR selects the port that joins the source group. Default to HOST_ADDR = one leg,
+# the historical behaviour. On this rig RX is 0000:01:00.0/.103 and TX is 0002:01:00.0/.110.
+TX_ADDR="${TX_ADDR:-192.0.2.110}"
+RX_ADDR="${RX_ADDR:-$HOST_ADDR}"
 HTTP_PORT="${HTTP_PORT:-3242}"                     # multiplexes all of the node's APIs onto one port
 GMID="${GMID:-00-00-5e-ff-fe-00-53-88}"           # initial PTP grandmaster seed for clk0; the node
                                                   # auto-tracks the live GM from the daemon (pmc) at runtime
@@ -42,6 +49,8 @@ settings_json() {
   "logging_level": $LOG_LEVEL,
   "http_port": $HTTP_PORT,
   "host_address": "$HOST_ADDR",
+  "spark_tx_address": "$TX_ADDR",
+  "spark_rx_address": "$RX_ADDR",
   "registry_address": "$REGISTRY_HOST",
   "registration_port": $REGISTRY_PORT,
   "registry_version": "$REGISTRY_VER",
