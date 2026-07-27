@@ -568,15 +568,29 @@ function saveNmosCfg() {
 // headers, so the browser can't fetch them directly; a cross-origin PATCH preflight always fails).
 // Proxying uniformly removes every CORS trap in both registry and mDNS (P2P) modes.
 const prox = (url) => `/api/nmos?u=${encodeURIComponent(url)}`;
+// Blackmagic NMOS endpoints answer a zero-body HTTP 500 on EVERY path for a while after connect or
+// boot — and intermittently afterwards — then serve the identical request normally. A 5xx from one
+// says nothing about the request, so surfacing it straight away reports a perfectly good route as
+// broken (an IP10 PATCH that succeeded on the very next attempt read as "won't accept IP10"). Retry
+// briefly on 5xx; a 4xx is a real rejection and fails immediately.
+async function pfetch(url, init, what) {
+  let last;
+  for (let i = 0; i < 4; i++) {
+    last = await fetch(url, init);
+    if (last.ok) return last;
+    if (last.status < 500) break;
+    await new Promise((done) => setTimeout(done, 300 * (i + 1)));
+  }
+  throw new Error(`${what} -> ${last.status} ${(await last.text()).slice(0, 200)}`);
+}
 async function pget(url, asText) {
-  const r = await fetch(prox(url));
-  if (!r.ok) throw new Error(`GET ${url} -> ${r.status}`);
+  const r = await pfetch(prox(url), undefined, `GET ${url}`);
   return asText ? r.text() : r.json();
 }
 async function ppatch(url, body) {
-  const r = await fetch(`${prox(url)}&m=PATCH`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  if (!r.ok) throw new Error(`PATCH -> ${r.status} ${await r.text()}`);
+  const r = await pfetch(`${prox(url)}&m=PATCH`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+    'PATCH');
   return r.json();
 }
 async function jget(base, path) { return pget(base + path); }
