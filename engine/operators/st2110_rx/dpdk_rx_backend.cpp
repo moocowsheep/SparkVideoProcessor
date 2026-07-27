@@ -25,23 +25,12 @@
 #include <rte_udp.h>
 
 #include "../common/dpdk_eal.hpp"
+#include "../common/dpdk_port.hpp"
 #include "../common/net_addr.hpp"
 #include "rx_backend.hpp"
 
 namespace spark::net {
 namespace {
-
-// Find the DPDK port whose PCI BDF matches `pci` (rte_device::name is the BDF for PCI devices).
-uint16_t find_port_by_pci(const std::string& pci) {
-  uint16_t p;
-  RTE_ETH_FOREACH_DEV(p) {
-    rte_eth_dev_info di{};
-    if (rte_eth_dev_info_get(p, &di) != 0 || !di.device) continue;
-    const char* name = rte_dev_name(di.device);  // BDF for PCI devices (rte_device is opaque)
-    if (name && pci == name) return p;
-  }
-  return RTE_MAX_ETHPORTS;
-}
 
 constexpr uint16_t kRxBurst = 256;
 constexpr uint32_t kMbufCount = 16384;
@@ -61,25 +50,38 @@ class DpdkRxBackend final : public ISt2110RxBackend {
     else if (!DpdkEal::instance().initialized())
       die("manage_eal=false but shared EAL is not initialized (call DpdkEal::init first)");
     create_pool();
-    port_ = find_port_by_pci(cfg_.pci_addr);
-    if (port_ == RTE_MAX_ETHPORTS) die("no DPDK port matches PCI " + cfg_.pci_addr);
-    // Flow isolation, requested BEFORE the port is configured: this mlx5 port function can host the
-    // kernel's management netdev (SSH/ARP) and ptp4l. Non-isolated, dev_start steers all unicast for
-    // the shared MAC into the DPDK queue — and the legacy no-group path adds promiscuous on top — so
-    // the kernel netdev goes deaf the moment the engine starts (observed as SSH sessions dropping).
-    // Isolated, the NIC delivers ONLY explicitly created flows to DPDK; the rest stays kernel-side.
-    rte_flow_error ferr{};
-    isolated_ = rte_flow_isolate(port_, 1, &ferr) == 0;
-    if (!isolated_)
-      std::printf("[st2110_rx] WARN: flow isolation unavailable on %s (%s) — legacy steering will "
-                  "disrupt kernel traffic (SSH/PTP) sharing this port\n",
-                  cfg_.pci_addr.c_str(), ferr.message ? ferr.message : "?");
-    setup_port();
+    // The port itself belongs to DpdkPorts — it may be shared with the TX backend, in which case it
+    // is configured and started only once both roles have attached. Everything below that needs a
+    // live port therefore runs from on_port_started(), not here. Flow isolation is requested rather
+    // than performed: it must precede configure, which is the broker's call now. It matters because
+    // this mlx5 port function can host the kernel's management netdev (SSH/ARP) and ptp4l —
+    // non-isolated, dev_start steers all unicast for the shared MAC into the DPDK queue (and the
+    // legacy no-group path adds promiscuous on top), so the kernel netdev goes deaf the moment the
+    // engine starts. Isolated, the NIC delivers ONLY explicitly created flows to DPDK.
+    PortRequest req;
+    req.role = PortRole::kRx;
+    req.rxd = cfg_.rxd;
+    req.rx_timestamp = true;
+    req.isolate = true;
+    req.igmp_tx = group_be_ != 0;
+    req.rx_pool = pool_;
+    DpdkPorts::instance().attach(cfg_.pci_addr, req,
+                                 [this](const PortLease& l) { on_port_started(l); });
+    attached_ = true;
+  }
+
+  // The port is live: adopt the lease, then do the steering/membership work that needs it.
+  void on_port_started(const PortLease& lease) {
+    port_ = lease.port_id;
+    rxq_ = lease.rx_queue;
+    igmp_q_ = lease.tx_queue;
+    isolated_ = lease.isolated;
+    cfg_.rxd = lease.rxd;
     lookup_rx_timestamp();
-    if (rte_eth_dev_start(port_) < 0) die("rte_eth_dev_start failed");
     if (isolated_) {
-      // Steer exactly our UDP flow(s) to queue 0; kernel keeps everything else. The audio companion
-      // flow shares the queue — receive() classifies per packet (its ~1000 pps are noise next to video).
+      // Steer exactly our UDP flow(s) to our RX queue; kernel keeps everything else. The audio
+      // companion flow shares the queue — receive() classifies per packet (its ~1000 pps are noise
+      // next to video).
       install_flow_rule(group_be_, ssm_src_be_, udp_port_be_);
       if (audio_port_be_) install_flow_rule(audio_group_be_, audio_src_be_, audio_port_be_);
       if (group_be_) send_igmp_join(group_be_, ssm_src_be_, cfg_.mcast_group.c_str());
@@ -113,6 +115,9 @@ class DpdkRxBackend final : public ISt2110RxBackend {
   }
 
   uint16_t receive(RxPacket* out, uint16_t max) override {
+    // A shared port stays down until the TX role attaches too, and the operator's poll thread is
+    // already spinning by then — so answer "nothing yet" rather than poll a port that is not up.
+    if (port_ == RTE_MAX_ETHPORTS) return 0;
     // Periodic IGMP membership renewal (group mode only). Checked rarely from this hot path: every
     // ~256k calls read the PHC clock, and re-send the join every 30s — keeps switch forwarding alive
     // even across a brief source gap, so the stream never freezes from an aged-out membership.
@@ -128,7 +133,7 @@ class DpdkRxBackend final : public ISt2110RxBackend {
     }
     rte_mbuf* bufs[kRxBurst];
     const uint16_t want = max < kRxBurst ? max : kRxBurst;
-    const uint16_t n = rte_eth_rx_burst(port_, 0, bufs, want);
+    const uint16_t n = rte_eth_rx_burst(port_, rxq_, bufs, want);
     raw_received_ += n;
     uint16_t k = 0;
     for (uint16_t i = 0; i < n; ++i) {
@@ -149,6 +154,8 @@ class DpdkRxBackend final : public ISt2110RxBackend {
   }
 
   uint64_t now_ns() override {
+    if (port_ == RTE_MAX_ETHPORTS)
+      die("now_ns before the port came up (a shared port waiting on its tx role?)");
     uint64_t clk = 0;
     // BRINGUP: same realtime-clock-as-ns assumption as the TX backend; PHC-shared with the rx ts.
     if (rte_eth_read_clock(port_, &clk) != 0) die("rte_eth_read_clock unsupported on this port");
@@ -157,7 +164,10 @@ class DpdkRxBackend final : public ISt2110RxBackend {
 
   RxStats stats() override {
     RxStats s{};
+    if (port_ == RTE_MAX_ETHPORTS) return s;
     rte_eth_stats es{};
+    // On a shared port these are the PORT's counters, so opackets/obytes also carry the TX role's
+    // media. Only the rx_* fields below are read, and those are ours alone (bar our IGMP reports).
     if (rte_eth_stats_get(port_, &es) == 0) {
       s.rx_packets = es.ipackets;
       s.rx_bytes = es.ibytes;
@@ -169,13 +179,11 @@ class DpdkRxBackend final : public ISt2110RxBackend {
   }
 
   void shutdown() override {
-    if (port_ != RTE_MAX_ETHPORTS) {
-      if (isolated_) {
-        rte_flow_error e{};
-        rte_flow_flush(port_, &e);
-      }
-      rte_eth_dev_stop(port_);
-      rte_eth_dev_close(port_);
+    // Hand the port back rather than stopping it: on a shared port the TX role may still be using
+    // it, and DpdkPorts stops + closes only once the last holder has let go.
+    if (attached_) {
+      DpdkPorts::instance().release(cfg_.pci_addr, PortRole::kRx);
+      attached_ = false;
       port_ = RTE_MAX_ETHPORTS;
     }
     if (eal_inited_) {
@@ -248,8 +256,8 @@ class DpdkRxBackend final : public ISt2110RxBackend {
   }
 
   // Isolated-mode steering: one rule per stream — IPv4/UDP on its dst port, narrowed to the
-  // multicast group and SSM source when configured — to DPDK queue 0. Everything else (SSH,
-  // ARP, PTP, other groups) keeps flowing to the kernel netdev that shares this port function.
+  // multicast group and SSM source when configured — to our RX queue. Everything else (SSH, ARP,
+  // PTP, other groups) keeps flowing to the kernel netdev that shares this port function.
   void install_flow_rule(uint32_t group_be, uint32_t src_be, uint16_t port_be) {
     rte_flow_attr attr{};
     attr.ingress = 1;
@@ -280,7 +288,7 @@ class DpdkRxBackend final : public ISt2110RxBackend {
     pattern[3].type = RTE_FLOW_ITEM_TYPE_END;
 
     rte_flow_action_queue queue{};
-    queue.index = 0;
+    queue.index = rxq_;
     rte_flow_action actions[2]{};
     actions[0].type = RTE_FLOW_ACTION_TYPE_QUEUE;
     actions[0].conf = &queue;
@@ -294,6 +302,8 @@ class DpdkRxBackend final : public ISt2110RxBackend {
   // Emit an IGMPv3 Membership Report out the RX port so the fabric forwards the group to us. Sent
   // once at join; a production node also answers periodic general queries (follow-on).
   void send_igmp_join(uint32_t group_be, uint32_t src_be, const char* label) {
+    // No queue means no group was configured when we attached, so there is nothing to report for.
+    if (igmp_q_ == kNoQueue) return;
     rte_ether_addr mac{};
     rte_eth_macaddr_get(port_, &mac);
     rte_mbuf* m = rte_pktmbuf_alloc(pool_);
@@ -305,7 +315,7 @@ class DpdkRxBackend final : public ISt2110RxBackend {
     if (len < 60) { std::memset(p + len, 0, 60 - len); len = 60; }  // pad to the Ethernet minimum
     m->data_len = static_cast<uint16_t>(len);
     m->pkt_len = static_cast<uint32_t>(len);
-    if (rte_eth_tx_burst(port_, 0, &m, 1) != 1) {
+    if (rte_eth_tx_burst(port_, igmp_q_, &m, 1) != 1) {
       rte_pktmbuf_free(m);
       std::printf("[st2110_rx] WARNING: IGMP join report not sent (tx_burst=0)\n");
     } else {
@@ -330,31 +340,6 @@ class DpdkRxBackend final : public ISt2110RxBackend {
     if (!pool_) die("rte_pktmbuf_pool_create failed");
   }
 
-  void setup_port() {
-    rte_eth_dev_info dev_info{};
-    if (rte_eth_dev_info_get(port_, &dev_info) != 0) die("rte_eth_dev_info_get failed");
-
-    rte_eth_conf port_conf{};
-    if (dev_info.rx_offload_capa & RTE_ETH_RX_OFFLOAD_TIMESTAMP)
-      port_conf.rxmode.offloads |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
-    // A TX queue is configured only to emit IGMP membership reports for the joined group.
-    const uint16_t nb_tx_q = group_be_ ? 1 : 0;
-    if (rte_eth_dev_configure(port_, 1, nb_tx_q, &port_conf) < 0) die("rte_eth_dev_configure failed");
-
-    uint16_t nb_rxd = cfg_.rxd, nb_txd = group_be_ ? 64 : 0;
-    if (rte_eth_dev_adjust_nb_rx_tx_desc(port_, &nb_rxd, &nb_txd) < 0)
-      die("adjust_nb_rx_tx_desc failed");
-    cfg_.rxd = nb_rxd;
-
-    rte_eth_rxconf rxconf = dev_info.default_rxconf;
-    rxconf.offloads = port_conf.rxmode.offloads;
-    if (rte_eth_rx_queue_setup(port_, 0, nb_rxd, rte_eth_dev_socket_id(port_), &rxconf, pool_) < 0)
-      die("rte_eth_rx_queue_setup failed");
-    if (nb_tx_q &&
-        rte_eth_tx_queue_setup(port_, 0, nb_txd, rte_eth_dev_socket_id(port_), nullptr) < 0)
-      die("rte_eth_tx_queue_setup (IGMP) failed");
-  }
-
   void lookup_rx_timestamp() {
     ts_field_off_ = rte_mbuf_dynfield_lookup(RTE_MBUF_DYNFIELD_TIMESTAMP_NAME, nullptr);
     const int flag_bit = rte_mbuf_dynflag_lookup(RTE_MBUF_DYNFLAG_RX_TIMESTAMP_NAME, nullptr);
@@ -369,8 +354,13 @@ class DpdkRxBackend final : public ISt2110RxBackend {
 
   RxBackendConfig cfg_;
   bool eal_inited_ = false;
+  bool attached_ = false;  // holds a DpdkPorts claim on cfg_.pci_addr
   bool isolated_ = false;  // flow-isolated port: DPDK sees only install_flow_rule()'s traffic
+  // port_ stays RTE_MAX_ETHPORTS until DpdkPorts brings the port up — on a shared port that is when
+  // the TX role attaches too, which can be after this backend's init() has returned.
   uint16_t port_ = RTE_MAX_ETHPORTS;
+  uint16_t rxq_ = 0;             // our RX queue index (from the lease)
+  uint16_t igmp_q_ = kNoQueue;   // TX queue for membership reports; kNoQueue = no group joined
   rte_mempool* pool_ = nullptr;
   uint16_t udp_port_be_ = 0;
   uint32_t group_be_ = 0, ssm_src_be_ = 0;  // network order; 0 = unset (legacy promiscuous path)

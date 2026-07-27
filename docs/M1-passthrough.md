@@ -60,6 +60,45 @@ Two issues were solved first so two busy operators can share a process (see `st2
   main-lcore mask and serialize on one core → ms-scale preemption).
 - one-time TX `warmup_ms` so a co-located/peer RX is polling before TX floods (a startup race).
 
+## RX and TX on one physical port (shared port)
+`rxPci` and `txPci` may name the **same** BDF. That is the configuration for a rig with a single
+cable into the media network — the port is full duplex, and the ConnectX-7s run bifurcated
+(`mlx5_core`, no vfio bind), so DPDK and the kernel netdev already coexist on it.
+
+It needs a broker because DPDK wants a port's whole shape — queue counts and offloads — in one
+`rte_eth_dev_configure()` before `rte_eth_dev_start()`, and a started port refuses to be
+reconfigured. The two backends init independently from their own operators' `start()`, so whichever
+ran second used to take `-EBUSY` off configure and die. `operators/common/dpdk_port.hpp`
+(`DpdkPorts`) now owns the port lifecycle:
+
+- the app declares the plan up front — `DpdkEal::add_device(bdf, role, devargs)`, one call per
+  backend, so naming one BDF twice is what declares a shared port (the `-a` allowlist is
+  deduplicated and the devargs merged, since a duplicate allow entry is an EAL error);
+- each backend `attach()`es with what it needs; the port is configured and started **once**, when
+  the last planned role has attached, with the union of the offloads (RX HW timestamp + tx_pp
+  `SEND_ON_TIMESTAMP`);
+- port-dependent work — queue indices, flow rules, IGMP joins, reading the PHC — runs from the
+  `on_started` callback, not inline in `init()`. A single-role port (every two-port config, and the
+  standalone smokes, which never call `DpdkEal`) is brought up inside its one `attach()`, so the
+  callback fires synchronously and the sequence is unchanged.
+
+Queue map (`plan_queues`, unit-tested in `operators/common/test/test_dpdk_port.cpp`): TX video 0,
+TX audio 1, RX IGMP 2, RX media on rxq 0. The solo cases keep the indices each backend used to pick
+for itself. The RX role's IGMP reports get their own queue rather than sharing the paced media
+queue, whose descriptors *are* the pacing horizon.
+
+What makes it safe is flow isolation, which the RX side already asks for: the NIC delivers only
+explicitly created flows to DPDK and the kernel netdev on the same port function keeps SSH, ARP and
+ptp4l. Isolation is ingress-only, so the TX role is untouched by it.
+
+Two consequences worth knowing:
+- **Stats are per port.** `TxStats.tx_packets` also counts the RX role's IGMP reports (one frame per
+  group per 30 s), and `RxStats` reports the port's `ipackets`. The rx/tx fields each side reads are
+  still its own.
+- **One PHC.** Both roles read `rte_eth_read_clock()` on the same device, so the RX ingest timestamp
+  and the TX pacing base come from one clock — on two ports they are two PTP-slaved clocks with
+  residual offset between them.
+
 ## Next
 1. **Processing operators** between rx and tx: `unpack → resize (NPP) → frc (OFA/FRUC) → pack` (gates
    3/3b already proven on GB10).

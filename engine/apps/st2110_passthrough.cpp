@@ -38,8 +38,8 @@ class St2110Passthrough : public holoscan::Application {
     const std::string dst_mac = env("SPARK_DST_MAC", "00:00:5e:00:53:30");    // port D (0002:01:00.1)
 
     auto& eal = spark::net::DpdkEal::instance();
-    eal.add_device(tx_pci, "tx_pp=500");
-    eal.add_device(rx_pci, "");
+    eal.add_device(tx_pci, spark::net::PortRole::kTx, "tx_pp=500");
+    eal.add_device(rx_pci, spark::net::PortRole::kRx);
     eal.init("0-11", "spark_pass");
 
     // RX in source mode: each compute() reassembles one frame and emits it.

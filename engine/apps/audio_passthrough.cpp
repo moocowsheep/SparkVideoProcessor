@@ -53,8 +53,8 @@ class AudioPassthrough : public holoscan::Application {
     const int64_t packets = static_cast<int64_t>(envu("SPARK_AUDIO_PACKETS", 60000));  // ~60 s @ 1 ms
 
     auto& eal = spark::net::DpdkEal::instance();
-    eal.add_device(tx_pci, "tx_pp=500");
-    eal.add_device(rx_pci, "");
+    eal.add_device(tx_pci, spark::net::PortRole::kTx, "tx_pp=500");
+    eal.add_device(rx_pci, spark::net::PortRole::kRx);
     eal.init("0-11", "spark_audio");
 
     auto rx = make_operator<ops::AudioRxOp>(

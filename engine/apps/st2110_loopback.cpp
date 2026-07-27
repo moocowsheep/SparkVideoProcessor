@@ -39,8 +39,8 @@ class St2110Loopback : public holoscan::Application {
     // One EAL for BOTH ports (tx_pp devarg on the TX port). compose() runs before any operator
     // start(), so EAL is up before the backends (manage_eal=false) attach to their ports.
     auto& eal = spark::net::DpdkEal::instance();
-    eal.add_device("0002:01:00.0", "tx_pp=500");  // TX
-    eal.add_device("0002:01:00.1", "");           // RX
+    eal.add_device("0002:01:00.0", spark::net::PortRole::kTx, "tx_pp=500");  // TX
+    eal.add_device("0002:01:00.1", spark::net::PortRole::kRx);               // RX
     // Wide lcore set: rte_eal_init pins the process affinity mask to these cores and Holoscan's
     // worker threads inherit it, so the busy-spin TX throttle + busy-poll RX need room (4 cores
     // starved them -> loss + ms-scale latency in one process; two-process runs had the box each).

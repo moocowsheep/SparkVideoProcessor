@@ -20,21 +20,31 @@ DpdkEal& DpdkEal::instance() {
   return eal;
 }
 
-void DpdkEal::add_device(const std::string& pci, const std::string& devargs) {
+void DpdkEal::add_device(const std::string& pci, PortRole role, const std::string& devargs) {
   if (inited_) {
     std::printf("[dpdk_eal] WARNING: add_device(%s) after init() — ignored\n", pci.c_str());
     return;
   }
-  allow_.push_back(devargs.empty() ? pci : pci + "," + devargs);
+  DpdkPorts::instance().plan(pci, role);
+  // A shared port is named once per role but must reach EAL as ONE -a entry: a duplicate allow
+  // entry for the same BDF is a device-args error, and the two roles' devargs (the TX side's tx_pp
+  // clock, nothing from the RX side) both have to survive into that single entry.
+  for (auto& d : allow_) {
+    if (d.pci != pci) continue;
+    if (devargs.empty()) return;
+    d.devargs = d.devargs.empty() ? devargs : d.devargs + "," + devargs;
+    return;
+  }
+  allow_.push_back(Device{pci, devargs});
 }
 
 void DpdkEal::init(const std::string& core_list, const std::string& file_prefix) {
   if (inited_) return;  // idempotent: first caller wins
 
   std::vector<std::string> args = {"spark", "-l", core_list, "--file-prefix", file_prefix};
-  for (auto& a : allow_) {
+  for (auto& d : allow_) {
     args.push_back("-a");
-    args.push_back(a);
+    args.push_back(d.devargs.empty() ? d.pci : d.pci + "," + d.devargs);
   }
   std::vector<char*> argv;
   for (auto& a : args) argv.push_back(a.data());

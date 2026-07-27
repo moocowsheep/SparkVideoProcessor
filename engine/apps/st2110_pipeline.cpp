@@ -194,8 +194,8 @@ class St2110Pipeline : public holoscan::Application {
         : (in_w > 0 && in_h > 0 && in_w <= 1920 && in_h <= 1080 ? 1u : 4u);
 
     auto& eal = spark::net::DpdkEal::instance();
-    eal.add_device(tx_pci, "tx_pp=500");
-    eal.add_device(rx_pci, "");
+    eal.add_device(tx_pci, spark::net::PortRole::kTx, "tx_pp=500");
+    eal.add_device(rx_pci, spark::net::PortRole::kRx);
     eal.init("0-11", "spark_pipe");
 
     // --- modular filter chain (M9) ---

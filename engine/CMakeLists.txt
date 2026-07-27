@@ -90,6 +90,7 @@ target_include_directories(spark_audio_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # --- ST 2110 transport backends + shared EAL (all rte_* confined here) ----------------------------
 add_library(spark_st2110_net STATIC
   operators/common/dpdk_eal.cpp
+  operators/common/dpdk_port.cpp
   operators/st2110_tx/dpdk_tx_backend.cpp
   operators/st2110_rx/dpdk_rx_backend.cpp
 )
@@ -242,6 +243,11 @@ add_test(NAME ip10_codec COMMAND test_ip10_codec)
 # ST 2110 multicast addressing (RFC 1112 MAC + IGMPv3 join); header-only, no DPDK
 add_executable(test_net_addr operators/common/test/test_net_addr.cpp)
 add_test(NAME net_addr COMMAND test_net_addr)
+
+# Shared-port queue map (plan_queues): the RX+TX-on-one-port layout; header-only, no DPDK
+add_executable(test_dpdk_port operators/common/test/test_dpdk_port.cpp)
+target_include_directories(test_dpdk_port PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME dpdk_port COMMAND test_dpdk_port)
 
 # RTP timestamp unwrap (absolute capture time — the fixed-latency + lip-sync basis); header-only
 add_executable(test_rtp_time operators/common/test/test_rtp_time.cpp)

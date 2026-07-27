@@ -30,24 +30,12 @@
 #include <rte_udp.h>
 
 #include "../common/dpdk_eal.hpp"
+#include "../common/dpdk_port.hpp"
 #include "../common/net_addr.hpp"
 #include "tx_backend.hpp"
 
 namespace spark::net {
 namespace {
-
-// Find the DPDK port whose PCI BDF matches `pci` (rte_device::name is the BDF for PCI devices).
-// Needed once a process owns more than one port (shared EAL) — "first port" is no longer unique.
-uint16_t find_port_by_pci(const std::string& pci) {
-  uint16_t p;
-  RTE_ETH_FOREACH_DEV(p) {
-    rte_eth_dev_info di{};
-    if (rte_eth_dev_info_get(p, &di) != 0 || !di.device) continue;
-    const char* name = rte_dev_name(di.device);  // BDF for PCI devices (rte_device is opaque)
-    if (name && pci == name) return p;
-  }
-  return RTE_MAX_ETHPORTS;
-}
 
 constexpr uint32_t kL2L3L4Hdr = sizeof(rte_ether_hdr) + sizeof(rte_ipv4_hdr) + sizeof(rte_udp_hdr);
 constexpr uint16_t kBurst = 32;        // packets queued to the NIC per tx_burst
@@ -68,18 +56,36 @@ class DpdkTxBackend final : public ISt2110TxBackend {
     else if (!DpdkEal::instance().initialized())
       die("manage_eal=false but shared EAL is not initialized (call DpdkEal::init first)");
     create_pool_and_addrs();
-    port_ = find_port_by_pci(cfg_.pci_addr);
-    if (port_ == RTE_MAX_ETHPORTS) die("no DPDK port matches PCI " + cfg_.pci_addr);
-    setup_port();
+    // The port belongs to DpdkPorts — it may be shared with the RX backend, in which case it is
+    // configured and started only once both roles have attached, so everything that needs a live
+    // port runs from on_port_started() rather than here.
+    PortRequest req;
+    req.role = PortRole::kTx;
+    req.txd = cfg_.txd;
+    req.send_on_timestamp = cfg_.pacing;
+    req.audio_tx = want_audio_;
+    DpdkPorts::instance().attach(cfg_.pci_addr, req,
+                                 [this](const PortLease& l) { on_port_started(l); });
+    attached_ = true;
+  }
+
+  // The port is live: adopt the lease and finish bring-up.
+  void on_port_started(const PortLease& lease) {
+    port_ = lease.port_id;
+    txq_ = lease.tx_queue;
+    audio_q_ = lease.audio_tx_queue;
+    audio_ok_ = want_audio_ && lease.audio_ok;
+    want_audio_ = audio_ok_;
+    cfg_.txd = lease.txd;  // mlx5 may clamp; reflect the effective horizon (gate-4 relevance)
     lookup_timestamp_dynfield();
-    if (rte_eth_dev_start(port_) < 0) die("rte_eth_dev_start failed");
     rte_ether_addr mac{};
     rte_eth_macaddr_get(port_, &mac);
     std::memcpy(src_mac_, mac.addr_bytes, 6);
     std::printf("[st2110_tx] port %u up: src_mac %02x:%02x:%02x:%02x:%02x:%02x, "
-                "tx_pp=%uns pacing=%d txd=%u\n",
+                "tx_pp=%uns pacing=%d txd=%u q=%u audio_q=%d shared=%d\n",
                 port_, src_mac_[0], src_mac_[1], src_mac_[2], src_mac_[3], src_mac_[4], src_mac_[5],
-                cfg_.tx_pp_ns, cfg_.pacing && have_ts_, cfg_.txd);
+                cfg_.tx_pp_ns, cfg_.pacing && have_ts_, cfg_.txd, txq_,
+                audio_ok_ ? static_cast<int>(audio_q_) : -1, lease.shared);
   }
 
   TxBuf reserve_packet(uint32_t payload_len) override {
@@ -132,9 +138,14 @@ class DpdkTxBackend final : public ISt2110TxBackend {
     udp->dgram_cksum = 0;  // UDP checksum optional over IPv4
   }
 
-  // --- companion audio channel: own queue (1), own header template, no shared mutable state with
-  // the video path (reserve_packet/submit/flush) beyond the MT-safe mbuf pool. -------------------
-  bool audio_ready() override { return audio_ok_; }
+  // --- companion audio channel: its own TX queue (audio_q_, assigned by the lease), own header
+  // template, no shared mutable state with the video path (reserve_packet/submit/flush) beyond the
+  // MT-safe mbuf pool. --------------------------------------------------------------------------
+  // Asked by St2110TxOp::start() straight after init(), which on a SHARED port is before the port
+  // comes up (the RX role has not attached yet) — so answer with the configured intent until then.
+  // That cannot mislead: DpdkPorts refuses to start a shared port whose audio queue did not come
+  // up, rather than degrading under a relay thread that has already been spawned.
+  bool audio_ready() override { return port_ == RTE_MAX_ETHPORTS ? want_audio_ : audio_ok_; }
 
   TxBuf reserve_audio(uint32_t payload_len) override {
     if (!audio_ok_) die("reserve_audio without an audio channel");
@@ -162,7 +173,7 @@ class DpdkTxBackend final : public ISt2110TxBackend {
     }
     // ~1000 pps: burst each packet immediately; a couple retries cover a momentarily full ring.
     for (int tries = 0; tries < 1000; ++tries) {
-      if (rte_eth_tx_burst(port_, 1, &m, 1) == 1) return;
+      if (rte_eth_tx_burst(port_, audio_q_, &m, 1) == 1) return;
     }
     rte_pktmbuf_free(m);
     ++audio_dropped_;
@@ -184,6 +195,8 @@ class DpdkTxBackend final : public ISt2110TxBackend {
   void flush() override { drain_pending(); }
 
   uint64_t now_ns() override {
+    if (port_ == RTE_MAX_ETHPORTS)
+      die("now_ns before the port came up (a shared port waiting on its rx role?)");
     uint64_t clk = 0;
     // BRINGUP: with REAL_TIME_CLOCK_ENABLE the mlx5 device clock is the realtime PHC in ns, so we
     // treat rte_eth_read_clock as ns. now_ns() and the send-timestamp dynfield share this base, so
@@ -194,7 +207,12 @@ class DpdkTxBackend final : public ISt2110TxBackend {
 
   TxStats stats() override {
     TxStats s{};
+    // St2110TxOp spawns its 1 Hz stats poller as soon as init() returns, which on a shared port is
+    // before the port is up. Report zeros until it is, rather than query an unconfigured port.
+    if (port_ == RTE_MAX_ETHPORTS) return s;
     rte_eth_stats es{};
+    // On a shared port opackets/obytes are the PORT's, so they also count the RX role's IGMP
+    // membership reports — one frame per group per 30 s, against paced media at 100k+ pps.
     if (rte_eth_stats_get(port_, &es) == 0) {
       s.tx_packets = es.opackets;
       s.tx_bytes = es.obytes;
@@ -219,9 +237,11 @@ class DpdkTxBackend final : public ISt2110TxBackend {
   }
 
   void shutdown() override {
-    if (port_ != RTE_MAX_ETHPORTS) {
-      rte_eth_dev_stop(port_);
-      rte_eth_dev_close(port_);
+    // Hand the port back rather than stopping it: on a shared port the RX role may still be using
+    // it, and DpdkPorts stops + closes only once the last holder has let go.
+    if (attached_) {
+      DpdkPorts::instance().release(cfg_.pci_addr, PortRole::kTx);
+      attached_ = false;
       port_ = RTE_MAX_ETHPORTS;
     }
     if (eal_inited_) {
@@ -276,48 +296,6 @@ class DpdkTxBackend final : public ISt2110TxBackend {
       std::memcpy(dst_mac_, cfg_.dst_mac.data(), 6);
   }
 
-  void setup_port() {
-    rte_eth_dev_info dev_info{};
-    if (rte_eth_dev_info_get(port_, &dev_info) != 0) die("rte_eth_dev_info_get failed");
-
-    rte_eth_conf port_conf{};
-    if (cfg_.pacing) {
-      if (!(dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_SEND_ON_TIMESTAMP))
-        die("NIC lacks SEND_ON_TIMESTAMP offload (REAL_TIME_CLOCK_ENABLE=1 set? see M0 findings)");
-      port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_SEND_ON_TIMESTAMP;
-    }
-    // Audio rides a second TX queue so its relay thread never touches the video queue. If the PMD
-    // rejects the 2-queue config, fall back to video-only rather than failing the validated path.
-    uint16_t nb_txq = want_audio_ ? 2 : 1;
-    if (rte_eth_dev_configure(port_, 0, nb_txq, &port_conf) < 0) {
-      if (!want_audio_) die("rte_eth_dev_configure failed");
-      std::printf("[st2110_tx] WARN: 2-queue configure failed — audio channel disabled\n");
-      want_audio_ = false;
-      nb_txq = 1;
-      if (rte_eth_dev_configure(port_, 0, nb_txq, &port_conf) < 0)
-        die("rte_eth_dev_configure failed");
-    }
-
-    uint16_t nb_rxd = 0, nb_txd = cfg_.txd;
-    if (rte_eth_dev_adjust_nb_rx_tx_desc(port_, &nb_rxd, &nb_txd) < 0)
-      die("adjust_nb_rx_tx_desc failed");
-    cfg_.txd = nb_txd;  // mlx5 may clamp; reflect the effective horizon (gate-4 relevance)
-
-    rte_eth_txconf txconf = dev_info.default_txconf;
-    txconf.offloads = port_conf.txmode.offloads;
-    if (rte_eth_tx_queue_setup(port_, 0, nb_txd, rte_eth_dev_socket_id(port_), &txconf) < 0)
-      die("rte_eth_tx_queue_setup failed");
-    if (want_audio_) {
-      // 512 descriptors ≈ half a second of 1 ms-ptime audio in flight — far beyond any horizon.
-      if (rte_eth_tx_queue_setup(port_, 1, 512, rte_eth_dev_socket_id(port_), &txconf) < 0) {
-        std::printf("[st2110_tx] WARN: audio tx_queue_setup failed — audio channel disabled\n");
-        want_audio_ = false;
-      } else {
-        audio_ok_ = true;
-      }
-    }
-  }
-
   void lookup_timestamp_dynfield() {
     if (!cfg_.pacing) return;
     ts_field_off_ = rte_mbuf_dynfield_lookup(RTE_MBUF_DYNFIELD_TIMESTAMP_NAME, nullptr);
@@ -334,7 +312,7 @@ class DpdkTxBackend final : public ISt2110TxBackend {
   void drain_pending() {
     uint16_t sent = 0;
     while (sent < npending_) {
-      const uint16_t n = rte_eth_tx_burst(port_, 0, &pending_[sent], npending_ - sent);
+      const uint16_t n = rte_eth_tx_burst(port_, txq_, &pending_[sent], npending_ - sent);
       if (n == 0) {
         // Ring full: NIC is holding scheduled packets. Brief retry; this is normal backpressure.
         if (++spin_ > 1000000) {
@@ -352,7 +330,12 @@ class DpdkTxBackend final : public ISt2110TxBackend {
 
   TxBackendConfig cfg_;
   bool eal_inited_ = false;
+  bool attached_ = false;  // holds a DpdkPorts claim on cfg_.pci_addr
+  // port_ stays RTE_MAX_ETHPORTS until DpdkPorts brings the port up — on a shared port that is when
+  // the RX role attaches too, which can be after this backend's init() has returned.
   uint16_t port_ = RTE_MAX_ETHPORTS;
+  uint16_t txq_ = 0;             // our media TX queue index (from the lease)
+  uint16_t audio_q_ = kNoQueue;  // companion 2110-30 queue; kNoQueue = audio off
   rte_mempool* pool_ = nullptr;
 
   uint8_t src_mac_[6] = {};
