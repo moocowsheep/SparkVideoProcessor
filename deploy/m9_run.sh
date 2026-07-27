@@ -11,6 +11,10 @@
 set -e
 V="${1:?variant: cubic|sr|sr-s|espcn|sharpen|procamp|frc60}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# Site-local addressing (gitignored). Everything below defaults to the IETF documentation
+# ranges, so a fresh checkout is inert until this supplies real values. See lab.env.example.
+# shellcheck disable=SC1091
+[ -f "$DIR/deploy/lab.env" ] && . "$DIR/deploy/lab.env"
 
 # BMD-1 1080p29.97 in -> BD2 monitor group out; L=105 (validated), run until killed/timeout.
 # RX_SRC = BMD-1 (DHCP moved it .196 -> .104 on 2026-07-06). TX_SRC must match the NMOS node's

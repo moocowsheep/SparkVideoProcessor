@@ -52,3 +52,6 @@ secrets/
 captures/
 tools/sr_weights/cache/
 docs/blackmagic-bidirect-report.md
+
+# Site-local addressing for deploy/ (never committed; see deploy/lab.env.example)
+deploy/lab.env

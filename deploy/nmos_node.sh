@@ -21,6 +21,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Site-local addressing (gitignored). Everything below defaults to the IETF documentation
+# ranges, so a fresh checkout is inert until this supplies real values. See lab.env.example.
+# shellcheck disable=SC1091
+[ -f "$ROOT/deploy/lab.env" ] && . "$ROOT/deploy/lab.env"
 NODE="${NODE:-$ROOT/control/build/spark_nmos_node}"   # env-overridable (packaged installs)
 
 # ---- config (env-overridable) ----
