@@ -1,14 +1,32 @@
 #!/bin/sh
 set -e
 if [ "$1" = "configure" ]; then
+    # <= 0.8.0 shipped a standalone spark-nmos-node.service; the node now runs
+    # inside spark-video-processor.service (deploy/spark_run.sh). Retire the old
+    # unit on upgrade so we don't leave a second node registering in the registry.
+    if [ -n "$2" ]; then
+        systemctl stop spark-nmos-node.service >/dev/null 2>&1 || true
+        systemctl disable spark-nmos-node.service >/dev/null 2>&1 || true
+    fi
     systemctl daemon-reload >/dev/null 2>&1 || true
     # Enable at boot but do not start: the operator decides when the daemon
     # takes ownership of the NICs/GPU, and an already-running manually
     # launched instance must not be clobbered by an install.
+    systemctl enable spark-ptp.service >/dev/null 2>&1 || true
     systemctl enable spark-video-processor.service >/dev/null 2>&1 || true
+
+    # phc2sys owns CLOCK_REALTIME while spark-ptp runs; a second discipline
+    # sawtooths the wall clock. Conflicts= stops them at start, but they would
+    # come back at boot if left enabled.
+    for s in systemd-timesyncd chrony chronyd ntp ntpsec; do
+        if systemctl is-enabled --quiet "$s" >/dev/null 2>&1; then
+            echo "spark-video-processor: $s contends with phc2sys for the system clock —"
+            echo "    systemctl disable --now $s"
+        fi
+    done
+
     echo "spark-video-processor: enabled at boot. Start now with:"
-    echo "    systemctl start spark-video-processor"
-    echo "Dashboard: http://<host>:8080/   Optional NMOS node:"
-    echo "    systemctl enable --now spark-nmos-node"
+    echo "    systemctl start spark-ptp spark-video-processor"
+    echo "Dashboard: http://<host>:8080/   Logs: journalctl -fu spark-video-processor"
 fi
 exit 0

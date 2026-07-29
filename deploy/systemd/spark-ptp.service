@@ -1,0 +1,25 @@
+[Unit]
+Description=Spark PTP discipline (ptp4l slave + phc2sys, ST 2059-2)
+Documentation=https://github.com/moocowsheep/SparkVideoProcessor
+Wants=network-online.target
+After=network-online.target
+# The system clock must not be pulled by two disciplines at once: phc2sys owns
+# CLOCK_REALTIME here, so an NTP client would sawtooth it (see deploy/ptp.sh --check).
+Conflicts=systemd-timesyncd.service chrony.service chronyd.service ntp.service ntpsec.service
+# ptp4l dying is a timing outage, not an error to give up on: a grandmaster that
+# goes away and comes back must re-lock without operator action.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# ptp4l needs root: PHC ioctls on /dev/ptp*, HW timestamping, and raw PTP sockets.
+EnvironmentFile=-/etc/default/spark-ptp
+# IFACE pins the ConnectX-7 port; unset lets deploy/ptp.sh auto-detect the first
+# up CX-7 (PCI vendor 15b3 with carrier). Set it once the rig has >1 cabled port.
+#Environment=IFACE=enp1s0f0np0
+ExecStart=/bin/bash @SPARK_ROOT@/deploy/ptp.sh slave
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

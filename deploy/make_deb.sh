@@ -59,26 +59,39 @@ DEPENDS=$(ldd "${BINS[@]}" 2>/dev/null \
   | { xargs -r dpkg -S 2>/dev/null || true; } | cut -d: -f1 | sort -u \
   | { grep -vi 'nvidia\|^cuda' || true; } | paste -sd, - | sed 's/,/, /g')
 [ -n "$DEPENDS" ] || { echo "Depends computation came up empty — dpkg -S failed?" >&2; exit 1; }
-DEPENDS="$DEPENDS, linuxptp"
+# linuxptp: spark-ptp.service (ptp4l/phc2sys). curl: spark_run.sh waits on the
+# daemon's /api/status before launching the node.
+DEPENDS="$DEPENDS, linuxptp, curl"
 
 cp -r "$ROOT/web" "$STAGE/usr/share/$PKG/web"
 mkdir -p "$STAGE/usr/share/$PKG/deploy"
-(cd "$ROOT" && git ls-files deploy | grep -v '^deploy/debian/' \
-  | xargs -I{} cp {} "$STAGE/usr/share/$PKG/deploy/")
+# install -D (not a flat cp): deploy/ has subdirectories (systemd/) whose files
+# would otherwise collide into deploy/. Modes are preserved so the scripts the
+# units exec stay executable.
+# deploy/systemd/ is excluded too: those units are the source-tree variants, and
+# their install.sh would rewrite /etc/systemd/system to point at the package's
+# share dir (no build tree there) — the package ships debian/*.service instead.
+(cd "$ROOT" && git ls-files deploy | grep -vE '^deploy/(debian|systemd)/' | while read -r f; do
+  install -D -m "$(stat -c %a "$f")" "$f" "$STAGE/usr/share/$PKG/$f"
+done)
 (cd "$ROOT" && git ls-files docs | xargs -I{} cp {} "$STAGE/usr/share/doc/$PKG/")
 cp "$ROOT/README.md" "$STAGE/usr/share/doc/$PKG/"
 
-cp "$ROOT/deploy/debian/spark-video-processor.service" \
-   "$ROOT/deploy/debian/spark-nmos-node.service" "$STAGE/lib/systemd/system/"
+# Two units: PTP discipline, and the media plane (control daemon + engine + NMOS
+# node, supervised together by deploy/spark_run.sh).
+cp "$ROOT/deploy/debian/spark-ptp.service" \
+   "$ROOT/deploy/debian/spark-video-processor.service" "$STAGE/lib/systemd/system/"
 cp "$ROOT/deploy/debian/default-spark-video-processor" "$STAGE/etc/default/spark-video-processor"
 cp "$ROOT/deploy/debian/default-spark-nmos-node" "$STAGE/etc/default/spark-nmos-node"
+cp "$ROOT/deploy/debian/default-spark-ptp" "$STAGE/etc/default/spark-ptp"
 
 SIZE=$(du -sk --exclude=DEBIAN "$STAGE" | cut -f1)
 sed -e "s/@VERSION@/$VERSION/" -e "s/@SIZE@/$SIZE/" -e "s/@DEPENDS@/$DEPENDS/" \
     "$ROOT/deploy/debian/control.in" > "$STAGE/DEBIAN/control"
 install -m755 "$ROOT/deploy/debian/postinst" "$ROOT/deploy/debian/prerm" \
               "$ROOT/deploy/debian/postrm" "$STAGE/DEBIAN/"
-printf '/etc/default/spark-video-processor\n/etc/default/spark-nmos-node\n' > "$STAGE/DEBIAN/conffiles"
+printf '/etc/default/spark-video-processor\n/etc/default/spark-nmos-node\n/etc/default/spark-ptp\n' \
+  > "$STAGE/DEBIAN/conffiles"
 
 # Sanity: with the bundled dir on LD_LIBRARY_PATH nothing may resolve to the
 # build tree or be missing.

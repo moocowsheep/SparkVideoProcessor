@@ -15,9 +15,10 @@ Description: Real-time ST 2110 video processor for NVIDIA DGX Spark (GB10)
  2x frame-rate conversion, and a CUDA filter chain (AI super-resolution,
  scaling, sharpen, proc-amp, noise reduction, film grain).
  .
- Ships the engine (st2110_pipeline), the control daemon with web dashboard
- (spark_controld, systemd unit spark-video-processor.service) and an NMOS
- IS-04/IS-05 node (spark_nmos_node, unit spark-nmos-node.service).
+ Ships two systemd units: spark-ptp.service (ptp4l/phc2sys PTP discipline for
+ the ConnectX-7 PHC) and spark-video-processor.service, which runs the control
+ daemon with its web dashboard (spark_controld, which spawns the engine
+ st2110_pipeline) together with the NMOS IS-04/IS-05 node (spark_nmos_node).
  .
  Requires the NVIDIA driver (libcuda, libnvidia-opticalflow) on a GB10 /
  DGX Spark class system. Holoscan, GXF, UCX, RMM and CUDA runtime libraries

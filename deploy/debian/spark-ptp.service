@@ -1,0 +1,22 @@
+[Unit]
+Description=Spark PTP discipline (ptp4l slave + phc2sys, ST 2059-2)
+Documentation=https://github.com/moocowsheep/SparkVideoProcessor
+Wants=network-online.target
+After=network-online.target
+# The system clock must not be pulled by two disciplines at once: phc2sys owns
+# CLOCK_REALTIME here, so an NTP client would sawtooth it (see deploy/ptp.sh --check).
+Conflicts=systemd-timesyncd.service chrony.service chronyd.service ntp.service ntpsec.service
+# ptp4l dying is a timing outage, not an error to give up on: a grandmaster that
+# goes away and comes back must re-lock without operator action.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# ptp4l needs root: PHC ioctls on /dev/ptp*, HW timestamping, raw PTP sockets.
+EnvironmentFile=-/etc/default/spark-ptp
+ExecStart=/bin/bash /usr/share/spark-video-processor/deploy/ptp.sh slave
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

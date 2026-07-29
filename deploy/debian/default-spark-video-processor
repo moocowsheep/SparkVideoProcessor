@@ -19,3 +19,10 @@
 #SPARK_IN_JXS=0       # source is JPEG XS (decode on ingest)
 #SPARK_JXS_BPP=4      # encoder constant-rate target, bits/pixel
 #SPARK_JXS_MAX_BPP=12 # decoder-side worst-case budget, bits/pixel
+#
+# The NMOS node runs inside this unit alongside the daemon (deploy/spark_run.sh).
+# Set to 1 to run the daemon alone, with no node registering in the registry:
+#SPARK_NO_NMOS=0
+#
+# Dashboard / control API port (the node's IS-05 handlers reach the daemon here):
+#HTTP_PORT_CTRL=8080

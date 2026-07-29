@@ -1,9 +1,12 @@
 #!/bin/sh
 set -e
 if [ "$1" = "remove" ]; then
-    systemctl stop spark-nmos-node.service >/dev/null 2>&1 || true
     systemctl stop spark-video-processor.service >/dev/null 2>&1 || true
-    systemctl disable spark-nmos-node.service >/dev/null 2>&1 || true
+    systemctl stop spark-ptp.service >/dev/null 2>&1 || true
     systemctl disable spark-video-processor.service >/dev/null 2>&1 || true
+    systemctl disable spark-ptp.service >/dev/null 2>&1 || true
+    # pre-0.8.1 standalone unit, now folded into spark-video-processor.service
+    systemctl stop spark-nmos-node.service >/dev/null 2>&1 || true
+    systemctl disable spark-nmos-node.service >/dev/null 2>&1 || true
 fi
 exit 0

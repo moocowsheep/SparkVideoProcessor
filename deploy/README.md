@@ -44,3 +44,59 @@ sudo bash deploy/ptp.sh --master          # this box AS the time source (small s
 ```
 `ptp4l.conf` is an ST 2059-2 media-profile starting point — **align its domain/intervals with your
 facility grandmaster**. `--check` here shows the CX-7 PTP-capable with `ptp0` present (M0 gate 1).
+
+## `systemd/` — run it as two daemons
+
+Two units, installed from and running out of **this checkout** (a rebuild takes effect on the next
+`systemctl restart`). The `.deb` ships its own units under `debian/` for installed paths.
+
+| unit | what it runs |
+|---|---|
+| `spark-ptp.service` | `deploy/ptp.sh slave` — `ptp4l` disciplines the CX-7 PHC to the facility grandmaster, `phc2sys` syncs the system clock. |
+| `spark.service` | `deploy/spark_run.sh` — `spark_controld` (which spawns `st2110_pipeline` and serves the dashboard on :8080) **and** `spark_nmos_node`. |
+
+```bash
+sudo bash deploy/systemd/install.sh --start   # install + enable at boot + start now
+systemctl status spark-ptp spark
+journalctl -fu spark                          # daemon + engine + node, interleaved
+sudo bash deploy/systemd/install.sh --uninstall
+```
+
+`spark.service` is `Wants=`/`After=spark-ptp.service`: timing comes up first, but a PTP outage
+degrades genlock rather than tearing the media plane down. Inside `spark.service` the daemon and the
+node are one failure domain — the node's IS-05 endpoints route the engine *through* the daemon's
+control API, so `spark_run.sh` waits for `/api/status` before launching the node and exits as soon as
+either process does, letting `Restart=on-failure` bring the pair back together.
+
+Site addressing comes from `deploy/lab.env` (gitignored); per-unit overrides go in
+`/etc/default/spark-ptp` (e.g. `IFACE=`) and `/etc/default/spark-video-processor` (engine knobs).
+`spark-ptp.service` declares `Conflicts=` against the NTP clients — `phc2sys` owns `CLOCK_REALTIME`,
+and a second discipline sawtooths the wall clock; `install.sh` warns if one is still enabled at boot.
+
+## `make_deb.sh` + `debian/` — the installable package
+
+Builds `spark-video-processor_<version>_arm64.deb` from the built trees: the three binaries plus the
+non-distro shared-library closure (Holoscan/GXF/UCX/RMM, CUDA runtime — never the NVIDIA driver
+libs), `web/`, `deploy/`, the docs, and the **same two daemons** as above in their installed-path
+form (`debian/spark-ptp.service`, `debian/spark-video-processor.service`).
+
+```bash
+bash deploy/make_deb.sh                    # version 0.8.0~beta into the repo root
+bash deploy/make_deb.sh 0.8.1~beta /tmp
+sudo dpkg -i spark-video-processor_0.8.1~beta_arm64.deb
+sudo systemctl start spark-ptp spark-video-processor
+```
+
+Both units are **enabled at boot but not started** by `postinst` — installing must never yank the
+NICs/GPU out from under a manually launched instance. `postinst` also flags any enabled NTP client,
+since `phc2sys` owns `CLOCK_REALTIME` while `spark-ptp` runs.
+
+Configuration lives in three conffiles (`dpkg` preserves your edits across upgrades):
+`/etc/default/spark-ptp` (`IFACE=`), `/etc/default/spark-video-processor` (engine knobs,
+`SPARK_NO_NMOS=1` to run without the node) and `/etc/default/spark-nmos-node` (registry + advertised
+addresses). `Depends` is computed from the actual link closure via `dpkg -S`, plus `linuxptp` and
+`curl`.
+
+> **Upgrading from ≤ 0.8.0:** the NMOS node had its own `spark-nmos-node.service`. It now runs inside
+> `spark-video-processor.service`, and `postinst` stops and disables the old unit so an upgrade
+> doesn't leave two nodes registering.

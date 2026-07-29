@@ -14,18 +14,11 @@ After=avahi-daemon.service
 
 [Service]
 Type=simple
-# Daemon and the engine it spawns need root: DPDK on mlx5, hugepages, GPU clock locking.
+# Root: DPDK on mlx5, hugepages, GPU clock locking.
+EnvironmentFile=-@SPARK_ROOT@/deploy/lab.env
 EnvironmentFile=-/etc/default/spark-video-processor
-EnvironmentFile=-/etc/default/spark-nmos-node
-# Installed paths for the two processes deploy/spark_run.sh supervises (it defaults
-# to the build tree when run from a checkout).
-Environment=CONTROLD=/usr/lib/spark-video-processor/spark_controld
-Environment=PIPELINE=/usr/lib/spark-video-processor/st2110_pipeline
-Environment=NODE=/usr/lib/spark-video-processor/spark_nmos_node
-Environment=WEB=/usr/share/spark-video-processor/web
-# Bundled Holoscan/CUDA runtime closure; overrides the build-tree RUNPATH in the binaries.
-Environment=LD_LIBRARY_PATH=/usr/lib/spark-video-processor/lib
-ExecStart=/bin/bash /usr/share/spark-video-processor/deploy/spark_run.sh
+ExecStart=/bin/bash @SPARK_ROOT@/deploy/spark_run.sh
+WorkingDirectory=@SPARK_ROOT@
 Restart=on-failure
 RestartSec=5
 LimitMEMLOCK=infinity
@@ -35,8 +28,6 @@ TimeoutStopSec=30
 # spark_run.sh forwards SIGTERM to both children itself; the cgroup sweep afterwards
 # catches the engine the daemon spawned.
 KillMode=control-group
-StateDirectory=spark-video-processor
-WorkingDirectory=/var/lib/spark-video-processor
 
 [Install]
 WantedBy=multi-user.target

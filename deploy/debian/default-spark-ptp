@@ -1,0 +1,11 @@
+# /etc/default/spark-ptp — environment for spark-ptp.service
+# Read by deploy/ptp.sh (slave mode); see that script for the full list.
+
+# ConnectX-7 port to run ptp4l on. Unset auto-detects the first up CX-7 (PCI
+# vendor 15b3 with carrier) — pin it once the rig has more than one cabled port:
+#IFACE=enp1s0f0np0
+
+# The PTP domain and message intervals live in the ptp4l config, NOT here:
+#   /usr/share/spark-video-processor/deploy/ptp4l.conf
+# Align its domainNumber with your facility grandmaster AND with the domain the
+# engine/NMOS node reports (SPARK_PTP_DOMAIN in /etc/default/spark-video-processor).
