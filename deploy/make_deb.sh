@@ -13,8 +13,8 @@
 #
 # What it does:
 #  - stages binaries to /usr/lib/spark-video-processor
-#  - bundles the non-distro shared-library closure (Holoscan/GXF/UCX/RMM,
-#    CUDA npp/cudart — anything resolving outside /lib and /usr/lib) into
+#  - bundles the non-distro shared-library closure (CUDA npp/cudart —
+#    anything resolving outside /lib and /usr/lib) into
 #    /usr/lib/spark-video-processor/lib; the systemd units point
 #    LD_LIBRARY_PATH there, which overrides the build-tree RUNPATH
 #  - NVIDIA driver libs (libcuda, libnvidia-*) are never bundled

@@ -12,7 +12,6 @@ components. Their source is NOT distributed as part of this repository; they
 are obtained separately at build/run time (see docs/SETUP.md). Each remains
 under its own license.
 
-  - NVIDIA Holoscan SDK ......................... Apache License 2.0
   - gRPC ....................................... Apache License 2.0
   - DPDK ....................................... BSD-3-Clause
   - Protocol Buffers (protobuf) ................ BSD-3-Clause
@@ -27,7 +26,7 @@ their respective NVIDIA license agreements. They are not redistributed here:
   - NVIDIA CUDA Toolkit (cudart, NPP)
   - NVIDIA Optical Flow SDK / libnvidia-opticalflow
 
-NVIDIA, CUDA, Holoscan, and DGX Spark are trademarks and/or registered
+NVIDIA, CUDA, and DGX Spark are trademarks and/or registered
 trademarks of NVIDIA Corporation. SMPTE and ST 2110 are trademarks of the
 Society of Motion Picture and Television Engineers. All trademarks are the
 property of their respective owners; their mention here is for identification

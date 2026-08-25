@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // RTP <-> absolute-time conversion (ST 2110-10: RTP timestamps count media-clock ticks since the
-// PTP epoch, modulo 2^32). Pure header, no DPDK/Holoscan — unit-tested in test_rtp_time.cpp.
+// PTP epoch, modulo 2^32). Pure header, no DPDK/runtime deps — unit-tested in test_rtp_time.cpp.
 //
 // Why this exists: a 32-bit RTP timestamp is ambiguous (it wraps every ~13.25 h at 90 kHz, ~24.9 h
 // at 48 kHz). Given ANY reference instant on the same clock the sender stamps against — a NIC HW

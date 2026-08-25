@@ -15,10 +15,12 @@ and emits uncompressed **SMPTE ST 2110-20** — all controllable from a web inte
 
 Two strictly separated planes (the real-time video path is never stalled by control/UI traffic):
 
-- **Engine** (`engine/`) — C++/CUDA pipeline on **NVIDIA Holoscan SDK** (operator graph), with the
-  Holoscan **`advanced_network` DPDK backend** (mlx5 `tx_pp` HW pacing; DOCA GPUNetIO in reserve) for
-  ST 2110-20 IO, **NPP** for scaling, and **Optical Flow/FRUC** for frame-rate conversion. Zero-copy
-  GPU tensors, PTP-locked. *(No Rivermax — see `docs/M0-feasibility-findings.md` "Networking IO".)*
+- **Engine** (`engine/`) — C++/CUDA pipeline on **`spark::rt`**, the in-tree dataflow runtime
+  (`engine/runtime/`: one thread per operator, bounded queue per edge — see `docs/M11-runtime.md`),
+  with a **raw DPDK/mlx5 backend** (`tx_pp` HW pacing; DOCA GPUNetIO in reserve) for ST 2110-20 IO,
+  **NPP** for scaling, and **Optical Flow/FRUC** for frame-rate conversion. Zero-copy GPU frames,
+  PTP-locked. *(No Rivermax, no Holoscan SDK — see `docs/M0-feasibility-findings.md` "Networking IO"
+  and `docs/M11-runtime.md`.)*
 - **Control daemon** (`control/`) — native C++ gRPC service owning pipeline lifecycle + telemetry,
   with a REST/WebSocket gateway.
 - **Web UI** (`web/`) — vanilla-JS dashboard (no build step): NMOS routing, format config, a
@@ -26,7 +28,7 @@ Two strictly separated planes (the real-time video path is never stalled by cont
   each GPU stage), start/stop, and a live stats bar.
 
 ```
-engine/    C++/CUDA Holoscan engine (operators = modules)
+engine/    C++/CUDA engine on spark::rt (operators = modules; runtime/ = the graph runtime)
 control/   C++ control daemon (gRPC + REST/WS)
 web/       vanilla-JS dashboard (served by the daemon)
 proto/     shared gRPC/protobuf contracts

@@ -29,7 +29,7 @@ constexpr int64_t kFixedSkipFloorNs = 2000000;
 
 }  // namespace
 
-void St2110TxOp::setup(holoscan::OperatorSpec& spec) {
+void St2110TxOp::setup(spark::rt::OperatorSpec& spec) {
   spec.input<spark::st2110::VideoFrame>("frame");
 
   spec.param(pci_addr_, "pci_addr", "TX PCI", "CX-7 TX port BDF", std::string("0002:01:00.0"));
@@ -132,24 +132,24 @@ void St2110TxOp::start() {
 
   if (want_audio) {
     if (latency_ns_.get() == 0) {
-      HOLOSCAN_LOG_WARN(
+      SPARK_LOG_WARN(
           "st2110_tx: audio egress configured but latency_ns=0 (adaptive servo) — audio needs the "
           "fixed-latency schedule for lip-sync; audio DISABLED (set SPARK_LATENCY_MS)");
     } else if (!backend_->audio_ready()) {
-      HOLOSCAN_LOG_WARN("st2110_tx: audio TX queue unavailable — audio DISABLED");
+      SPARK_LOG_WARN("st2110_tx: audio TX queue unavailable — audio DISABLED");
     } else {
       audio_on_ = true;
       audio_thread_ = std::thread(&St2110TxOp::audio_loop, this);
-      HOLOSCAN_LOG_INFO("st2110_tx: audio relay up -> {}:{} at capture + {} ms (+{} us A/V offset)",
+      SPARK_LOG_INFO("st2110_tx: audio relay up -> {}:{} at capture + {} ms (+{} us A/V offset)",
                         audio_dst_ip_.get(), audio_port_.get(), latency_ns_.get() / 1000000,
                         av_offset_ns_.get() / 1000);
     }
   }
   if (latency_ns_.get() > 0)
-    HOLOSCAN_LOG_INFO("st2110_tx: FIXED latency mode — wire = capture + {} ms (no trim/re-anchor)",
+    SPARK_LOG_INFO("st2110_tx: FIXED latency mode — wire = capture + {} ms (no trim/re-anchor)",
                       latency_ns_.get() / 1000000);
 
-  HOLOSCAN_LOG_INFO("st2110_tx started: TX {} -> {} pacing={}", cfg.pci_addr, dst_mac_.get(),
+  SPARK_LOG_INFO("st2110_tx started: TX {} -> {} pacing={}", cfg.pci_addr, dst_mac_.get(),
                     cfg.pacing);
 }
 
@@ -225,14 +225,14 @@ void St2110TxOp::emit_live(bool force) {
   // at 0 for the digits-only parser; a floor'd margin shows as 0 alongside rising tx_skipped).
   const int64_t margin = min_lead_win_ == INT64_MAX ? 0 : std::max<int64_t>(min_lead_win_, 0);
   min_lead_win_ = INT64_MAX;
-  HOLOSCAN_LOG_INFO(
+  SPARK_LOG_INFO(
       "spark_live tx_frames={} tx_packets={} tx_future_err={} tx_past_err={} tx_reanchors={} "
       "tx_skipped={} tx_lead_us={} tx_e2e_us={} tx_trim_ms={} tx_fixed_ms={} tx_margin_us={}",
       frames_sent_, packets_sent_, s.future_errors, s.past_errors, reanchors_, skipped_late_,
       last_lead_ns_ / 1000, e2e_us, trim_total_ns_ / 1000000, latency_ns_.get() / 1000000,
       margin / 1000);
   if (audio_on_)
-    HOLOSCAN_LOG_INFO("spark_live audio_tx_pkts={} audio_tx_late={} audio_tx_drop={}",
+    SPARK_LOG_INFO("spark_live audio_tx_pkts={} audio_tx_late={} audio_tx_drop={}",
                       audio_tx_pkts_.load(), audio_late_.load(), audio_drop_.load());
 }
 
@@ -252,7 +252,7 @@ void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
   double fill = pacing_fill_.get();
   if (!(fill > 0.0) || fill > 1.0) fill = 1.0;
   gap_ns_ = ppf ? static_cast<uint64_t>(frame_interval_ns_ * active * fill) / ppf : 0;
-  HOLOSCAN_LOG_INFO("st2110_tx: {}x{}@{:.3f}fps -> {} pkts/frame, gap {} ns (~{} pps, {} active {:.3f} fill {:.2f})",
+  SPARK_LOG_INFO("st2110_tx: {}x{}@{:.3f}fps -> {} pkts/frame, gap {} ns (~{} pps, {} active {:.3f} fill {:.2f})",
                     fmt.width, fmt.height, fmt.fps, ppf, gap_ns_,
                     static_cast<uint64_t>(ppf * fmt.fps), wide ? "WIDE" : "NARROW", active, fill);
 
@@ -280,7 +280,7 @@ void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
     // Spread the line's packets across ~73% of the slot (the measured BMD burst fraction), leaving the
     // tail of the slot idle. ppl-1 gaps for ppl packets.
     intra_gap_ns_ = (ppl > 1) ? (t_line_ns_ * 73) / (100 * (ppl - 1)) : gap_ns_;
-    HOLOSCAN_LOG_INFO("st2110_tx: gapped pacing — T_line {} ns, {} pkts/line, intra-gap {} ns", t_line_ns_,
+    SPARK_LOG_INFO("st2110_tx: gapped pacing — T_line {} ns, {} pkts/line, intra-gap {} ns", t_line_ns_,
                       ppl, intra_gap_ns_);
   }
 
@@ -296,7 +296,7 @@ void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
   pace_line_burst_ = ((!ip10_sampling && fmt.height >= 2160) || ip10_burst) && fmt.height > 0;
   if (pace_line_burst_) {
     t_line_ns_ = static_cast<uint64_t>(frame_interval_ns_ * active * fill) / fmt.height;
-    HOLOSCAN_LOG_INFO("st2110_tx: per-line-burst pacing — T_line {} ns ({} active {:.3f} fill {:.2f}, "
+    SPARK_LOG_INFO("st2110_tx: per-line-burst pacing — T_line {} ns ({} active {:.3f} fill {:.2f}, "
                       "1 HW timestamp/line{})", t_line_ns_, wide ? "WIDE" : "NARROW", active, fill,
                       ip10_burst ? ", IP10" : "");
   }
@@ -328,17 +328,17 @@ void St2110TxOp::ensure_pacer(const spark::st2110::VideoFormat& fmt) {
     const uint64_t big = frame_interval_ns_ - 4000000;
     if (big > eff_horizon_ns_) eff_horizon_ns_ = big;
   }
-  HOLOSCAN_LOG_INFO("st2110_tx: throttle horizon {} ns (configured {} ns)", eff_horizon_ns_,
+  SPARK_LOG_INFO("st2110_tx: throttle horizon {} ns (configured {} ns)", eff_horizon_ns_,
                     pacing_horizon_ns_.get());
 }
 
-void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext&,
-                         holoscan::ExecutionContext&) {
+void St2110TxOp::compute(spark::rt::InputContext& op_input, spark::rt::OutputContext&,
+                         spark::rt::ExecutionContext&) {
   auto maybe = op_input.receive<spark::st2110::VideoFrame>("frame");
   if (!maybe) return;
   auto& frame = maybe.value();
   if (!frame.data || frame.data->size() != frame.format.octets_per_frame()) {
-    HOLOSCAN_LOG_ERROR("st2110_tx: frame buffer size mismatch — dropping frame {}",
+    SPARK_LOG_ERROR("st2110_tx: frame buffer size mismatch — dropping frame {}",
                        frame.frame_number);
     return;
   }
@@ -372,7 +372,7 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
     if (!fixed_checked_) {
       fixed_checked_ = true;
       if (lead > static_cast<int64_t>(fixed_l) + 500000000LL || lead < -5000000000LL)
-        HOLOSCAN_LOG_ERROR(
+        SPARK_LOG_ERROR(
             "st2110_tx: FIXED-LATENCY CLOCK MISMATCH — first-frame lead {} ms vs configured {} ms. "
             "capture_ts is not on the NIC PHC timeline (ptp4l running? source PTP-locked?); the "
             "schedule will skip everything. SPARK_LATENCY_MS=0 falls back to the adaptive servo.",
@@ -381,7 +381,7 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
     if (lead < kFixedSkipFloorNs) {
       ++skipped_late_;
       if (++fixed_late_streak_ == 1 || (fixed_late_streak_ & 255) == 0)
-        HOLOSCAN_LOG_WARN(
+        SPARK_LOG_WARN(
             "st2110_tx: fixed-latency frame late (lead {} us, streak {}) — the pipeline floor is "
             "above L; raise SPARK_LATENCY_MS (watch tx_margin_us). {} skipped total",
             lead / 1000, fixed_late_streak_, skipped_late_);
@@ -465,13 +465,13 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
         trim_total_ns_ -= back;
         shaved_since_probe_ = 0;
         trim_arm_frames_ = std::min<uint32_t>(trim_arm_frames_ * 2, 8192);
-        HOLOSCAN_LOG_INFO(
+        SPARK_LOG_INFO(
             "st2110_tx: trim probe hit the floor (lead {} us) — backing off {} us, re-arm {} frames",
             lead / 1000, back / 1000, trim_arm_frames_);
       }
       frames_since_skip_ = 0;
       if ((skipped_late_ & 31) == 1)
-        HOLOSCAN_LOG_INFO("st2110_tx: skipping late frame (lead {} us) — purging backlog ({} skipped)",
+        SPARK_LOG_INFO("st2110_tx: skipping late frame (lead {} us) — purging backlog ({} skipped)",
                           lead / 1000, skipped_late_);
       if (media_ts_ns_ != 0) media_ts_ns_ += frame_interval_ns_;
       return;
@@ -479,7 +479,7 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
     if (lead < static_cast<int64_t>(tgt) / 4 || lead > 2 * static_cast<int64_t>(frame_interval_ns_)) {
       genlock_offset_ = (now + tgt) - frame.capture_ts_ns;  // re-center the lead (rare)
       gbase = static_cast<int64_t>(now) + static_cast<int64_t>(tgt);
-      HOLOSCAN_LOG_INFO("st2110_tx: genlock re-anchor #{} — lead was {} us, re-centered to {} us{}",
+      SPARK_LOG_INFO("st2110_tx: genlock re-anchor #{} — lead was {} us, re-centered to {} us{}",
                         reanchors_ + 1, lead / 1000, static_cast<int64_t>(tgt) / 1000,
                         chronic_clip ? " (chronic clipping: latency floor rose)" : "");
       lead = static_cast<int64_t>(tgt);
@@ -606,7 +606,7 @@ void St2110TxOp::compute(holoscan::InputContext& op_input, holoscan::OutputConte
       const auto t0 = std::chrono::steady_clock::now();
       while (send_ts > backend_->now_ns() + eff_horizon_ns_) {
         if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(50)) {
-          HOLOSCAN_LOG_WARN(
+          SPARK_LOG_WARN(
               "st2110_tx: pacing throttle hit 50ms cap — disabling self-throttle (check now_ns() "
               "units / pacing_horizon_ns); NIC tx_pp still active");
           throttle_enabled_ = false;
@@ -646,7 +646,7 @@ void St2110TxOp::stop() {
   if (stats_thread_.joinable()) stats_thread_.join();
   emit_live(true);  // final live snapshot for the daemon
   const auto s = backend_->stats();
-  HOLOSCAN_LOG_INFO(
+  SPARK_LOG_INFO(
       "st2110_tx stopped: frames={} packets={} reanchors={} skipped_late={} | tx_pp jitter={}ns "
       "wander={}ns sync_lost={} future_err={} past_err={} | final lead {} us, latency trimmed {} ms",
       frames_sent_, packets_sent_, reanchors_, skipped_late_, s.jitter_ns, s.wander_ns, s.sync_lost,

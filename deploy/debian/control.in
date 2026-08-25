@@ -23,5 +23,5 @@ Description: Real-time ST 2110 video processor on NVIDIA Blackwell GPUs
  GPU with an optical-flow engine: DGX Spark / GB10 (arm64) and RTX PRO 6000
  Blackwell / GB20x (amd64) are the validated targets. Hardware-paced TX
  additionally needs a ConnectX NIC with REAL_TIME_CLOCK_ENABLE=1; without it
- the pipeline still runs, unpaced. Holoscan, GXF, UCX, RMM and CUDA runtime
- libraries are bundled under /usr/lib/spark-video-processor/lib.
+ the pipeline still runs, unpaced. CUDA runtime libraries (cudart, NPP) are
+ bundled under /usr/lib/spark-video-processor/lib.

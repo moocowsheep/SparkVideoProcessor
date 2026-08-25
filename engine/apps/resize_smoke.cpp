@@ -6,16 +6,16 @@
 //   SPARK_PROFILE=1080p SPARK_OUT_W=3840 SPARK_OUT_H=2160 SPARK_INTERP=lanczos ./engine/build/resize_smoke
 #include <cstdlib>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "operators/resize/resize.hpp"
 
 namespace spark {
 
-class ResizeSmoke : public holoscan::Application {
+class ResizeSmoke : public spark::rt::Application {
  public:
   void compose() override {
-    using namespace holoscan;
+    using namespace spark::rt;
     auto env = [](const char* k, const char* d) {
       const char* v = std::getenv(k);
       return std::string(v ? v : d);
@@ -39,8 +39,8 @@ class ResizeSmoke : public holoscan::Application {
 }  // namespace spark
 
 int main() {
-  HOLOSCAN_LOG_INFO("Resize smoke: test_gpu_source -> resize (NPP) -> sink.");
-  auto app = holoscan::make_application<spark::ResizeSmoke>();
+  SPARK_LOG_INFO("Resize smoke: test_gpu_source -> resize (NPP) -> sink.");
+  auto app = spark::rt::make_application<spark::ResizeSmoke>();
   app->run();
   return 0;
 }

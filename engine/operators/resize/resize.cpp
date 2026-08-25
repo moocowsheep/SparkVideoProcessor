@@ -62,17 +62,17 @@ void resize_plane(const uint16_t* src, uint32_t sw, uint32_t sh, uint16_t* dst, 
 }  // namespace
 
 // ---- ResizeOp ----
-void ResizeOp::setup(holoscan::OperatorSpec& spec) {
+void ResizeOp::setup(spark::rt::OperatorSpec& spec) {
   // Burst-deep ONLY when this op directly receives FRC's multi-frame burst (SPARK_BURST_SINK);
   // every other placement is 1:1 and sits 1-deep. min_size 1 keeps resize upscaling one frame per
   // compute. This is the latency floor — capacity == standing latency behind the paced TX.
   const auto cap = static_cast<uint64_t>(spark::pipeline_queue_cap(name()));
   spec.input<spark::gpu::GpuFramePtr>("in")
-      .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
-                 holoscan::Arg("capacity", cap),
-                 holoscan::Arg("policy", static_cast<uint64_t>(2)))
-      .condition(holoscan::ConditionType::kMessageAvailable,
-                 holoscan::Arg("min_size", static_cast<uint64_t>(1)));
+      .connector(spark::rt::IOSpec::ConnectorType::kDoubleBuffer,
+                 spark::rt::Arg("capacity", cap),
+                 spark::rt::Arg("policy", static_cast<uint64_t>(2)))
+      .condition(spark::rt::ConditionType::kMessageAvailable,
+                 spark::rt::Arg("min_size", static_cast<uint64_t>(1)));
   spec.output<spark::gpu::GpuFramePtr>("out");
   spec.param(out_width_, "out_width", "Out width", "target width", 3840u);
   spec.param(out_height_, "out_height", "Out height", "target height", 2160u);
@@ -104,7 +104,7 @@ void ResizeOp::start() {
   cudaEventCreate(&b);
   ev_start_ = a;
   ev_stop_ = b;
-  HOLOSCAN_LOG_INFO("resize started: -> {}x{} interp={}{}", out_width_.get(), out_height_.get(),
+  SPARK_LOG_INFO("resize started: -> {}x{} interp={}{}", out_width_.get(), out_height_.get(),
                     interp_.get(), sr_model_.empty() ? "" : " (AI x2 SR on luma, cubic chroma)");
 }
 
@@ -118,18 +118,18 @@ void ResizeOp::ensure_sr(uint32_t in_width, uint32_t in_height) {
     const auto net = (file && *file) ? spark::sr::load_file(file, sr_model_)
                                      : spark::sr::load_embedded(sr_model_);
     sr_engine_ = std::make_unique<spark::sr::Engine>(net, in_width, in_height);
-    HOLOSCAN_LOG_INFO("resize: AI SR engaged: {}  ({}x{} -> {}x{}){}", sr_engine_->plan(),
+    SPARK_LOG_INFO("resize: AI SR engaged: {}  ({}x{} -> {}x{}){}", sr_engine_->plan(),
                       in_width, in_height, 2 * in_width, 2 * in_height,
                       (file && *file) ? std::string(" weights=") + file : std::string());
   } catch (const std::exception& e) {
-    HOLOSCAN_LOG_ERROR("resize: AI SR init failed ({}) — falling back to cubic", e.what());
+    SPARK_LOG_ERROR("resize: AI SR init failed ({}) — falling back to cubic", e.what());
     sr_engine_.reset();
     sr_model_.clear();
   }
 }
 
-void ResizeOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-                       holoscan::ExecutionContext&) {
+void ResizeOp::compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+                       spark::rt::ExecutionContext&) {
   auto in = op_input.receive<spark::gpu::GpuFramePtr>("in");
   if (!in || !in.value()) return;
   const auto& src = *in.value();
@@ -140,7 +140,7 @@ void ResizeOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext
   if (src.width == out_width_.get() && src.height == out_height_.get() && !measure_.get()) {
     if (!identity_logged_) {
       identity_logged_ = true;
-      HOLOSCAN_LOG_INFO("resize: {}x{} == target — 1:1 passthrough (NPP skipped)", src.width, src.height);
+      SPARK_LOG_INFO("resize: {}x{} == target — 1:1 passthrough (NPP skipped)", src.width, src.height);
     }
     ++frames_;
     op_output.emit(in.value(), "out");
@@ -165,7 +165,7 @@ void ResizeOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext
                          dst->height == src.height * 2;
   if (!sr_model_.empty() && !sr_active && !sr_fallback_logged_) {
     sr_fallback_logged_ = true;
-    HOLOSCAN_LOG_WARN("resize: interp={} supports exact 2x only — {}x{} -> {}x{} uses cubic",
+    SPARK_LOG_WARN("resize: interp={} supports exact 2x only — {}x{} -> {}x{} uses cubic",
                       sr_model_, src.width, src.height, dst->width, dst->height);
   }
   if (sr_active) ensure_sr(src.width, src.height);  // clears sr_model_ if init fails
@@ -202,11 +202,11 @@ void ResizeOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext
 
 void ResizeOp::stop() {
   if (frames_ && ms_sum_ > 0.0) {
-    HOLOSCAN_LOG_INFO(
+    SPARK_LOG_INFO(
         "resize stopped: frames={} | resize ms/frame min/avg/max = {:.3f}/{:.3f}/{:.3f}", frames_,
         ms_min_, ms_sum_ / frames_, ms_max_);
   } else {
-    HOLOSCAN_LOG_INFO("resize stopped: frames={} (timing off)", frames_);
+    SPARK_LOG_INFO("resize stopped: frames={} (timing off)", frames_);
   }
   if (ev_start_) cudaEventDestroy(static_cast<cudaEvent_t>(ev_start_));
   if (ev_stop_) cudaEventDestroy(static_cast<cudaEvent_t>(ev_stop_));
@@ -219,7 +219,7 @@ void ResizeOp::stop() {
 }
 
 // ---- TestGpuSourceOp ----
-void TestGpuSourceOp::setup(holoscan::OperatorSpec& spec) {
+void TestGpuSourceOp::setup(spark::rt::OperatorSpec& spec) {
   spec.output<spark::gpu::GpuFramePtr>("out");
   spec.param(profile_, "profile", "Profile", "1080p | 2160p (input size)", std::string("1080p"));
 }
@@ -228,23 +228,23 @@ void TestGpuSourceOp::start() {
   const bool uhd = profile_.get() == "2160p";
   frame_ = std::make_shared<spark::gpu::GpuFrame>(uhd ? 3840u : 1920u, uhd ? 2160u : 1080u);
   spark::gpu::fill_gradient(*frame_, 1);
-  HOLOSCAN_LOG_INFO("test_gpu_source: {}x{} (profile {})", frame_->width, frame_->height,
+  SPARK_LOG_INFO("test_gpu_source: {}x{} (profile {})", frame_->width, frame_->height,
                     profile_.get());
 }
 
-void TestGpuSourceOp::compute(holoscan::InputContext&, holoscan::OutputContext& op_output,
-                              holoscan::ExecutionContext&) {
+void TestGpuSourceOp::compute(spark::rt::InputContext&, spark::rt::OutputContext& op_output,
+                              spark::rt::ExecutionContext&) {
   ++n_;
   op_output.emit(frame_, "out");  // reused input frame (resize reads it read-only)
 }
 
 // ---- GpuFrameSinkOp ----
-void GpuFrameSinkOp::setup(holoscan::OperatorSpec& spec) {
+void GpuFrameSinkOp::setup(spark::rt::OperatorSpec& spec) {
   spec.input<spark::gpu::GpuFramePtr>("in");
 }
 
-void GpuFrameSinkOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext&,
-                             holoscan::ExecutionContext&) {
+void GpuFrameSinkOp::compute(spark::rt::InputContext& op_input, spark::rt::OutputContext&,
+                             spark::rt::ExecutionContext&) {
   auto in = op_input.receive<spark::gpu::GpuFramePtr>("in");
   if (in && in.value()) {
     cudaDeviceSynchronize();  // ensure the resize actually completed

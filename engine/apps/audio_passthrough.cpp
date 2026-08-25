@@ -14,7 +14,7 @@
 #include <cstdint>
 #include <cstdlib>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "operators/audio/audio_delay.hpp"
 #include "operators/audio/audio_rx.hpp"
@@ -23,10 +23,10 @@
 
 namespace spark {
 
-class AudioPassthrough : public holoscan::Application {
+class AudioPassthrough : public spark::rt::Application {
  public:
   void compose() override {
-    using namespace holoscan;
+    using namespace spark::rt;
     auto env = [](const char* k, const char* d) {
       const char* v = std::getenv(k);
       return std::string(v ? v : d);
@@ -75,13 +75,11 @@ class AudioPassthrough : public holoscan::Application {
 }  // namespace spark
 
 int main() {
-  HOLOSCAN_LOG_INFO("ST 2110-30 audio passthrough: audio_rx -> delay -> audio_tx.");
-  auto app = holoscan::make_application<spark::AudioPassthrough>();
-  app->scheduler(app->make_scheduler<holoscan::MultiThreadScheduler>(
-      "mts", holoscan::Arg("worker_thread_number", static_cast<int64_t>(3)),
-      holoscan::Arg("stop_on_deadlock", true),
-      holoscan::Arg("stop_on_deadlock_timeout", static_cast<int64_t>(3000)),
-      holoscan::Arg("max_duration_ms", static_cast<int64_t>(120000))));
+  SPARK_LOG_INFO("ST 2110-30 audio passthrough: audio_rx -> delay -> audio_tx.");
+  auto app = spark::rt::make_application<spark::AudioPassthrough>();
+  // spark::rt gives every operator its own thread, so the old worker_thread_number/deadlock
+  // settings have no analogue; only the run bound survives.
+  app->max_duration_ms(120000);
   app->run();
   return 0;
 }

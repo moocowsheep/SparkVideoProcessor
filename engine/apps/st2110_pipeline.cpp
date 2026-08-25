@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "operators/codec/codec_ops.hpp"
 #include "operators/common/dpdk_eal.hpp"
@@ -31,10 +31,10 @@
 
 namespace spark {
 
-class St2110Pipeline : public holoscan::Application {
+class St2110Pipeline : public spark::rt::Application {
  public:
   void compose() override {
-    using namespace holoscan;
+    using namespace spark::rt;
     auto env = [](const char* k, const char* d) {
       const char* v = std::getenv(k);
       return std::string(v ? v : d);
@@ -125,9 +125,9 @@ class St2110Pipeline : public holoscan::Application {
         static_cast<uint32_t>(std::atoll(env("SPARK_AUDIO_RATE", "48000").c_str()));
     bool audio = !rx_a_mcast.empty() && !tx_a_mcast.empty();
     if (!rx_a_mcast.empty() && tx_a_mcast.empty())
-      HOLOSCAN_LOG_WARN("audio: RX group set but no SPARK_TX_AUDIO_MCAST — audio disabled");
+      SPARK_LOG_WARN("audio: RX group set but no SPARK_TX_AUDIO_MCAST — audio disabled");
     if (audio && latency_ns == 0) {
-      HOLOSCAN_LOG_WARN("audio: requires the fixed-latency schedule (SPARK_LATENCY_MS>0) — disabled");
+      SPARK_LOG_WARN("audio: requires the fixed-latency schedule (SPARK_LATENCY_MS>0) — disabled");
       audio = false;
     }
     // Source format from the SDP (SPARK_IN_*; the NMOS bridge fills these from the sender's fmtp). The
@@ -198,7 +198,7 @@ class St2110Pipeline : public holoscan::Application {
     for (double* d : {&delay_v_ms, &delay_a_ms}) {
       if (!(*d >= 0.0 && *d <= 1000.0)) {
         const double c = (*d > 0.0) ? 1000.0 : 0.0;
-        HOLOSCAN_LOG_WARN("delay: {} ms out of range — clamped to {}", *d, c);
+        SPARK_LOG_WARN("delay: {} ms out of range — clamped to {}", *d, c);
         *d = c;
       }
     }
@@ -225,13 +225,13 @@ class St2110Pipeline : public holoscan::Application {
     const bool with_delay = chain_has("delay");
     if (with_delay) {
       if (latency_ns == 0) {
-        HOLOSCAN_LOG_WARN(
+        SPARK_LOG_WARN(
             "delay: requires the fixed-latency schedule (SPARK_LATENCY_MS>0) — ignored");
       } else {
         latency_ms += delay_v_ms;  // q_depth (the standing frame store) sizes from this too
         latency_ns += static_cast<uint64_t>(delay_v_ms * 1e6);
         av_offset_ns += static_cast<int64_t>((delay_a_ms - delay_v_ms) * 1e6);
-        HOLOSCAN_LOG_INFO("delay: video +{} ms, audio +{} ms (L -> {} ms, av_offset -> {} ms)",
+        SPARK_LOG_INFO("delay: video +{} ms, audio +{} ms (L -> {} ms, av_offset -> {} ms)",
                           delay_v_ms, delay_a_ms, latency_ns / 1e6, av_offset_ns / 1e6);
       }
     }
@@ -351,7 +351,7 @@ class St2110Pipeline : public holoscan::Application {
       const std::string name = nth ? tok + std::to_string(nth + 1) : tok;
       if (tok == "frc") {
         if (!with_frc) {  // frc listed but SPARK_FRC=0: mode governs behavior, so skip it
-          HOLOSCAN_LOG_WARN("chain: 'frc' listed in SPARK_FILTERS but SPARK_FRC=0 — skipping");
+          SPARK_LOG_WARN("chain: 'frc' listed in SPARK_FILTERS but SPARK_FRC=0 — skipping");
           continue;
         }
         // motion-compensated interpolation (OFA): rate_mult 2 inserts a real+mid pair -> 2x rate;
@@ -380,7 +380,7 @@ class St2110Pipeline : public holoscan::Application {
       } else if (tok == "delay") {
         continue;  // schedule-level stage, already folded into latency/av_offset above
       } else {
-        HOLOSCAN_LOG_WARN("chain: unknown filter '{}' in SPARK_FILTERS — skipping", tok);
+        SPARK_LOG_WARN("chain: unknown filter '{}' in SPARK_FILTERS — skipping", tok);
         continue;
       }
       composed += " -> " + name;
@@ -389,7 +389,7 @@ class St2110Pipeline : public holoscan::Application {
     // manifest advertises out_w x out_h — a raster mismatch every receiver rejects. ResizeOp is a
     // passthrough at 1:1, so appending one is always safe.
     if (!seen.count("scale")) {
-      HOLOSCAN_LOG_WARN("chain: no 'scale' stage — appending one (the advertised raster is {}x{})",
+      SPARK_LOG_WARN("chain: no 'scale' stage — appending one (the advertised raster is {}x{})",
                         ow, oh);
       chain.push_back(make_operator<ops::ResizeOp>("scale", Arg("out_width", ow),
                                                    Arg("out_height", oh), Arg("interp", interp)));
@@ -399,19 +399,19 @@ class St2110Pipeline : public holoscan::Application {
     add_flow(rx, unpack);
     for (size_t i = 0; i + 1 < chain.size(); ++i) add_flow(chain[i], chain[i + 1]);
     add_flow(pack, tx);
-    HOLOSCAN_LOG_INFO("chain: {} -> pack -> tx", composed);
+    SPARK_LOG_INFO("chain: {} -> pack -> tx", composed);
   }
 };
 
 }  // namespace spark
 
 int main() {
-  HOLOSCAN_LOG_INFO("ST 2110 pipeline: rx -> unpack -> resize -> pack -> tx (1080p->2160p).");
+  SPARK_LOG_INFO("ST 2110 pipeline: rx -> unpack -> resize -> pack -> tx (1080p->2160p).");
   // Shield the realtime pipeline from host CPU contention. The residual ~300ms pipe stalls were
   // reproduced ON DEMAND with 16 CPU burners (GPU fence 1ms — pure CFS scheduling starvation of
   // the RX poll / scheduler worker threads) and never occur on a quiet host. Linux nice is
   // per-thread and INHERITED at thread creation, so set it first thing in main: every EAL lcore,
-  // Holoscan worker, and RX poll thread created below runs at this priority. -15 outweighs
+  // operator thread, and RX poll thread created below runs at this priority. -15 outweighs
   // default-nice work ~29:1 without the starve-the-kernel risks of SCHED_FIFO. SPARK_NICE
   // overrides (0 disables).
   {
@@ -419,9 +419,9 @@ int main() {
     const int prio = n ? std::atoi(n) : -15;
     if (prio != 0) {
       if (setpriority(PRIO_PROCESS, 0, prio) == 0)
-        HOLOSCAN_LOG_INFO("pipeline nice set to {} (inherited by all engine threads)", prio);
+        SPARK_LOG_INFO("pipeline nice set to {} (inherited by all engine threads)", prio);
       else
-        HOLOSCAN_LOG_WARN("setpriority({}) failed (not root?) — vulnerable to host CPU contention",
+        SPARK_LOG_WARN("setpriority({}) failed (not root?) — vulnerable to host CPU contention",
                           prio);
     }
   }
@@ -436,36 +436,25 @@ int main() {
   if (!std::getenv("SPARK_CUDA_LAZY")) setenv("CUDA_MODULE_LOADING", "EAGER", 0);
   if (!std::getenv("SPARK_NO_MLOCK")) {
     if (mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) == 0)
-      HOLOSCAN_LOG_INFO("mlockall(ONFAULT) — engine pages pinned resident");
+      SPARK_LOG_INFO("mlockall(ONFAULT) — engine pages pinned resident");
     else
-      HOLOSCAN_LOG_WARN("mlockall failed — vulnerable to host memory pressure (page-fault stalls)");
+      SPARK_LOG_WARN("mlockall failed — vulnerable to host memory pressure (page-fault stalls)");
   }
-  auto app = holoscan::make_application<spark::St2110Pipeline>();
+  auto app = spark::rt::make_application<spark::St2110Pipeline>();
   // max run time (ms). Default 0 = run until stopped (a live feed must not self-terminate); set
-  // SPARK_MAX_MS>0 to bound a test run. Holoscan needs a finite value, so 0 maps to ~1 week.
+  // SPARK_MAX_MS>0 to bound a test run. 0 means "no deadline" to the runtime.
   const char* ms = std::getenv("SPARK_MAX_MS");
-  const int64_t max_ms = (ms && std::atoll(ms) > 0) ? std::atoll(ms) : 7LL * 24 * 3600 * 1000;
-  // Scheduler (SPARK_SCHED): "event" (default) = EventBasedScheduler — operators are dispatched the
-  // moment an upstream emit readies them. "mts" = the legacy MultiThreadScheduler, whose polling
-  // thread sleeps check_recession_period_ms (default 5 ms!) whenever a pass finds nothing ready, so
-  // EVERY operator hop can eat up to 5 ms of pure scheduler latency — across this graph's 5 hops
-  // that's the single largest avoidable latency term. Keep "mts" as the fallback escape hatch.
-  const char* sched = std::getenv("SPARK_SCHED");
-  if (sched && std::string(sched) == "mts") {
-    HOLOSCAN_LOG_INFO("scheduler: MultiThreadScheduler (SPARK_SCHED=mts fallback)");
-    app->scheduler(app->make_scheduler<holoscan::MultiThreadScheduler>(
-        "mts", holoscan::Arg("worker_thread_number", static_cast<int64_t>(6)),
-        holoscan::Arg("stop_on_deadlock", true),
-        holoscan::Arg("stop_on_deadlock_timeout", static_cast<int64_t>(3000)),
-        holoscan::Arg("max_duration_ms", max_ms)));
-  } else {
-    HOLOSCAN_LOG_INFO("scheduler: EventBasedScheduler (low-latency; SPARK_SCHED=mts to fall back)");
-    app->scheduler(app->make_scheduler<holoscan::EventBasedScheduler>(
-        "ebs", holoscan::Arg("worker_thread_number", static_cast<int64_t>(6)),
-        holoscan::Arg("stop_on_deadlock", true),
-        holoscan::Arg("stop_on_deadlock_timeout", static_cast<int64_t>(3000)),
-        holoscan::Arg("max_duration_ms", max_ms)));
-  }
+  const int64_t max_ms = (ms && std::atoll(ms) > 0) ? std::atoll(ms) : 0;
+  // No scheduler to choose any more: spark::rt runs one thread per operator, so an operator is
+  // dispatched by its own blocking queue the moment upstream emits. The Holoscan era exposed
+  // SPARK_SCHED=event|mts here because MultiThreadScheduler's polling thread slept
+  // check_recession_period_ms (5 ms default) whenever a pass found nothing ready — up to 5 ms of
+  // dispatch latency per hop, the largest avoidable latency term across this graph's 5 hops. That
+  // failure mode does not exist here, and SPARK_SCHED is accepted-and-ignored so old run scripts
+  // keep working.
+  if (std::getenv("SPARK_SCHED"))
+    SPARK_LOG_INFO("SPARK_SCHED is obsolete (spark::rt has no polling scheduler) — ignoring");
+  app->max_duration_ms(max_ms);
   app->run();
   return 0;
 }

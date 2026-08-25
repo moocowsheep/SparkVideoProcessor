@@ -4,10 +4,11 @@
 #include "audio_rx.hpp"
 
 #include <chrono>
+#include <cstring>
 
 namespace spark::ops {
 
-void AudioRxOp::setup(holoscan::OperatorSpec& spec) {
+void AudioRxOp::setup(spark::rt::OperatorSpec& spec) {
   spec.output<spark::st2110::AudioBlock>("audio");
   spec.param(pci_addr_, "pci_addr", "RX PCI", "CX-7 RX port BDF", std::string("0000:01:00.1"));
   spec.param(udp_port_, "udp_port", "UDP port", "ST 2110-30 RTP destination port", uint32_t(20010));
@@ -38,7 +39,7 @@ void AudioRxOp::start() {
   cfg.src_ip = src_ip_.get();
   cfg.iface_ip = iface_ip_.get();
   backend_->init(cfg);
-  HOLOSCAN_LOG_INFO("audio_rx started: RX {} udp:{} group={} {}ch/{}bit @{}ms", cfg.pci_addr,
+  SPARK_LOG_INFO("audio_rx started: RX {} udp:{} group={} {}ch/{}bit @{}ms", cfg.pci_addr,
                     cfg.udp_port, cfg.mcast_group.empty() ? "(none)" : cfg.mcast_group,
                     fmt_.channels, bit_depth_.get(), fmt_.packet_time_ms);
   poll_thread_ = std::thread(&AudioRxOp::poll_loop, this);
@@ -84,8 +85,8 @@ void AudioRxOp::poll_loop() {
   }
 }
 
-void AudioRxOp::compute(holoscan::InputContext&, holoscan::OutputContext& op_output,
-                        holoscan::ExecutionContext&) {
+void AudioRxOp::compute(spark::rt::InputContext&, spark::rt::OutputContext& op_output,
+                        spark::rt::ExecutionContext&) {
   std::unique_lock<std::mutex> lk(q_mu_);
   if (!q_cv_.wait_for(lk, std::chrono::seconds(2), [&] { return !q_.empty() || stop_poll_.load(); }))
     return;
@@ -100,7 +101,7 @@ void AudioRxOp::stop() {
   stop_poll_.store(true);
   q_cv_.notify_all();
   if (poll_thread_.joinable()) poll_thread_.join();
-  HOLOSCAN_LOG_INFO("audio_rx stopped: packets={} dropped={}", packets_, dropped_);
+  SPARK_LOG_INFO("audio_rx stopped: packets={} dropped={}", packets_, dropped_);
   if (backend_) { backend_->shutdown(); backend_.reset(); }
 }
 

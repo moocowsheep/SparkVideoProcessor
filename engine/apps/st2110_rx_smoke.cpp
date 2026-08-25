@@ -4,7 +4,6 @@
 // ST 2110 RX bring-up app: a single st2110_rx operator that receives the loopback stream and reports
 // loss + zero-copy ingest latency. Run as the RX half of the two-process loopback (mirrors gate-4):
 //
-//   T=$(ls -d ~/holoscan-sdk/install-cu13-$(uname -m)-dgpu ~/holoscan-sdk/install-cu13-$(uname -m) 2>/dev/null | head -1)
 //   sudo -n SPARK_PROFILE=2160p SPARK_SECONDS=12 ./engine/build/st2110_rx_smoke &   # start RX first
 //   sudo -n SPARK_PROFILE=2160p ./engine/build/st2110_tx_smoke                      # then TX
 //
@@ -19,7 +18,7 @@
 #include <stdexcept>
 #include <string>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "operators/common/nic_ports.hpp"
 #include "operators/frame_sink/frame_sink.hpp"
@@ -27,10 +26,10 @@
 
 namespace spark {
 
-class St2110RxSmoke : public holoscan::Application {
+class St2110RxSmoke : public spark::rt::Application {
  public:
   void compose() override {
-    using namespace holoscan;
+    using namespace spark::rt;
     auto env = [](const char* k, const char* d) {
       const char* v = std::getenv(k);
       return std::string(v ? v : d);
@@ -47,7 +46,7 @@ class St2110RxSmoke : public holoscan::Application {
       throw std::runtime_error("no second ConnectX (15b3) port found — set SPARK_RX_PCI");
     for (const auto& p : ports)
       if (p.bdf == rx_pci) rx_port = p;   // an explicit SPARK_RX_PCI may not be the discovered one
-    HOLOSCAN_LOG_INFO("RX {} ({}){}", rx_pci, rx_port.iface,
+    SPARK_LOG_INFO("RX {} ({}){}", rx_pci, rx_port.iface,
                       rx_port.bdf == rx_pci && !rx_port.carrier ? " — LINK DOWN" : "");
 
     auto rx = make_operator<ops::St2110RxOp>(
@@ -65,8 +64,8 @@ class St2110RxSmoke : public holoscan::Application {
 }  // namespace spark
 
 int main() {
-  HOLOSCAN_LOG_INFO("ST 2110 RX smoke: st2110_rx (loopback receiver, loss + ingest latency).");
-  auto app = holoscan::make_application<spark::St2110RxSmoke>();
+  SPARK_LOG_INFO("ST 2110 RX smoke: st2110_rx (loopback receiver, loss + ingest latency).");
+  auto app = spark::rt::make_application<spark::St2110RxSmoke>();
   app->run();
   return 0;
 }

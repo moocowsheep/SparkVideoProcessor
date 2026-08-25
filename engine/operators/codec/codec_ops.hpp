@@ -14,20 +14,20 @@
 #include <utility>
 #include <vector>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "../resize/gpu_frame.hpp"
 #include "../st2110_tx/st2110_format.hpp"
 
 namespace spark::ops {
 
-class UnpackOp : public holoscan::Operator {
+class UnpackOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(UnpackOp)
+  SPARK_OPERATOR_FORWARD_ARGS(UnpackOp)
   UnpackOp() = default;
-  void setup(holoscan::OperatorSpec& spec) override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext& context) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext& context) override;
   void stop() override;
 
  private:
@@ -45,19 +45,19 @@ class UnpackOp : public holoscan::Operator {
   std::vector<cudaEvent_t> ev_pool_;  // recycled completion events for inflight_
 };
 
-class PackOp : public holoscan::Operator {
+class PackOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(PackOp)
+  SPARK_OPERATOR_FORWARD_ARGS(PackOp)
   PackOp() = default;
-  void setup(holoscan::OperatorSpec& spec) override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext& context) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext& context) override;
   void stop() override;
 
  private:
   void ensure(uint32_t width, uint32_t height);
-  holoscan::Parameter<double> out_fps_;  // output RTP media rate (drives TX pacing); from the source SDP
-  holoscan::Parameter<bool> ip10_;  // Blackmagic IP10 10:8 output (8-bit pgroups) instead of raw 10-bit
+  spark::rt::Parameter<double> out_fps_;  // output RTP media rate (drives TX pacing); from the source SDP
+  spark::rt::Parameter<bool> ip10_;  // Blackmagic IP10 10:8 output (8-bit pgroups) instead of raw 10-bit
   cudaStream_t stream_ = nullptr;  // own CUDA stream (pack kernel + D2H), pipelined vs other ops
   uint8_t* dpacked_ = nullptr;  // device staging for the packed frame (copy path only)
   size_t dpacked_bytes_ = 0;

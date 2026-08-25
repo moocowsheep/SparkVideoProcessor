@@ -19,10 +19,10 @@ void FrcOp::emit_live(bool force) {
       std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   if (!force && t - last_live_s_ < 1.0) return;
   last_live_s_ = t;
-  HOLOSCAN_LOG_INFO("spark_live frc_interpolated={}", frames_);
+  SPARK_LOG_INFO("spark_live frc_interpolated={}", frames_);
 }
 
-void FrcOp::setup(holoscan::OperatorSpec& spec) {
+void FrcOp::setup(spark::rt::OperatorSpec& spec) {
   spec.input<spark::gpu::GpuFramePtr>("in");
   // Up-convert emits TWO frames per compute (real + mid) on "out"; retime emits one. Size the
   // transmitter to hold the burst until GXF delivers it downstream, and gate FRC's execution on the
@@ -32,11 +32,11 @@ void FrcOp::setup(holoscan::OperatorSpec& spec) {
   // keeps the queue (and its latency) minimal.
   const auto burst = static_cast<uint64_t>(spark::pipeline_emit_burst());
   spec.output<spark::gpu::GpuFramePtr>("out")
-      .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
-                 holoscan::Arg("capacity", burst),  // exactly the emit burst (floor)
-                 holoscan::Arg("policy", static_cast<uint64_t>(2)))  // 2 = fault: warn, don't drop
-      .condition(holoscan::ConditionType::kDownstreamMessageAffordable,
-                 holoscan::Arg("min_size", burst));
+      .connector(spark::rt::IOSpec::ConnectorType::kDoubleBuffer,
+                 spark::rt::Arg("capacity", burst),  // exactly the emit burst (floor)
+                 spark::rt::Arg("policy", static_cast<uint64_t>(2)))  // 2 = fault: warn, don't drop
+      .condition(spark::rt::ConditionType::kDownstreamMessageAffordable,
+                 spark::rt::Arg("min_size", burst));
   spec.param(phase_, "phase", "Phase", "interpolation t in [0,1] (0.5 = midpoint)", 0.5);
   spec.param(grid_size_, "grid_size", "NVOF grid", "flow output grid 1|2|4", 4u);
   spec.param(rate_mult_, "rate_mult", "Rate multiplier", "1 = retime (1:1), 2 = up-convert (2x)", 1u);
@@ -70,7 +70,7 @@ void FrcOp::ensure(uint32_t width, uint32_t height) {
   pool_.assign(2 * burst_ + 6, nullptr);
   for (auto& f : pool_) f = std::make_shared<spark::gpu::GpuFrame>(width, height);
   inited_ = true;
-  HOLOSCAN_LOG_INFO(
+  SPARK_LOG_INFO(
       "frc: {}x{} grid={} phase={} rate_mult={} uniform_interval={}ns burst={} median={} cost={} "
       "temporal_hints={}",
       width, height, grid_size_.get(), phase_.get(), rate_mult_.get(), out_interval_ns_.get(),
@@ -97,7 +97,7 @@ void FrcOp::run_flow(const spark::gpu::GpuFramePtr& cur) {
   }
 }
 
-void FrcOp::compute_uniform(const spark::gpu::GpuFramePtr& cur, holoscan::OutputContext& op_output) {
+void FrcOp::compute_uniform(const spark::gpu::GpuFramePtr& cur, spark::rt::OutputContext& op_output) {
   const uint64_t pc = src_prev_ts_, cc = cur->capture_ts_ns;
   src_prev_ts_ = cc;
   if (pc == 0 || cc <= pc) {  // no usable bracket (missing/non-monotonic capture stamps): pass through
@@ -112,7 +112,7 @@ void FrcOp::compute_uniform(const spark::gpu::GpuFramePtr& cur, holoscan::Output
   const uint64_t before = grid_dropped_;
   const int n = grid_.ticks(pc, cc, ticks, max_out, 8 * grid_.interval_ns, &grid_dropped_);
   if (grid_dropped_ != before && ((grid_dropped_ / 16) != (before / 16)))
-    HOLOSCAN_LOG_WARN("frc: uniform grid dropped {} ticks total (source stall / over-burst bracket)",
+    SPARK_LOG_WARN("frc: uniform grid dropped {} ticks total (source stall / over-burst bracket)",
                       grid_dropped_);
 
   // A tick landing on cur itself (phase ~1) passes the REAL frame through, re-stamped onto the grid
@@ -142,8 +142,8 @@ void FrcOp::compute_uniform(const spark::gpu::GpuFramePtr& cur, holoscan::Output
   prev_ = cur;
 }
 
-void FrcOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-                    holoscan::ExecutionContext&) {
+void FrcOp::compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+                    spark::rt::ExecutionContext&) {
   auto in = op_input.receive<spark::gpu::GpuFramePtr>("in");
   if (!in || !in.value()) return;
   auto cur = in.value();
@@ -158,7 +158,7 @@ void FrcOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& o
       const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::steady_clock::now() - t0)
                           .count();
-      if (ms > 20) HOLOSCAN_LOG_WARN("frc stall: compute blocked {} ms on the CPU side", ms);
+      if (ms > 20) SPARK_LOG_WARN("frc stall: compute blocked {} ms on the CPU side", ms);
     }
   } wall_warn;
 
@@ -202,7 +202,7 @@ void FrcOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& o
 
 void FrcOp::stop() {
   emit_live(true);  // final live snapshot for the daemon
-  HOLOSCAN_LOG_INFO("frc stopped: interpolated {} frames, uniform-grid ticks dropped {}", frames_,
+  SPARK_LOG_INFO("frc stopped: interpolated {} frames, uniform-grid ticks dropped {}", frames_,
                     grid_dropped_);
   if (stream_) {
     cudaStreamSynchronize(stream_);

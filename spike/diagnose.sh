@@ -32,8 +32,8 @@ echo "PTP clock devices:"; ls -l /dev/ptp* 2>/dev/null || echo "  (none)"
 hr "GPU media engines"
 nvidia-smi -q 2>/dev/null | grep -iE 'encoder|decoder|jpeg|ofa' | head
 
-hr "Optical Flow / NPP / DPDK / DOCA / Holoscan libs"
-ldconfig -p | grep -iE 'opticalflow|nvof|nppi|dpdk|rte_|doca|holoscan' || echo "(none)"
+hr "Optical Flow / NPP / DPDK / DOCA libs"
+ldconfig -p | grep -iE 'opticalflow|nvof|nppi|dpdk|rte_|doca' || echo "(none)"
 command -v dpdk-testpmd >/dev/null && echo "dpdk-testpmd: present" || echo "dpdk-testpmd: MISSING"
 
 hr "Toolchain"

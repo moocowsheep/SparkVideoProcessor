@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 #include <npp.h>  // NppStreamContext (CUDA 13 NPP exposes only the _Ctx primitive variants)
 
 #include "gpu_frame.hpp"
@@ -24,23 +24,23 @@
 
 namespace spark::ops {
 
-class ResizeOp : public holoscan::Operator {
+class ResizeOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(ResizeOp)
+  SPARK_OPERATOR_FORWARD_ARGS(ResizeOp)
   ResizeOp() = default;
-  void setup(holoscan::OperatorSpec& spec) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
   void start() override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext& context) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext& context) override;
   void stop() override;
 
  private:
   void ensure_sr(uint32_t in_width, uint32_t in_height);  // (re)build the SR engine for these dims
 
-  holoscan::Parameter<uint32_t> out_width_;
-  holoscan::Parameter<uint32_t> out_height_;
-  holoscan::Parameter<std::string> interp_;  // auto | linear | cubic | lanczos | super | AI names
-  holoscan::Parameter<bool> measure_;  // per-frame cudaEvent timing (benchmark only; a sync/frame)
+  spark::rt::Parameter<uint32_t> out_width_;
+  spark::rt::Parameter<uint32_t> out_height_;
+  spark::rt::Parameter<std::string> interp_;  // auto | linear | cubic | lanczos | super | AI names
+  spark::rt::Parameter<bool> measure_;  // per-frame cudaEvent timing (benchmark only; a sync/frame)
 
   int interp_code_ = 0;
   std::string sr_model_;  // non-empty = AI SR luma path ("fsrcnn" | "fsrcnn-s" | "espcn")
@@ -59,29 +59,29 @@ class ResizeOp : public holoscan::Operator {
 };
 
 // Synthetic GPU frame source: emits a gradient-filled GpuFrame at the input resolution each compute().
-class TestGpuSourceOp : public holoscan::Operator {
+class TestGpuSourceOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(TestGpuSourceOp)
+  SPARK_OPERATOR_FORWARD_ARGS(TestGpuSourceOp)
   TestGpuSourceOp() = default;
-  void setup(holoscan::OperatorSpec& spec) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
   void start() override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext& context) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext& context) override;
 
  private:
-  holoscan::Parameter<std::string> profile_;  // 1080p | 2160p (input size)
+  spark::rt::Parameter<std::string> profile_;  // 1080p | 2160p (input size)
   spark::gpu::GpuFramePtr frame_;
   uint64_t n_ = 0;
 };
 
 // Trivial sink: synchronizes the device (so resize timing is real) and counts frames.
-class GpuFrameSinkOp : public holoscan::Operator {
+class GpuFrameSinkOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(GpuFrameSinkOp)
+  SPARK_OPERATOR_FORWARD_ARGS(GpuFrameSinkOp)
   GpuFrameSinkOp() = default;
-  void setup(holoscan::OperatorSpec& spec) override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext& context) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext& context) override;
 
  private:
   uint64_t count_ = 0;

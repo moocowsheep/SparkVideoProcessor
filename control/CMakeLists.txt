@@ -1,4 +1,4 @@
-# Spark Video Processor — control daemon (M4). Independent of the engine (no DPDK/Holoscan/CUDA):
+# Spark Video Processor — control daemon (M4). Independent of the engine (no DPDK/CUDA):
 # just gRPC + protobuf + libmicrohttpd. It spawns/manages the st2110_pipeline binary.
 #   cmake -S control -B control/build && cmake --build control/build
 #   ./control/build/spark_controld --pipeline ./engine/build/st2110_pipeline --web web

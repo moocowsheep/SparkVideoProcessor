@@ -8,23 +8,23 @@
 #include <cstdint>
 #include <memory>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "audio_st2110.hpp"
 
 namespace spark::ops {
 
-class AudioDelayOp : public holoscan::Operator {
+class AudioDelayOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(AudioDelayOp)
+  SPARK_OPERATOR_FORWARD_ARGS(AudioDelayOp)
   AudioDelayOp() = default;
 
-  void setup(holoscan::OperatorSpec& spec) override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext&) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext&) override;
 
  private:
-  holoscan::Parameter<double> delay_ms_;  // lip-sync delay; >= the video processing latency
+  spark::rt::Parameter<double> delay_ms_;  // lip-sync delay; >= the video processing latency
   std::unique_ptr<spark::st2110::AudioDelayLine> line_;  // sized from the first block's packet time
 };
 

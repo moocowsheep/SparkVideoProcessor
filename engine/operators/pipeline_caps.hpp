@@ -7,8 +7,9 @@
 // halving the standing latency behind the paced TX (queue depth x output frame period == latency).
 //
 // This value is both the inter-op queue capacity floor AND the FRC output gate's min_size, so a single
-// source keeps them consistent. It's read from the env the app is already driven by because Holoscan
-// Parameters aren't populated yet when setup() runs (where connector capacity must be declared).
+// source keeps them consistent. It's read from the env the app is already driven by because
+// Parameters aren't populated yet when setup() runs (where connector capacity must be declared) —
+// true of spark::rt (Args are applied after setup) exactly as it was of Holoscan.
 #pragma once
 
 #include <cstdint>

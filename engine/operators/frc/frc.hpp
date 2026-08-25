@@ -27,7 +27,7 @@
 #include <memory>
 #include <vector>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "../resize/gpu_frame.hpp"
 #include "frc_grid.hpp"
@@ -36,25 +36,25 @@
 
 namespace spark::ops {
 
-class FrcOp : public holoscan::Operator {
+class FrcOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(FrcOp)
+  SPARK_OPERATOR_FORWARD_ARGS(FrcOp)
   FrcOp() = default;
-  void setup(holoscan::OperatorSpec& spec) override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext& context) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext& context) override;
   void stop() override;
 
  private:
   void ensure(uint32_t width, uint32_t height);
   void emit_live(bool force = false);  // periodic "spark_live frc_interpolated" line (1 Hz)
   void run_flow(const spark::gpu::GpuFramePtr& cur);  // NVOF prev_<->cur on stream_ (async)
-  void compute_uniform(const spark::gpu::GpuFramePtr& cur, holoscan::OutputContext& op_output);
+  void compute_uniform(const spark::gpu::GpuFramePtr& cur, spark::rt::OutputContext& op_output);
 
-  holoscan::Parameter<double> phase_;        // interpolation t in [0,1] (0.5 = midpoint)
-  holoscan::Parameter<uint32_t> grid_size_;  // NVOF output grid (1|2|4; 1 = finest = best quality)
-  holoscan::Parameter<uint32_t> rate_mult_;  // 1 = retime (1:1), 2 = up-convert (real + mid -> 2x)
-  holoscan::Parameter<uint64_t> out_interval_ns_;  // >0 = uniform-grid mode at this output interval
+  spark::rt::Parameter<double> phase_;        // interpolation t in [0,1] (0.5 = midpoint)
+  spark::rt::Parameter<uint32_t> grid_size_;  // NVOF output grid (1|2|4; 1 = finest = best quality)
+  spark::rt::Parameter<uint32_t> rate_mult_;  // 1 = retime (1:1), 2 = up-convert (real + mid -> 2x)
+  spark::rt::Parameter<uint64_t> out_interval_ns_;  // >0 = uniform-grid mode at this output interval
 
   spark::frc::UniformGrid grid_;   // uniform-mode tick state (anchored on the first bracket)
   uint64_t src_prev_ts_ = 0;       // prev_'s ORIGINAL capture_ts (prev_ itself may be re-stamped)

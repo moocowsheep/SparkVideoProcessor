@@ -18,7 +18,7 @@
 #   bash deploy/provision.sh --check         # read-only: report current state, change nothing
 #   HUGEPAGES=4096 sudo bash deploy/provision.sh   # override hugepage count (default 2048 x 2MB)
 #
-# Dev/build setup (Holoscan SDK, protobuf, web) is separate — see docs/SETUP.md.
+# Dev/build setup (protobuf, web, NVOF headers) is separate — see docs/SETUP.md.
 set -u
 
 CHECK=0

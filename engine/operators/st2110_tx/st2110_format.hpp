@@ -1,7 +1,7 @@
 // Copyright 2026 Devin Block
 // SPDX-License-Identifier: Apache-2.0
 
-// ST 2110-20 video format + frame message types (pure; no DPDK / Holoscan deps).
+// ST 2110-20 video format + frame message types (pure; no DPDK / runtime deps).
 //
 // Scope for M1 v1: YCbCr 4:2:2 10-bit — the SMPTE ST 2110-20 broadcast baseline and the format the
 // gate-4 spike paced (spike/st2110_loopback_gate4.sh). Other samplings (RGB, 4:4:4, 8/12-bit) are a

@@ -4,23 +4,51 @@
 // Spark Video Processor — engine entry point.
 //
 // Milestone status: M1 skeleton. This currently runs a PLACEHOLDER ping graph to validate the
-// Holoscan C++ runtime + our build chain on the DGX Spark (GB10 / CUDA 13). The real low-latency
-// pipeline replaces the placeholder once the ConnectX-7 + DPDK ST 2110 IO are available (M0 gates 1/2/4):
+// spark::rt runtime + our build chain (it used holoscan::ops::ping_tx/ping_rx for the same purpose
+// before the SDK was dropped; the ping operators are local now, so nothing outside the engine is
+// needed to prove the graph executes). The real low-latency pipeline replaces the placeholder:
 //
 //     st2110_rx -> unpack -> resize (NPP) -> frc (Optical Flow/FRUC) -> pack -> st2110_tx
 //
-// Each stage is a Holoscan operator passing zero-copy GPU tensors; the graph is assembled by a
+// Each stage is a spark::rt operator passing zero-copy GPU frames; the graph is assembled by a
 // config-driven pipeline builder (engine/pipelines/) so modules can be added without engine surgery.
-#include <holoscan/holoscan.hpp>
-#include <holoscan/operators/ping_tx/ping_tx.hpp>
-#include <holoscan/operators/ping_rx/ping_rx.hpp>
+#include <cstdint>
+
+#include "runtime/runtime.hpp"
 
 namespace spark {
+namespace ops {
 
-class SparkEngine : public holoscan::Application {
+// Minimal ping pair — the runtime's own build/execution self-test (emit N ints, count them).
+class PingTxOp : public spark::rt::Operator {
+ public:
+  SPARK_OPERATOR_FORWARD_ARGS(PingTxOp)
+  void setup(spark::rt::OperatorSpec& spec) override { spec.output<int64_t>("out"); }
+  void compute(spark::rt::InputContext&, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext&) override {
+    op_output.emit<int64_t>(++n_, "out");
+  }
+
+ private:
+  int64_t n_ = 0;
+};
+
+class PingRxOp : public spark::rt::Operator {
+ public:
+  SPARK_OPERATOR_FORWARD_ARGS(PingRxOp)
+  void setup(spark::rt::OperatorSpec& spec) override { spec.input<int64_t>("in"); }
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext&,
+               spark::rt::ExecutionContext&) override {
+    if (auto v = op_input.receive<int64_t>("in")) SPARK_LOG_INFO("Rx message value: {}", *v);
+  }
+};
+
+}  // namespace ops
+
+class SparkEngine : public spark::rt::Application {
  public:
   void compose() override {
-    using namespace holoscan;
+    using namespace spark::rt;
 
     // --- PLACEHOLDER GRAPH (M1 build/runtime validation) ---
     auto tx = make_operator<ops::PingTxOp>("tx", make_condition<CountCondition>(10));
@@ -42,8 +70,8 @@ class SparkEngine : public holoscan::Application {
 }  // namespace spark
 
 int main() {
-  HOLOSCAN_LOG_INFO("Spark engine starting — placeholder ping graph (M1 skeleton).");
-  auto app = holoscan::make_application<spark::SparkEngine>();
+  SPARK_LOG_INFO("Spark engine starting — placeholder ping graph (M1 skeleton, spark::rt).");
+  auto app = spark::rt::make_application<spark::SparkEngine>();
   app->run();
   return 0;
 }

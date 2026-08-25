@@ -1,7 +1,7 @@
 // Copyright 2026 Devin Block
 // SPDX-License-Identifier: Apache-2.0
 
-// ST 2110-20 / RFC 4175 packetization (pure; no DPDK / Holoscan deps — fully unit-testable).
+// ST 2110-20 / RFC 4175 packetization (pure; no DPDK / runtime deps — fully unit-testable).
 //
 // Produces the UDP *payload* of each media packet: a 12-byte RTP header (RFC 3550) followed by the
 // RFC 4175 payload header (2-byte Extended Sequence Number + one or more 6-byte Sample Row Data

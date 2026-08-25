@@ -44,7 +44,7 @@ bool host_zerocopy() {
       if (cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&prop, dev) == cudaSuccess)
         v = prop.pageableMemoryAccess != 0;
     }
-    HOLOSCAN_LOG_INFO("codec_ops: host zero-copy {} ({})", v ? "ON" : "OFF",
+    SPARK_LOG_INFO("codec_ops: host zero-copy {} ({})", v ? "ON" : "OFF",
                       e && *e ? "SPARK_ZEROCOPY" : "auto: pageableMemoryAccess");
     return v;
   }();
@@ -53,7 +53,7 @@ bool host_zerocopy() {
 }  // namespace
 
 // ---- UnpackOp: VideoFrame (host packed) -> GpuFrame (device planar) ----
-void UnpackOp::setup(holoscan::OperatorSpec& spec) {
+void UnpackOp::setup(spark::rt::OperatorSpec& spec) {
   spec.input<spark::st2110::VideoFrame>("in");
   spec.output<spark::gpu::GpuFramePtr>("out");
 }
@@ -71,7 +71,7 @@ void UnpackOp::ensure(uint32_t width, uint32_t height, bool ip10) {
   dpacked_bytes_ = octets;
   pool_.assign(kRing, nullptr);
   for (auto& f : pool_) f = std::make_shared<spark::gpu::GpuFrame>(width, height);
-  HOLOSCAN_LOG_INFO("unpack: {}x{} ({} octets, {}{})", width, height, octets,
+  SPARK_LOG_INFO("unpack: {}x{} ({} octets, {}{})", width, height, octets,
                     ip10 ? "IP10 10:8" : "raw 10-bit", zerocopy_ ? ", zero-copy" : "");
 }
 
@@ -87,8 +87,8 @@ void UnpackOp::drain_inflight(bool wait) {
   }
 }
 
-void UnpackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-                       holoscan::ExecutionContext&) {
+void UnpackOp::compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+                       spark::rt::ExecutionContext&) {
   auto in = op_input.receive<spark::st2110::VideoFrame>("in");
   if (!in || !in.value().data) return;
   const auto& vf = in.value();
@@ -148,17 +148,17 @@ void UnpackOp::stop() {
 }
 
 // ---- PackOp: GpuFrame (device planar) -> VideoFrame (host packed) ----
-void PackOp::setup(holoscan::OperatorSpec& spec) {
+void PackOp::setup(spark::rt::OperatorSpec& spec) {
   // Burst-deep ONLY when pack directly receives FRC's multi-frame burst (frc last in the chain,
   // SPARK_BURST_SINK); otherwise the upstream feeds 1:1 and this sits 1-deep. min_size 1 runs pack
   // once per frame (one D2H + emit). Capacity == standing latency floor here.
   const auto cap = static_cast<uint64_t>(spark::pipeline_queue_cap(name()));
   spec.input<spark::gpu::GpuFramePtr>("in")
-      .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer,
-                 holoscan::Arg("capacity", cap),
-                 holoscan::Arg("policy", static_cast<uint64_t>(2)))
-      .condition(holoscan::ConditionType::kMessageAvailable,
-                 holoscan::Arg("min_size", static_cast<uint64_t>(1)));
+      .connector(spark::rt::IOSpec::ConnectorType::kDoubleBuffer,
+                 spark::rt::Arg("capacity", cap),
+                 spark::rt::Arg("policy", static_cast<uint64_t>(2)))
+      .condition(spark::rt::ConditionType::kMessageAvailable,
+                 spark::rt::Arg("min_size", static_cast<uint64_t>(1)));
   spec.output<spark::st2110::VideoFrame>("out");
   spec.param(out_fps_, "out_fps", "Output fps", "output RTP media rate (TX pacing)", 60000.0 / 1001.0);
   spec.param(ip10_, "ip10", "IP10", "Blackmagic IP10 10:8 output (8-bit pgroups, ST 2110-22)", false);
@@ -179,12 +179,12 @@ void PackOp::ensure(uint32_t width, uint32_t height) {
   fmt_ = spark::st2110::VideoFormat{width, height, out_fps_.get(), sampling};
   host_pool_.assign(kRing, nullptr);
   for (auto& b : host_pool_) b = std::make_shared<std::vector<uint8_t>>(octets);
-  HOLOSCAN_LOG_INFO("pack: {}x{} ({} octets, {}{})", width, height, octets,
+  SPARK_LOG_INFO("pack: {}x{} ({} octets, {}{})", width, height, octets,
                     ip10_.get() ? "IP10 10:8" : "raw 10-bit", zerocopy_ ? ", zero-copy" : "");
 }
 
-void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-                     holoscan::ExecutionContext&) {
+void PackOp::compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+                     spark::rt::ExecutionContext&) {
   auto in = op_input.receive<spark::gpu::GpuFramePtr>("in");
   if (!in || !in.value()) return;
   const auto& src = *in.value();
@@ -206,7 +206,7 @@ void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& 
   if (!host) {
     host = std::make_shared<std::vector<uint8_t>>(dpacked_bytes_);
     host_pool_.push_back(host);
-    HOLOSCAN_LOG_INFO("pack: grew host pool to {} buffers (TX holding the rest in flight)", host_pool_.size());
+    SPARK_LOG_INFO("pack: grew host pool to {} buffers (TX holding the rest in flight)", host_pool_.size());
   }
 
   // Order our stream behind whoever produced this frame (resize, on its own stream), then pack on our
@@ -245,7 +245,7 @@ void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& 
       last_stall_s_ = tw;
       // mono timestamp = CLOCK_MONOTONIC seconds, directly comparable to `perf record -k monotonic`
       // trace times for off-CPU analysis of the episode.
-      HOLOSCAN_LOG_WARN("pipe stall: chain latency {} ms, GPU fence {} ms -> {} (mono {:.3f})",
+      SPARK_LOG_WARN("pipe stall: chain latency {} ms, GPU fence {} ms -> {} (mono {:.3f})",
                         lat / 1000000, sync_us / 1000,
                         sync_us > 25000 ? "GPU-side stall" : "queue/scheduler/CPU-side stall", tw);
     }
@@ -258,7 +258,7 @@ void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& 
                          .count();
     if (t - last_live_s_ >= 1.0) {
       last_live_s_ = t;
-      HOLOSCAN_LOG_INFO("spark_live pipe_latency_us cur={} min={} avg={} max={}", lat / 1000,
+      SPARK_LOG_INFO("spark_live pipe_latency_us cur={} min={} avg={} max={}", lat / 1000,
                         lat_min_ / 1000, (lat_sum_ / lat_n_) / 1000, lat_max_ / 1000);
     }
   }
@@ -272,7 +272,7 @@ void PackOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& 
 
 void PackOp::stop() {
   if (lat_n_) {
-    HOLOSCAN_LOG_INFO("pack stopped: pipe_latency_us (unpack->pack) min/avg/max = {}/{}/{}",
+    SPARK_LOG_INFO("pack stopped: pipe_latency_us (unpack->pack) min/avg/max = {}/{}/{}",
                       lat_min_ / 1000, (lat_sum_ / lat_n_) / 1000, lat_max_ / 1000);
   }
   if (stream_) {

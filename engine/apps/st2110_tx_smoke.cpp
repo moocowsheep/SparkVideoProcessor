@@ -7,8 +7,7 @@
 // ST 2110-21 slot, self-throttled to the tx_pp window) instead of testpmd's open-loop txonly. Run on
 // the box, as root, with the CX-7 cabled (see docs/M1-gate4-pacing.md):
 //
-//   T=$(ls -d ~/holoscan-sdk/install-cu13-$(uname -m)-dgpu ~/holoscan-sdk/install-cu13-$(uname -m) 2>/dev/null | head -1)
-//   sudo -E LD_LIBRARY_PATH="$T/lib" ./engine/build/st2110_tx_smoke
+//   sudo -E ./engine/build/st2110_tx_smoke
 //
 // Ports are DISCOVERED, not hardcoded (operators/common/nic_ports.hpp): TX defaults to the first
 // linked-up ConnectX port and the destination MAC to its sibling port on the same card — the
@@ -20,7 +19,7 @@
 #include <stdexcept>
 #include <string>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "operators/common/nic_ports.hpp"
 #include "operators/st2110_tx/st2110_tx.hpp"
@@ -31,10 +30,10 @@ namespace spark {
 // Env overrides (via the SETENV allowlist): SPARK_PROFILE=1080p|2160p, SPARK_FRAMES=<n>,
 // SPARK_TX_PCI=<bdf>, SPARK_DST_MAC=<mac>, SPARK_WARMUP_MS=<ms>. Unset ports/MAC are discovered
 // (see above); profile 1080p, 300 frames.
-class St2110TxSmoke : public holoscan::Application {
+class St2110TxSmoke : public spark::rt::Application {
  public:
   void compose() override {
-    using namespace holoscan;
+    using namespace spark::rt;
     auto env = [](const char* k, const char* d) { const char* v = std::getenv(k); return std::string(v ? v : d); };
     const std::string profile = env("SPARK_PROFILE", "1080p");
     const int64_t frames = std::atoll(env("SPARK_FRAMES", "300").c_str());
@@ -54,7 +53,7 @@ class St2110TxSmoke : public holoscan::Application {
     if (dst_mac.empty())
       throw std::runtime_error("no second ConnectX port to send to — set SPARK_DST_MAC explicitly");
     const bool derived_mac = !rx_port.mac.empty() && dst_mac == rx_port.mac;
-    HOLOSCAN_LOG_INFO("TX {} ({}) -> dst MAC {} ({})", tx_pci, tx_port.iface, dst_mac,
+    SPARK_LOG_INFO("TX {} ({}) -> dst MAC {} ({})", tx_pci, tx_port.iface, dst_mac,
                       derived_mac ? (rx_port.bdf + (rx_port.carrier ? "" : ", LINK DOWN"))
                                   : std::string("explicit"));
 
@@ -69,8 +68,8 @@ class St2110TxSmoke : public holoscan::Application {
 }  // namespace spark
 
 int main() {
-  HOLOSCAN_LOG_INFO("ST 2110 TX smoke: test_pattern -> st2110_tx (tx_pp paced).");
-  auto app = holoscan::make_application<spark::St2110TxSmoke>();
+  SPARK_LOG_INFO("ST 2110 TX smoke: test_pattern -> st2110_tx (tx_pp paced).");
+  auto app = spark::rt::make_application<spark::St2110TxSmoke>();
   app->run();
   return 0;
 }

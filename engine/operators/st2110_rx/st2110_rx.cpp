@@ -30,12 +30,12 @@ void St2110RxOp::cap_record(const spark::st2110::RxPacketInfo& info, const spark
                      p.marker, p.len);
       std::fclose(f);
     }
-    HOLOSCAN_LOG_INFO("st2110_rx: captured {} packets -> /tmp/spark_rx_capture.csv", cap_.size());
+    SPARK_LOG_INFO("st2110_rx: captured {} packets -> /tmp/spark_rx_capture.csv", cap_.size());
     cap_done_ = true;
   }
 }
 
-void St2110RxOp::setup(holoscan::OperatorSpec& spec) {
+void St2110RxOp::setup(spark::rt::OperatorSpec& spec) {
   // Output used only in source mode (emit_frames=true); harmlessly unconnected in sink mode.
   spec.output<spark::st2110::VideoFrame>("frame");
   spec.param(pci_addr_, "pci_addr", "RX PCI", "CX-7 RX port BDF", std::string("0002:01:00.1"));
@@ -104,7 +104,7 @@ void St2110RxOp::start() {
     if (cap_target_) cap_.reserve(cap_target_);
   }
   if (const char* d = std::getenv("SPARK_RX_DRAIN")) drain_enabled_ = d[0] == '1';
-  HOLOSCAN_LOG_INFO("st2110_rx started: RX {} udp:{} group={} profile={} emit_frames={}{}{}", cfg.pci_addr,
+  SPARK_LOG_INFO("st2110_rx started: RX {} udp:{} group={} profile={} emit_frames={}{}{}", cfg.pci_addr,
                     cfg.udp_port, cfg.mcast_group.empty() ? "(none)" : cfg.mcast_group, profile_.get(),
                     emit_frames_.get(), ip10_.get() ? " IP10" : "",
                     cap_target_ ? " CAPTURE" : "");
@@ -166,7 +166,7 @@ void St2110RxOp::audio_ingest(const spark::net::RxPacket& pkt, uint64_t now_ns) 
                          std::chrono::steady_clock::now().time_since_epoch()).count();
     if (t - audio_relatch_warn_s_ >= 1.0) {  // rate-limit: a jittering sender relatches per packet
       audio_relatch_warn_s_ = t;
-      HOLOSCAN_LOG_WARN(
+      SPARK_LOG_WARN(
           "st2110_rx: audio sender stamp {:.3f}s off its arrival — broken sender epoch; "
           "re-latched ts_delta={} (relatch #{}); lip-sync now anchored to arrival time",
           err / 1e9, audio_ts_delta_, audio_relatch_);
@@ -214,7 +214,7 @@ uint64_t St2110RxOp::video_capture_ns(uint32_t rtp_ts, uint64_t ref) {
                          std::chrono::steady_clock::now().time_since_epoch()).count();
     if (t - video_relatch_warn_s_ >= 1.0) {  // rate-limit: a jittering sender relatches per frame
       video_relatch_warn_s_ = t;
-      HOLOSCAN_LOG_WARN(
+      SPARK_LOG_WARN(
           "st2110_rx: video sender stamp {:.3f}s off its arrival — broken sender epoch; "
           "re-latched ts_delta={} (relatch #{}); capture now anchored to arrival time",
           err / 1e9, video_ts_delta_, video_relatch_);
@@ -242,8 +242,8 @@ std::shared_ptr<std::vector<uint8_t>> St2110RxOp::next_buffer() {
   return nb;
 }
 
-void St2110RxOp::compute(holoscan::InputContext&, holoscan::OutputContext& op_output,
-                         holoscan::ExecutionContext&) {
+void St2110RxOp::compute(spark::rt::InputContext&, spark::rt::OutputContext& op_output,
+                         spark::rt::ExecutionContext&) {
   if (emit_frames_.get())
     compute_emit_one(op_output);
   else
@@ -253,7 +253,7 @@ void St2110RxOp::compute(holoscan::InputContext&, holoscan::OutputContext& op_ou
 void St2110RxOp::compute_sink() {
   using clock = std::chrono::steady_clock;
   const auto deadline = clock::now() + std::chrono::duration<double>(run_seconds_.get());
-  HOLOSCAN_LOG_INFO("st2110_rx: polling for {}s ...", run_seconds_.get());
+  SPARK_LOG_INFO("st2110_rx: polling for {}s ...", run_seconds_.get());
 
   spark::net::RxPacket pkts[256];
   while (clock::now() < deadline) {
@@ -278,7 +278,7 @@ void St2110RxOp::compute_sink() {
 }
 
 // Dedicated NIC-drain thread (emit mode). Continuously receives bursts and reassembles frames,
-// pushing each completed frame onto a bounded queue. Because it never blocks on the Holoscan emit
+// pushing each completed frame onto a bounded queue. Because it never blocks on the downstream emit
 // path, the NIC ring stays drained even while TX paces the previous frame (the fix for the HW-drop /
 // latency seen when polling only inside compute()). On queue-full it drops the frame but keeps
 // draining (whole-frame drop beats HW packet loss).
@@ -330,7 +330,7 @@ void St2110RxOp::poll_loop() {
               if (q_win_min_ >= 2 && !frame_q_.empty()) {
                 frame_q_.pop_front();
                 ++q_drained_;
-                HOLOSCAN_LOG_INFO(
+                SPARK_LOG_INFO(
                     "st2110_rx: standing queue (floor {} over 32 frames) — drained oldest ({} total)",
                     q_win_min_, q_drained_);
               }
@@ -345,7 +345,7 @@ void St2110RxOp::poll_loop() {
             // Surface queue overflow (downstream/TX briefly fell behind) so transient stalls are visible
             // in the log with timestamps — rate-limited to avoid flooding during a burst.
             if (q_dropped_ == 1 || (q_dropped_ % 20) == 0)
-              HOLOSCAN_LOG_WARN("st2110_rx: frame queue full (depth {}) — dropped {} frames total",
+              SPARK_LOG_WARN("st2110_rx: frame queue full (depth {}) — dropped {} frames total",
                                 kMaxQ, q_dropped_);
           }
         }
@@ -359,7 +359,7 @@ void St2110RxOp::poll_loop() {
 }
 
 // Source mode: pop one finished frame from the poll thread's queue and emit it.
-void St2110RxOp::compute_emit_one(holoscan::OutputContext& op_output) {
+void St2110RxOp::compute_emit_one(spark::rt::OutputContext& op_output) {
   emit_live();  // 1 Hz live stats (throttled)
   std::unique_lock<std::mutex> lk(q_mu_);
   if (!q_cv_.wait_for(lk, std::chrono::seconds(2),
@@ -379,10 +379,10 @@ void St2110RxOp::emit_live(bool force) {
   last_live_s_ = t;
   const uint64_t avg_us = lat_cnt_ ? (lat_sum_ / lat_cnt_) / 1000 : 0;  // ns -> us
   // Unique tokens so the control daemon can grab each field unambiguously (latest-wins).
-  HOLOSCAN_LOG_INFO("spark_live rx_frames={} rx_packets={} rx_lost={} rx_latency_us={} rx_relatch={}",
+  SPARK_LOG_INFO("spark_live rx_frames={} rx_packets={} rx_lost={} rx_latency_us={} rx_relatch={}",
                     frames_, packets_, lost_, avg_us, video_relatch_);
   if (audio_enabled_)
-    HOLOSCAN_LOG_INFO("spark_live audio_rx_pkts={} audio_rx_bad={} audio_rx_drop={} audio_rx_relatch={}",
+    SPARK_LOG_INFO("spark_live audio_rx_pkts={} audio_rx_bad={} audio_rx_drop={} audio_rx_relatch={}",
                       audio_pkts_, audio_bad_, audio_drop_, audio_relatch_);
 }
 
@@ -391,7 +391,7 @@ void St2110RxOp::print_stats() {
   stats_printed_ = true;
   const auto rs = backend_ ? backend_->stats() : spark::net::RxStats{};
   const uint64_t avg = lat_cnt_ ? lat_sum_ / lat_cnt_ : 0;
-  HOLOSCAN_LOG_INFO(
+  SPARK_LOG_INFO(
       "st2110_rx stats: frames={} matched_pkts={} lost={} bad={} q_dropped={} | nic_ipackets={} "
       "raw_burst={} hw_missed={} nombuf={} | ingest latency min/avg/max = {}/{}/{} ns ({} samples)",
       frames_, packets_, lost_, bad_, q_dropped_, rs.rx_packets, rs.raw_received, rs.rx_missed,

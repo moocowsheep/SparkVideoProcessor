@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <vector>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "../resize/gpu_frame.hpp"
 
@@ -20,21 +20,21 @@ namespace spark::ops {
 
 // Classic video proc amp on the native 10-bit YCbCr planes. Neutral = (0, 1, 1, 0); the pipeline
 // only inserts the stage when a parameter is non-neutral (or SPARK_FILTERS lists it explicitly).
-class ProcAmpOp : public holoscan::Operator {
+class ProcAmpOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(ProcAmpOp)
+  SPARK_OPERATOR_FORWARD_ARGS(ProcAmpOp)
   ProcAmpOp() = default;
-  void setup(holoscan::OperatorSpec& spec) override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext& context) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext& context) override;
   void stop() override;
 
  private:
   void ensure(uint32_t width, uint32_t height);
-  holoscan::Parameter<double> brightness_;  // black-level offset, ±1.0 = ±full Y swing; 0 = neutral
-  holoscan::Parameter<double> contrast_;    // video gain about black (64); 1 = neutral
-  holoscan::Parameter<double> saturation_;  // chroma gain about 512; 1 = neutral
-  holoscan::Parameter<double> hue_deg_;     // chroma phase rotation, degrees; 0 = neutral
+  spark::rt::Parameter<double> brightness_;  // black-level offset, ±1.0 = ±full Y swing; 0 = neutral
+  spark::rt::Parameter<double> contrast_;    // video gain about black (64); 1 = neutral
+  spark::rt::Parameter<double> saturation_;  // chroma gain about 512; 1 = neutral
+  spark::rt::Parameter<double> hue_deg_;     // chroma phase rotation, degrees; 0 = neutral
   cudaStream_t stream_ = nullptr;
   std::vector<spark::gpu::GpuFramePtr> pool_;
   size_t idx_ = 0;
@@ -42,18 +42,18 @@ class ProcAmpOp : public holoscan::Operator {
 };
 
 // Luma unsharp mask (broadcast detail-enhance). Chroma passes through by device copy.
-class SharpenOp : public holoscan::Operator {
+class SharpenOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(SharpenOp)
+  SPARK_OPERATOR_FORWARD_ARGS(SharpenOp)
   SharpenOp() = default;
-  void setup(holoscan::OperatorSpec& spec) override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext& context) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext& context) override;
   void stop() override;
 
  private:
   void ensure(uint32_t width, uint32_t height);
-  holoscan::Parameter<double> amount_;  // unsharp gain; 0 = identity (stage normally omitted then)
+  spark::rt::Parameter<double> amount_;  // unsharp gain; 0 = identity (stage normally omitted then)
   cudaStream_t stream_ = nullptr;
   std::vector<spark::gpu::GpuFramePtr> pool_;
   size_t idx_ = 0;
@@ -63,19 +63,19 @@ class SharpenOp : public holoscan::Operator {
 // Spatial noise reduction: edge-preserving 5x5 bilateral, independent luma/chroma strengths
 // (0 leaves that plane untouched — pass-through by device copy). Best placed BEFORE scale, at the
 // native input resolution, where the noise actually lives.
-class NrOp : public holoscan::Operator {
+class NrOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(NrOp)
+  SPARK_OPERATOR_FORWARD_ARGS(NrOp)
   NrOp() = default;
-  void setup(holoscan::OperatorSpec& spec) override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext& context) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext& context) override;
   void stop() override;
 
  private:
   void ensure(uint32_t width, uint32_t height);
-  holoscan::Parameter<double> luma_;    // 0..1; 0 = Y untouched
-  holoscan::Parameter<double> chroma_;  // 0..1; 0 = Cb/Cr untouched
+  spark::rt::Parameter<double> luma_;    // 0..1; 0 = Y untouched
+  spark::rt::Parameter<double> chroma_;  // 0..1; 0 = Cb/Cr untouched
   cudaStream_t stream_ = nullptr;
   std::vector<spark::gpu::GpuFramePtr> pool_;
   size_t idx_ = 0;
@@ -86,20 +86,20 @@ class NrOp : public holoscan::Operator {
 // from an internal counter, so grain is alive on static frames too. mono = luma-only grain
 // (silver-halide look; chroma passes through by device copy); color adds independent Cb/Cr fields
 // (color-negative look).
-class GrainOp : public holoscan::Operator {
+class GrainOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(GrainOp)
+  SPARK_OPERATOR_FORWARD_ARGS(GrainOp)
   GrainOp() = default;
-  void setup(holoscan::OperatorSpec& spec) override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext& context) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext& context) override;
   void stop() override;
 
  private:
   void ensure(uint32_t width, uint32_t height);
-  holoscan::Parameter<double> amount_;     // 0..1; 0 = identity (stage normally omitted then)
-  holoscan::Parameter<double> size_;       // grain cell in pixels, 1..4
-  holoscan::Parameter<std::string> mode_;  // "mono" | "color"
+  spark::rt::Parameter<double> amount_;     // 0..1; 0 = identity (stage normally omitted then)
+  spark::rt::Parameter<double> size_;       // grain cell in pixels, 1..4
+  spark::rt::Parameter<std::string> mode_;  // "mono" | "color"
   cudaStream_t stream_ = nullptr;
   std::vector<spark::gpu::GpuFramePtr> pool_;
   size_t idx_ = 0;

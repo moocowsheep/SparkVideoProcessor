@@ -8,36 +8,36 @@
 #include <cstdint>
 #include <memory>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "../st2110_tx/tx_backend.hpp"
 #include "audio_st2110.hpp"
 
 namespace spark::ops {
 
-class AudioTxOp : public holoscan::Operator {
+class AudioTxOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(AudioTxOp)
+  SPARK_OPERATOR_FORWARD_ARGS(AudioTxOp)
   AudioTxOp() = default;
 
-  void setup(holoscan::OperatorSpec& spec) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
   void start() override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext&,
-               holoscan::ExecutionContext&) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext&,
+               spark::rt::ExecutionContext&) override;
   void stop() override;
 
  private:
-  holoscan::Parameter<std::string> pci_addr_;
-  holoscan::Parameter<std::string> dst_mac_;
-  holoscan::Parameter<std::string> src_ip_;
-  holoscan::Parameter<std::string> dst_ip_;
-  holoscan::Parameter<uint32_t> udp_port_;
-  holoscan::Parameter<uint32_t> ssrc_;
-  holoscan::Parameter<uint32_t> tx_pp_ns_;
-  holoscan::Parameter<uint32_t> txd_;
-  holoscan::Parameter<uint32_t> pacing_horizon_ns_;
-  holoscan::Parameter<bool> pacing_;
-  holoscan::Parameter<bool> manage_eal_;
+  spark::rt::Parameter<std::string> pci_addr_;
+  spark::rt::Parameter<std::string> dst_mac_;
+  spark::rt::Parameter<std::string> src_ip_;
+  spark::rt::Parameter<std::string> dst_ip_;
+  spark::rt::Parameter<uint32_t> udp_port_;
+  spark::rt::Parameter<uint32_t> ssrc_;
+  spark::rt::Parameter<uint32_t> tx_pp_ns_;
+  spark::rt::Parameter<uint32_t> txd_;
+  spark::rt::Parameter<uint32_t> pacing_horizon_ns_;
+  spark::rt::Parameter<bool> pacing_;
+  spark::rt::Parameter<bool> manage_eal_;
 
   std::unique_ptr<spark::net::ISt2110TxBackend> backend_;
   std::unique_ptr<spark::st2110::AudioPacketizer> pktz_;

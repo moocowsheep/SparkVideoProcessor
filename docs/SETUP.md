@@ -1,20 +1,24 @@
 # Setup / Unblock Checklist
 
 Applies to both supported hosts — **DGX Spark** (GB10, aarch64) and an **x86_64** box with a
-discrete Blackwell GPU (validated: RTX PRO 6000 Blackwell). The steps are the same; only the
-Holoscan install-tree name differs by arch, and it is globbed rather than hardcoded throughout.
+discrete Blackwell GPU (validated: RTX PRO 6000 Blackwell). The steps are identical on both.
 
-Status after M0 spike: GPU capabilities **confirmed** on both (OFA optical flow, NPP resize,
-Holoscan runtime). Remaining setup needs host actions (sudo / cabling / NVIDIA account). Do these
-in order; steps 1–3 are independent of the NIC and can run now.
+Status after M0 spike: GPU capabilities **confirmed** on both (OFA optical flow, NPP resize).
+Remaining setup needs host actions (sudo / cabling). Do these in order; steps 1–2 are independent
+of the NIC and can run now.
+
+> **No SDK to install.** The engine used to build against a source-built NVIDIA Holoscan SDK; it now
+> runs on the in-tree `spark::rt` runtime (`engine/runtime/`, see `docs/M11-runtime.md`), so the
+> dependencies are CUDA/NPP, DPDK and the NVOF SDK headers — all covered below. There is no
+> containerized SDK build, no CMake >= 3.30.4 floor, and no install tree to point `CMAKE_PREFIX_PATH` at.
 
 Run privileged commands from the Claude session with the `!` prefix, e.g. `! sudo apt ...`.
 
 > **IO-plane runtime is automated:** `deploy/provision.sh` (idempotent; `--check` for read-only)
 > installs `mft`/`dpdk`/`linuxptp`, sets `REAL_TIME_CLOCK_ENABLE=1` on every ConnectX it finds by PCI
 > vendor 15b3 (the tx_pp prerequisite — applies to the Spark's CX-7 and to any ConnectX in an x86 box),
-> and configures hugepages. This checklist covers the *dev/build* setup (Holoscan, protobuf, web) that
-> `provision.sh` does not. See `deploy/README.md`.
+> and configures hugepages. This checklist covers the *dev/build* setup (protobuf, web, NVOF headers)
+> that `provision.sh` does not. See `deploy/README.md`.
 
 ---
 
@@ -33,93 +37,28 @@ driver's `libnvidia-opticalflow.so`). `third_party/` is gitignored, so this is o
 bash spike/fetch_nvof_sdk.sh
 ```
 
-## 2. Docker access (for the Holoscan source build)
-```bash
-sudo usermod -aG docker "$USER"
-# then log out/in (or: newgrp docker) so the group takes effect
-docker ps        # should work without sudo afterwards
-```
-
-## 3. Build Holoscan SDK v4.5.0 from source (native install tree)
-Produces a self-contained install tree we consume natively from `engine/`. The
-invocation is identical on both hosts — `--gpu dgpu` is correct for each, and `./run` picks the
-arch up from the machine it runs on:
-```bash
-git clone --depth 1 --branch v4.5.0 \
-  https://github.com/nvidia-holoscan/holoscan-sdk.git ~/holoscan-sdk
-cd ~/holoscan-sdk
-./run build --gpu dgpu --cuda 13    # DGX Spark is sbsa/dgpu, NOT igpu (igpu has no CUDA-13 base)
-# result: ~/holoscan-sdk/install-cu13-aarch64-dgpu   (DGX Spark)
-#      or ~/holoscan-sdk/install-cu13-x86_64          (x86_64 host — note: NO -dgpu suffix;
-#         holoscan's ./run only appends the gpu flavor on aarch64, where igpu/dgpu both exist)
-```
-x86_64 dGPU is Holoscan's *primary* target, so this is the well-trodden path there — the aarch64
-`dgpu`-not-`igpu` subtlety recorded in `docs/M0-feasibility-findings.md` is Spark-specific.
-
-**Why v4.5.0 and not the v4.3.0 the M0 spike used** (`engine/CMakeLists.txt` pins no version —
-`find_package(holoscan REQUIRED CONFIG)` — and the engine only uses stable public core API, so the
-bump is a no-op for our code):
-* **v4.4.0 fixed the RAPIDS-CMake bootstrap for source builds** ("resolved failures caused by an
-  upstream API change in the RAPIDS CMake bootstrap URL"). Our build goes through rapids-cmake/CPM,
-  so a *fresh* v4.3.0 source build can now fail on that; 4.4+ carries the fix.
-* **v4.5.0 reclassifies `MultiThreadScheduler` as legacy** and recommends `EventBasedScheduler`: no
-  polling-thread CPU overhead, plus CPU thread pinning and Linux real-time scheduling policies —
-  directly relevant to a paced ST 2110 pipeline. It is a recommendation, not a removal, so the
-  engine's existing `MultiThreadScheduler` uses keep working.
-* Breaking changes between 4.3.0 and 4.5.0: only v4.4.0's `[[nodiscard]]` on `PoseTree` methods,
-  which the engine does not use. v4.5.0 ships none.
-
-`docs/M0-feasibility-findings.md` records v4.3.0 because that is what the M0 spike actually
-validated on the Spark; it is a historical record, not the version to install.
-
-### Known x86_64 wrinkle: the build container is Ubuntu 22.04, the host is 24.04
-Holoscan's `Dockerfile` hardcodes a different base per arch, and `./run` only selects among them
-(there is no `--base-img` flag):
-```
-FROM nvcr.io/nvidia/cuda:13.0.0-base-ubuntu22.04 AS amd64-dgpu_cu13_base   # x86_64
-FROM nvcr.io/nvidia/cuda:13.0.0-base-ubuntu24.04 AS arm64-dgpu_cu13_base   # DGX Spark
-```
-So on the x86_64 host the SDK is compiled in **22.04** (glibc 2.35, libstdc++ from GCC 11) and then
-consumed **natively on 24.04** (glibc 2.39, GCC 13.3). On the Spark, container and host OS match, so
-this is x86-only — the M0 native-consumption finding was never tested across an OS gap.
-
-It is expected to work, because the skew runs in the compatible direction: libraries built against
-an *older* glibc/libstdc++ load on a newer system (the reverse does not), the host's newer libstdc++
-satisfies both sides at runtime, and `_GLIBCXX_USE_CXX11_ABI` defaults to 1 on both. This is also the
-configuration NVIDIA ships and tests for x86_64 dGPU, so the bundled TensorRT / ONNX Runtime / GXF
-binaries in the install tree are built for exactly it.
-
-If it *does* bite — undefined `GLIBC_2.3x` symbols, or an ABI mismatch at link or load time — two
-fixes, in order of preference:
-1. Point the x86 stage at 24.04 (`FROM nvcr.io/nvidia/cuda:13.0.0-base-ubuntu24.04 AS
-   amd64-dgpu_cu13_base`) in `~/holoscan-sdk/Dockerfile` and re-run `./run build`.
-2. Build `engine/` inside the Holoscan dev container instead of natively, giving up the native
-   toolchain but removing the gap entirely.
-
-Then build the engine against it. Glob the install tree so the same command works on either arch:
+## 2. Build the engine
+Nothing to point at — CUDA, DPDK and the NVOF headers from step 1 are the whole dependency set:
 ```bash
 cd ~/SparkVideoProcessor
-T=$(ls -d ~/holoscan-sdk/install-cu13-$(uname -m)-dgpu ~/holoscan-sdk/install-cu13-$(uname -m) 2>/dev/null | head -1)
-cmake -G Ninja -S engine -B engine/build -DCMAKE_PREFIX_PATH="$T"
+cmake -G Ninja -S engine -B engine/build
 cmake --build engine/build
-ctest --test-dir engine/build    # 8 unit tests; no NIC or root needed
-./engine/build/spark_engine      # placeholder ping graph until M1 wires real operators
+ctest --test-dir engine/build    # 10 unit tests; no NIC or root needed
+./engine/build/spark_engine      # placeholder ping graph (spark::rt self-test)
 ```
 CMake defaults `CMAKE_CUDA_ARCHITECTURES` to `120;121`, covering GB20x (sm_120) and GB10 (sm_121)
 in one binary. For a faster build on a known box: `-DSPARK_CUDA_ARCHS=native`.
 
-## 4. ST 2110 IO stack — DPDK via Holoscan `advanced_network` (for SMPTE 2110 — gate 2)
+## 3. ST 2110 IO stack — DPDK / mlx5 (SMPTE 2110 — gate 2)
 Rivermax was **dropped** (no license, stays open-source — see `docs/M0-feasibility-findings.md`
 "Networking IO" decision). The ST 2110-20 RX/TX runs over DPDK's **mlx5 PMD**, which drives the
 ConnectX directly and uses its hardware accurate-send-scheduling (`tx_pp`) for ST 2110-21 pacing.
 The mlx5 PMD is bifurcated, so this does **not** unbind the NIC from the kernel.
+The engine talks to DPDK directly (`engine/operators/st2110_{tx,rx}/dpdk_*_backend.cpp`) — holohub's
+`advanced_network` operator was evaluated and never adopted, and with the Holoscan SDK gone it is no
+longer an option in reserve.
 ```bash
-# Build the advanced_network operator (DPDK backend) from holohub — bundles a compatible DPDK.
-git clone --depth 1 https://github.com/nvidia-holoscan/holohub.git ~/holohub
-# then follow holohub/operators/advanced_network (DPDK manager) build for your arch / CUDA 13
-
-# Standalone capability check (needs DPDK + mlx5 PMD; no NIC unbind):
-sudo apt install -y dpdk dpdk-dev          # only if NOT using holohub's bundled DPDK
+sudo apt install -y dpdk dpdk-dev          # distro DPDK 23.11 is what the engine builds against
 bash spike/dpdk_pacing_probe.sh            # checks DPDK+mlx5, ConnectX bind, and tx_pp HW pacing
 ```
 - No NVIDIA account / license needed. DOCA GPUNetIO is the reserve GPUDirect path for later.
@@ -137,7 +76,7 @@ sudo mlxconfig -d <pci-bdf> query | grep -i REAL_TIME_CLOCK_ENABLE
 If the parameter is absent the card cannot pace, and the TX backend falls back to unpaced sends
 (`dpdk_tx_backend.cpp` logs this) — usable for development, not ST 2110-21 compliant.
 
-## 5. Cable + bring up the ConnectX (gates 1, 2, 4)
+## 4. Cable + bring up the ConnectX (gates 1, 2, 4)
 On the DGX Spark the CX-7 is hot-plug and invisible until something is connected; a PCIe card in an
 x86 box enumerates regardless, but still needs a cable for link-up and the loopback self-test.
 ```bash
@@ -176,4 +115,4 @@ bash spike/diagnose.sh        # read-only host/NIC/PTP/GPU inventory
 bash spike/build_probes.sh    # rebuild+run OFA + NPP probes (no sudo; auto-fetches the NVOF SDK)
 ```
 
-When steps 1–5 are done, M1 (the `st2110_rx → st2110_tx` pass-through) can begin.
+When steps 1–4 are done, M1 (the `st2110_rx → st2110_tx` pass-through) can begin.

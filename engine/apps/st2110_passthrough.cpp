@@ -15,7 +15,7 @@
 //           SPARK_WARMUP_MS=800 SPARK_PROFILE=2160p ./engine/build/st2110_tx_smoke
 #include <cstdlib>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "operators/common/dpdk_eal.hpp"
 #include "operators/st2110_rx/st2110_rx.hpp"
@@ -23,10 +23,10 @@
 
 namespace spark {
 
-class St2110Passthrough : public holoscan::Application {
+class St2110Passthrough : public spark::rt::Application {
  public:
   void compose() override {
-    using namespace holoscan;
+    using namespace spark::rt;
     auto env = [](const char* k, const char* d) {
       const char* v = std::getenv(k);
       return std::string(v ? v : d);
@@ -58,14 +58,11 @@ class St2110Passthrough : public holoscan::Application {
 }  // namespace spark
 
 int main() {
-  HOLOSCAN_LOG_INFO("ST 2110 pass-through: st2110_rx -> st2110_tx (shared EAL, frame forwarding).");
-  auto app = holoscan::make_application<spark::St2110Passthrough>();
-  // Multi-thread: RX assembles frame N+1 while TX paces frame N (pipelined at the media rate).
-  app->scheduler(app->make_scheduler<holoscan::MultiThreadScheduler>(
-      "mts", holoscan::Arg("worker_thread_number", static_cast<int64_t>(4)),
-      holoscan::Arg("stop_on_deadlock", true),
-      holoscan::Arg("stop_on_deadlock_timeout", static_cast<int64_t>(3000)),
-      holoscan::Arg("max_duration_ms", static_cast<int64_t>(120000))));
+  SPARK_LOG_INFO("ST 2110 pass-through: st2110_rx -> st2110_tx (shared EAL, frame forwarding).");
+  auto app = spark::rt::make_application<spark::St2110Passthrough>();
+  // RX assembles frame N+1 while TX paces frame N (pipelined at the media rate) — inherent to
+  // spark::rt's thread-per-operator model, no scheduler configuration needed.
+  app->max_duration_ms(120000);
   app->run();
   return 0;
 }

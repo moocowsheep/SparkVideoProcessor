@@ -37,7 +37,7 @@ AUDIO="${AUDIO:-0}"
 REGISTRY="${REGISTRY:-}"
 
 do_build() {
-  hr "build software sender (pure C++; no DPDK/Holoscan)"
+  hr "build software sender (pure C++; no DPDK)"
   mkdir -p "$ROOT/spike/build"
   # only the pure framing cores are needed — rtp_st2110.cpp + audio_st2110.cpp
   if g++ -O2 -std=c++17 -I "$ROOT/engine" "$SENDER_SRC" \

@@ -9,13 +9,13 @@
 // manage_eal=false) AND clean line-rate co-location of the TX pacer + RX poll in one process:
 // at 2160p/12G this gets lost=0, hw_missed=0, ~2 µs steady-state ingest latency — matching the
 // two-process runs. Two fixes got there: (1) DpdkEal widens thread affinity after rte_eal_init (else
-// Holoscan workers inherit the single main-lcore mask and every spin serializes on one core); (2) a
+// operator threads inherit the single main-lcore mask and every spin serializes on one core); (2) a
 // one-time TX warmup so RX enters its poll loop before TX floods (a startup race, not steady-state).
 // These are the prerequisites for the single-process rx->tx pass-through (frame forwarding next).
 //   sudo -n SPARK_PROFILE=2160p ./engine/build/st2110_loopback   # SPARK_PROFILE/SPARK_FRAMES/SPARK_SECONDS
 #include <cstdlib>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "operators/common/dpdk_eal.hpp"
 #include "operators/frame_sink/frame_sink.hpp"
@@ -25,10 +25,10 @@
 
 namespace spark {
 
-class St2110Loopback : public holoscan::Application {
+class St2110Loopback : public spark::rt::Application {
  public:
   void compose() override {
-    using namespace holoscan;
+    using namespace spark::rt;
     const char* prof = std::getenv("SPARK_PROFILE");
     const char* fr = std::getenv("SPARK_FRAMES");
     const char* sc = std::getenv("SPARK_SECONDS");
@@ -41,7 +41,7 @@ class St2110Loopback : public holoscan::Application {
     auto& eal = spark::net::DpdkEal::instance();
     eal.add_device("0002:01:00.0", "tx_pp=500");  // TX
     eal.add_device("0002:01:00.1", "");           // RX
-    // Wide lcore set: rte_eal_init pins the process affinity mask to these cores and Holoscan's
+    // Wide lcore set: rte_eal_init pins the process affinity mask to these cores and the runtime's
     // worker threads inherit it, so the busy-spin TX throttle + busy-poll RX need room (4 cores
     // starved them -> loss + ms-scale latency in one process; two-process runs had the box each).
     eal.init("0-11", "spark_loop");
@@ -67,14 +67,11 @@ class St2110Loopback : public holoscan::Application {
 }  // namespace spark
 
 int main() {
-  HOLOSCAN_LOG_INFO("ST 2110 one-process loopback: test_pattern->st2110_tx(.0) + st2110_rx(.1).");
-  auto app = holoscan::make_application<spark::St2110Loopback>();
-  // Multi-thread scheduler: st2110_rx blocks in its poll loop, so it needs its own worker thread
-  // concurrent with the TX branch (test_pattern -> st2110_tx).
-  app->scheduler(app->make_scheduler<holoscan::MultiThreadScheduler>(
-      "mts", holoscan::Arg("worker_thread_number", static_cast<int64_t>(4)),
-      holoscan::Arg("stop_on_deadlock", true),
-      holoscan::Arg("max_duration_ms", static_cast<int64_t>(30000))));
+  SPARK_LOG_INFO("ST 2110 one-process loopback: test_pattern->st2110_tx(.0) + st2110_rx(.1).");
+  auto app = spark::rt::make_application<spark::St2110Loopback>();
+  // st2110_rx blocks in its poll loop; under spark::rt it owns a thread by construction, so it
+  // runs concurrently with the TX branch (test_pattern -> st2110_tx) with no scheduler to size.
+  app->max_duration_ms(30000);
   app->run();
   return 0;
 }

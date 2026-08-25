@@ -5,7 +5,7 @@
 
 namespace spark::ops {
 
-void TestPatternOp::setup(holoscan::OperatorSpec& spec) {
+void TestPatternOp::setup(spark::rt::OperatorSpec& spec) {
   spec.output<spark::st2110::VideoFrame>("frame");
   spec.param(profile_, "profile", "Video profile", "1080p | 2160p", std::string("1080p"));
 }
@@ -28,12 +28,12 @@ void TestPatternOp::start() {
     const uint8_t v = static_cast<uint8_t>((line * 255u) / (fmt_.height ? fmt_.height : 1));
     for (uint32_t o = 0; o < opl; ++o) row[o] = static_cast<uint8_t>(v ^ (o & 0xff));
   }
-  HOLOSCAN_LOG_INFO("test_pattern: {}x{} profile={} ({} octets/frame)", fmt_.width, fmt_.height,
+  SPARK_LOG_INFO("test_pattern: {}x{} profile={} ({} octets/frame)", fmt_.width, fmt_.height,
                     profile_.get(), fmt_.octets_per_frame());
 }
 
-void TestPatternOp::compute(holoscan::InputContext&, holoscan::OutputContext& op_output,
-                            holoscan::ExecutionContext&) {
+void TestPatternOp::compute(spark::rt::InputContext&, spark::rt::OutputContext& op_output,
+                            spark::rt::ExecutionContext&) {
   spark::st2110::VideoFrame frame;
   frame.data = buffer_;  // reused buffer; St2110TxOp copies octets into packets
   frame.format = fmt_;

@@ -1,7 +1,7 @@
 // Copyright 2026 Devin Block
 // SPDX-License-Identifier: Apache-2.0
 
-// St2110TxOp — Holoscan sink operator that transmits VideoFrames as ST 2110-20, tx_pp-paced.
+// St2110TxOp — sink operator that transmits VideoFrames as ST 2110-20, tx_pp-paced.
 //
 // Pipeline role:  ... -> pack -> [st2110_tx]
 // It packetizes each frame (RFC 4175, see rtp_st2110.hpp) and emits the packets through a transport
@@ -21,7 +21,7 @@
 #include <mutex>
 #include <thread>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "rtp_st2110.hpp"
 #include "st2110_format.hpp"
@@ -29,15 +29,15 @@
 
 namespace spark::ops {
 
-class St2110TxOp : public holoscan::Operator {
+class St2110TxOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(St2110TxOp)
+  SPARK_OPERATOR_FORWARD_ARGS(St2110TxOp)
   St2110TxOp() = default;
 
-  void setup(holoscan::OperatorSpec& spec) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
   void start() override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext& context) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext& context) override;
   void stop() override;
 
  private:
@@ -46,45 +46,45 @@ class St2110TxOp : public holoscan::Operator {
   void audio_loop();  // relay thread: AudioBridge -> capture+L -> tx_pp queue 1 (fixed mode only)
 
   // --- parameters ---
-  holoscan::Parameter<std::string> pci_addr_;
-  holoscan::Parameter<std::string> dst_mac_;   // "aa:bb:cc:dd:ee:ff" (gate-4: the RX port MAC)
-  holoscan::Parameter<std::string> src_ip_;
-  holoscan::Parameter<std::string> dst_ip_;
-  holoscan::Parameter<uint32_t> udp_port_;  // uint32 for YAML/from_config friendliness
-  holoscan::Parameter<uint32_t> payload_size_;     // UDP payload budget per packet (octets)
-  holoscan::Parameter<uint32_t> tx_pp_ns_;
-  holoscan::Parameter<uint32_t> txd_;
-  holoscan::Parameter<uint32_t> pacing_horizon_ns_;  // keep schedule within this of the NIC clock
+  spark::rt::Parameter<std::string> pci_addr_;
+  spark::rt::Parameter<std::string> dst_mac_;   // "aa:bb:cc:dd:ee:ff" (gate-4: the RX port MAC)
+  spark::rt::Parameter<std::string> src_ip_;
+  spark::rt::Parameter<std::string> dst_ip_;
+  spark::rt::Parameter<uint32_t> udp_port_;  // uint32 for YAML/from_config friendliness
+  spark::rt::Parameter<uint32_t> payload_size_;     // UDP payload budget per packet (octets)
+  spark::rt::Parameter<uint32_t> tx_pp_ns_;
+  spark::rt::Parameter<uint32_t> txd_;
+  spark::rt::Parameter<uint32_t> pacing_horizon_ns_;  // keep schedule within this of the NIC clock
   // Lead the schedule base over the NIC clock on (re)anchor. 0 = use pacing_horizon_ns_ (legacy). A
   // SMALL lead with a LARGE horizon lets compute() submit a whole frame to the NIC at once and return
   // in ~ms — the NIC tx_pp HW-paces it, leaving ~a frame of slack so jitter never lags the grid.
-  holoscan::Parameter<uint32_t> reanchor_lead_ns_;
-  holoscan::Parameter<uint32_t> ssrc_;
-  holoscan::Parameter<std::string> eal_cores_;
-  holoscan::Parameter<bool> pacing_;
-  holoscan::Parameter<double> pacing_fill_;  // spread a frame over fill×interval (<1 finishes early)
+  spark::rt::Parameter<uint32_t> reanchor_lead_ns_;
+  spark::rt::Parameter<uint32_t> ssrc_;
+  spark::rt::Parameter<std::string> eal_cores_;
+  spark::rt::Parameter<bool> pacing_;
+  spark::rt::Parameter<double> pacing_fill_;  // spread a frame over fill×interval (<1 finishes early)
   // ST 2110-21 sender compliance profile. false = Narrow (2110TPN): pace over the ACTIVE period with
   // per-line gapped bursts (matches the Blackmagic reference; validated for 2160p59.94 IP10). true =
   // Wide (2110TPW): pace EVENLY over the full frame interval — lower peak rate, no gaps — for receivers
   // (e.g. BiDirect-2) whose larger wide buffer absorbs tx_pp/pipeline jitter that narrow's tight buffer
   // couldn't (the 29.97 dips). Keep this in sync with the SDP's TP= (NMOS node reads the same SPARK_TX_TP).
-  holoscan::Parameter<bool> tx_wide_;
-  holoscan::Parameter<bool> manage_eal_;   // false in multi-backend processes (shared DpdkEal)
-  holoscan::Parameter<uint32_t> warmup_ms_;  // one-time delay before first send (let RX start first)
+  spark::rt::Parameter<bool> tx_wide_;
+  spark::rt::Parameter<bool> manage_eal_;   // false in multi-backend processes (shared DpdkEal)
+  spark::rt::Parameter<uint32_t> warmup_ms_;  // one-time delay before first send (let RX start first)
   // Latency trim: max ns/frame the genlock base (and the RTP media clock with it) may slew toward the
   // target lead. Converges end-to-end latency to (steady pipeline delay + reanchor_lead) after startup
   // transients instead of freezing whatever the cold first frame baked in. 0 = off (legacy behavior).
-  holoscan::Parameter<uint32_t> trim_ns_;
+  spark::rt::Parameter<uint32_t> trim_ns_;
   // FIXED end-to-end latency (M10): when > 0, wire time = absolute capture_ts + latency_ns — a
   // CONFIGURED constant. No calibration, no trim servo, no re-anchor: latency is deterministic
   // across restarts, and frames that miss the schedule skip (freeze) rather than shift it. Requires
   // the absolute capture timestamps from the RX RTP-unwrap (i.e. a PTP-locked source + synced PHC).
   // 0 = the adaptive servo above (legacy). The audio relay uses the SAME constant -> exact lip-sync.
-  holoscan::Parameter<uint64_t> latency_ns_;
-  holoscan::Parameter<std::string> audio_dst_ip_;  // companion 2110-30 egress group ("" = no audio)
-  holoscan::Parameter<uint32_t> audio_port_;
-  holoscan::Parameter<uint32_t> audio_rate_;       // audio RTP clock (2110-30: 48000)
-  holoscan::Parameter<int64_t> av_offset_ns_;      // extra audio delay (+) / advance (-) vs video
+  spark::rt::Parameter<uint64_t> latency_ns_;
+  spark::rt::Parameter<std::string> audio_dst_ip_;  // companion 2110-30 egress group ("" = no audio)
+  spark::rt::Parameter<uint32_t> audio_port_;
+  spark::rt::Parameter<uint32_t> audio_rate_;       // audio RTP clock (2110-30: 48000)
+  spark::rt::Parameter<int64_t> av_offset_ns_;      // extra audio delay (+) / advance (-) vs video
 
   // --- runtime state ---
   std::unique_ptr<spark::net::ISt2110TxBackend> backend_;

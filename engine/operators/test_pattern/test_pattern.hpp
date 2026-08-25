@@ -12,24 +12,24 @@
 #include <chrono>
 #include <cstdint>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "../st2110_tx/st2110_format.hpp"
 
 namespace spark::ops {
 
-class TestPatternOp : public holoscan::Operator {
+class TestPatternOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(TestPatternOp)
+  SPARK_OPERATOR_FORWARD_ARGS(TestPatternOp)
   TestPatternOp() = default;
 
-  void setup(holoscan::OperatorSpec& spec) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
   void start() override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext& context) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext& context) override;
 
  private:
-  holoscan::Parameter<std::string> profile_;  // "1080p" | "2160p"
+  spark::rt::Parameter<std::string> profile_;  // "1080p" | "2160p"
 
   spark::st2110::VideoFormat fmt_;
   std::shared_ptr<std::vector<uint8_t>> buffer_;

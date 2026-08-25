@@ -8,7 +8,7 @@ After=network-online.target
 Type=simple
 # Daemon and the engine it spawns need root: DPDK on mlx5, hugepages, GPU clock locking.
 EnvironmentFile=-/etc/default/spark-video-processor
-# Bundled Holoscan/CUDA runtime closure; overrides the build-tree RUNPATH in the binaries.
+# Bundled CUDA runtime closure; overrides the build-tree RUNPATH in the binaries.
 Environment=LD_LIBRARY_PATH=/usr/lib/spark-video-processor/lib
 ExecStart=/usr/lib/spark-video-processor/spark_controld \
     --pipeline /usr/lib/spark-video-processor/st2110_pipeline \

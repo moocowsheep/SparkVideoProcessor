@@ -1,7 +1,7 @@
 // Copyright 2026 Devin Block
 // SPDX-License-Identifier: Apache-2.0
 
-// St2110RxOp — Holoscan operator that receives an ST 2110-20 stream and measures it.
+// St2110RxOp — operator that receives an ST 2110-20 stream and measures it.
 //
 // Pipeline role (eventual):  [st2110_rx] -> unpack -> ...
 // v1 scope: a terminal sink for loopback validation. It polls the NIC for `run_seconds`, depacketizes
@@ -25,7 +25,7 @@
 #include <thread>
 #include <vector>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "../st2110_tx/rtp_st2110.hpp"
 #include "../st2110_tx/st2110_format.hpp"
@@ -33,22 +33,22 @@
 
 namespace spark::ops {
 
-class St2110RxOp : public holoscan::Operator {
+class St2110RxOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(St2110RxOp)
+  SPARK_OPERATOR_FORWARD_ARGS(St2110RxOp)
   St2110RxOp() = default;
 
-  void setup(holoscan::OperatorSpec& spec) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
   void start() override;
-  void compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext& context) override;
+  void compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext& context) override;
   void stop() override;
 
  private:
   void print_stats();
   void emit_live(bool force = false);  // periodic machine-parseable "spark_live rx_*" line (1 Hz)
   void compute_sink();                                  // emit_frames=false: loop run_seconds
-  void compute_emit_one(holoscan::OutputContext& out);  // emit_frames=true: pop one frame, emit
+  void compute_emit_one(spark::rt::OutputContext& out);  // emit_frames=true: pop one frame, emit
   void poll_loop();  // emit mode: dedicated thread, continuously drains the NIC into frames
   void account(const spark::st2110::RxPacketInfo& info, const spark::net::RxPacket& pkt,
                uint64_t now_ns);  // loss + ingest-latency bookkeeping
@@ -56,30 +56,30 @@ class St2110RxOp : public holoscan::Operator {
   uint64_t video_capture_ns(uint32_t rtp_ts, uint64_t ref);  // unwrap + broken-epoch guard
   std::shared_ptr<std::vector<uint8_t>> next_buffer();  // ring buffer for emitted frames
 
-  holoscan::Parameter<std::string> pci_addr_;
-  holoscan::Parameter<uint32_t> udp_port_;
-  holoscan::Parameter<std::string> profile_;
-  holoscan::Parameter<std::string> mcast_group_;  // ST 2110 group to join (NMOS); "" = legacy
-  holoscan::Parameter<std::string> src_ip_;       // SSM source filter
-  holoscan::Parameter<std::string> iface_ip_;     // local media interface IP (IGMP report source)
-  holoscan::Parameter<uint32_t> in_width_;        // override profile geometry from the SDP (0 = profile)
-  holoscan::Parameter<uint32_t> in_height_;
-  holoscan::Parameter<double> in_fps_;            // source frame rate from the SDP (0 = profile)
-  holoscan::Parameter<uint32_t> rxd_;
-  holoscan::Parameter<std::string> eal_cores_;
-  holoscan::Parameter<double> run_seconds_;
-  holoscan::Parameter<bool> manage_eal_;    // false in multi-backend processes (shared DpdkEal)
-  holoscan::Parameter<bool> emit_frames_;   // true: source mode (emit one VideoFrame per compute)
-  holoscan::Parameter<bool> ip10_;          // source carries Blackmagic IP10 (8-bit pgroups); decoded downstream
+  spark::rt::Parameter<std::string> pci_addr_;
+  spark::rt::Parameter<uint32_t> udp_port_;
+  spark::rt::Parameter<std::string> profile_;
+  spark::rt::Parameter<std::string> mcast_group_;  // ST 2110 group to join (NMOS); "" = legacy
+  spark::rt::Parameter<std::string> src_ip_;       // SSM source filter
+  spark::rt::Parameter<std::string> iface_ip_;     // local media interface IP (IGMP report source)
+  spark::rt::Parameter<uint32_t> in_width_;        // override profile geometry from the SDP (0 = profile)
+  spark::rt::Parameter<uint32_t> in_height_;
+  spark::rt::Parameter<double> in_fps_;            // source frame rate from the SDP (0 = profile)
+  spark::rt::Parameter<uint32_t> rxd_;
+  spark::rt::Parameter<std::string> eal_cores_;
+  spark::rt::Parameter<double> run_seconds_;
+  spark::rt::Parameter<bool> manage_eal_;    // false in multi-backend processes (shared DpdkEal)
+  spark::rt::Parameter<bool> emit_frames_;   // true: source mode (emit one VideoFrame per compute)
+  spark::rt::Parameter<bool> ip10_;          // source carries Blackmagic IP10 (8-bit pgroups); decoded downstream
   // Companion ST 2110-30 audio flow (M10): received on the same port/queue, classified by the
   // backend, and handed to the TX audio relay via AudioBridge. Empty group = no audio.
-  holoscan::Parameter<std::string> audio_mcast_;
-  holoscan::Parameter<std::string> audio_src_;
-  holoscan::Parameter<uint32_t> audio_port_;
-  holoscan::Parameter<uint32_t> audio_rate_;       // RTP clock of the audio flow (2110-30: 48 kHz)
+  spark::rt::Parameter<std::string> audio_mcast_;
+  spark::rt::Parameter<std::string> audio_src_;
+  spark::rt::Parameter<uint32_t> audio_port_;
+  spark::rt::Parameter<uint32_t> audio_rate_;       // RTP clock of the audio flow (2110-30: 48 kHz)
   // Frame-queue depth: in fixed-latency mode the standing store of (L - pipeline floor) worth of
   // source frames lives HERE (the NIC's tx_pp window can only hold ~ms), so the app sizes it from L.
-  holoscan::Parameter<uint32_t> frame_q_depth_;
+  spark::rt::Parameter<uint32_t> frame_q_depth_;
 
   std::unique_ptr<spark::net::ISt2110RxBackend> backend_;
   std::unique_ptr<spark::st2110::Depacketizer> depkt_;

@@ -17,19 +17,19 @@ constexpr size_t kPool = 10;
 // Shared setup shape for a GpuFrame->GpuFrame filter stage: input queue burst-deep only when this
 // op directly receives FRC's multi-frame burst (SPARK_BURST_SINK), else 1-deep (1:1 hop; capacity
 // == standing latency behind the paced TX). One frame per compute.
-void filter_io(holoscan::OperatorSpec& spec, const std::string& op_name) {
+void filter_io(spark::rt::OperatorSpec& spec, const std::string& op_name) {
   const auto cap = static_cast<uint64_t>(spark::pipeline_queue_cap(op_name));
   spec.input<spark::gpu::GpuFramePtr>("in")
-      .connector(holoscan::IOSpec::ConnectorType::kDoubleBuffer, holoscan::Arg("capacity", cap),
-                 holoscan::Arg("policy", static_cast<uint64_t>(2)))
-      .condition(holoscan::ConditionType::kMessageAvailable,
-                 holoscan::Arg("min_size", static_cast<uint64_t>(1)));
+      .connector(spark::rt::IOSpec::ConnectorType::kDoubleBuffer, spark::rt::Arg("capacity", cap),
+                 spark::rt::Arg("policy", static_cast<uint64_t>(2)))
+      .condition(spark::rt::ConditionType::kMessageAvailable,
+                 spark::rt::Arg("min_size", static_cast<uint64_t>(1)));
   spec.output<spark::gpu::GpuFramePtr>("out");
 }
 }  // namespace
 
 // ---- ProcAmpOp ----
-void ProcAmpOp::setup(holoscan::OperatorSpec& spec) {
+void ProcAmpOp::setup(spark::rt::OperatorSpec& spec) {
   filter_io(spec, name());
   spec.param(brightness_, "brightness", "Brightness", "black-level offset (±1 = ±full swing)", 0.0);
   spec.param(contrast_, "contrast", "Contrast", "video gain about black; 1 = unity", 1.0);
@@ -42,12 +42,12 @@ void ProcAmpOp::ensure(uint32_t width, uint32_t height) {
   if (!stream_) cudaStreamCreate(&stream_);
   pool_.assign(kPool, nullptr);
   for (auto& f : pool_) f = std::make_shared<spark::gpu::GpuFrame>(width, height);
-  HOLOSCAN_LOG_INFO("procamp: {}x{} bright={:.3f} contrast={:.3f} sat={:.3f} hue={:.1f}deg", width,
+  SPARK_LOG_INFO("procamp: {}x{} bright={:.3f} contrast={:.3f} sat={:.3f} hue={:.1f}deg", width,
                     height, brightness_.get(), contrast_.get(), saturation_.get(), hue_deg_.get());
 }
 
-void ProcAmpOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-                        holoscan::ExecutionContext&) {
+void ProcAmpOp::compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+                        spark::rt::ExecutionContext&) {
   auto in = op_input.receive<spark::gpu::GpuFramePtr>("in");
   if (!in || !in.value()) return;
   const auto& src = *in.value();
@@ -67,7 +67,7 @@ void ProcAmpOp::compute(holoscan::InputContext& op_input, holoscan::OutputContex
 }
 
 void ProcAmpOp::stop() {
-  HOLOSCAN_LOG_INFO("procamp stopped: frames={}", frames_);
+  SPARK_LOG_INFO("procamp stopped: frames={}", frames_);
   if (stream_) {
     cudaStreamSynchronize(stream_);
     cudaStreamDestroy(stream_);
@@ -76,7 +76,7 @@ void ProcAmpOp::stop() {
 }
 
 // ---- SharpenOp ----
-void SharpenOp::setup(holoscan::OperatorSpec& spec) {
+void SharpenOp::setup(spark::rt::OperatorSpec& spec) {
   filter_io(spec, name());
   spec.param(amount_, "amount", "Amount", "unsharp gain (0 = identity)", 1.0);
 }
@@ -86,11 +86,11 @@ void SharpenOp::ensure(uint32_t width, uint32_t height) {
   if (!stream_) cudaStreamCreate(&stream_);
   pool_.assign(kPool, nullptr);
   for (auto& f : pool_) f = std::make_shared<spark::gpu::GpuFrame>(width, height);
-  HOLOSCAN_LOG_INFO("sharpen: {}x{} amount={:.2f}", width, height, amount_.get());
+  SPARK_LOG_INFO("sharpen: {}x{} amount={:.2f}", width, height, amount_.get());
 }
 
-void SharpenOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-                        holoscan::ExecutionContext&) {
+void SharpenOp::compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+                        spark::rt::ExecutionContext&) {
   auto in = op_input.receive<spark::gpu::GpuFramePtr>("in");
   if (!in || !in.value()) return;
   const auto& src = *in.value();
@@ -112,7 +112,7 @@ void SharpenOp::compute(holoscan::InputContext& op_input, holoscan::OutputContex
 }
 
 void SharpenOp::stop() {
-  HOLOSCAN_LOG_INFO("sharpen stopped: frames={}", frames_);
+  SPARK_LOG_INFO("sharpen stopped: frames={}", frames_);
   if (stream_) {
     cudaStreamSynchronize(stream_);
     cudaStreamDestroy(stream_);
@@ -121,7 +121,7 @@ void SharpenOp::stop() {
 }
 
 // ---- NrOp ----
-void NrOp::setup(holoscan::OperatorSpec& spec) {
+void NrOp::setup(spark::rt::OperatorSpec& spec) {
   filter_io(spec, name());
   spec.param(luma_, "luma", "Luma NR", "bilateral strength on Y, 0..1 (0 = untouched)", 0.0);
   spec.param(chroma_, "chroma", "Chroma NR", "bilateral strength on Cb/Cr, 0..1 (0 = untouched)",
@@ -133,12 +133,12 @@ void NrOp::ensure(uint32_t width, uint32_t height) {
   if (!stream_) cudaStreamCreate(&stream_);
   pool_.assign(kPool, nullptr);
   for (auto& f : pool_) f = std::make_shared<spark::gpu::GpuFrame>(width, height);
-  HOLOSCAN_LOG_INFO("nr: {}x{} luma={:.2f} chroma={:.2f}", width, height, luma_.get(),
+  SPARK_LOG_INFO("nr: {}x{} luma={:.2f} chroma={:.2f}", width, height, luma_.get(),
                     chroma_.get());
 }
 
-void NrOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-                   holoscan::ExecutionContext&) {
+void NrOp::compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+                   spark::rt::ExecutionContext&) {
   auto in = op_input.receive<spark::gpu::GpuFramePtr>("in");
   if (!in || !in.value()) return;
   const auto& src = *in.value();
@@ -169,7 +169,7 @@ void NrOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& op
 }
 
 void NrOp::stop() {
-  HOLOSCAN_LOG_INFO("nr stopped: frames={}", frames_);
+  SPARK_LOG_INFO("nr stopped: frames={}", frames_);
   if (stream_) {
     cudaStreamSynchronize(stream_);
     cudaStreamDestroy(stream_);
@@ -178,7 +178,7 @@ void NrOp::stop() {
 }
 
 // ---- GrainOp ----
-void GrainOp::setup(holoscan::OperatorSpec& spec) {
+void GrainOp::setup(spark::rt::OperatorSpec& spec) {
   filter_io(spec, name());
   spec.param(amount_, "amount", "Amount", "grain amount 0..1 (0 = identity)", 0.0);
   spec.param(size_, "size", "Size", "grain cell in pixels (1..4)", 1.5);
@@ -191,12 +191,12 @@ void GrainOp::ensure(uint32_t width, uint32_t height) {
   if (!stream_) cudaStreamCreate(&stream_);
   pool_.assign(kPool, nullptr);
   for (auto& f : pool_) f = std::make_shared<spark::gpu::GpuFrame>(width, height);
-  HOLOSCAN_LOG_INFO("grain: {}x{} amount={:.2f} size={:.2f} mode={}", width, height, amount_.get(),
+  SPARK_LOG_INFO("grain: {}x{} amount={:.2f} size={:.2f} mode={}", width, height, amount_.get(),
                     size_.get(), mode_.get());
 }
 
-void GrainOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext& op_output,
-                      holoscan::ExecutionContext&) {
+void GrainOp::compute(spark::rt::InputContext& op_input, spark::rt::OutputContext& op_output,
+                      spark::rt::ExecutionContext&) {
   auto in = op_input.receive<spark::gpu::GpuFramePtr>("in");
   if (!in || !in.value()) return;
   const auto& src = *in.value();
@@ -224,7 +224,7 @@ void GrainOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext&
 }
 
 void GrainOp::stop() {
-  HOLOSCAN_LOG_INFO("grain stopped: frames={}", frames_);
+  SPARK_LOG_INFO("grain stopped: frames={}", frames_);
   if (stream_) {
     cudaStreamSynchronize(stream_);
     cudaStreamDestroy(stream_);

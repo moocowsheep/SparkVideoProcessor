@@ -3,7 +3,7 @@
 
 // SRW1 super-resolution model definitions: a shuffle2-terminated stack of SAME/stride-1 convs on
 // the luma plane (the shape both embedded model families — FSRCNN and ESPCN — reduce to). Pure
-// C++ (no CUDA/Holoscan) so the loader is testable anywhere; sr_net.cu compiles a NetDef into
+// C++ (no CUDA, no runtime) so the loader is testable anywhere; sr_net.cu compiles a NetDef into
 // fused GPU kernels.
 //
 // Blob layout (little-endian u32 header words, then raw f32 payload per layer):

@@ -4,7 +4,7 @@
 // Spark Video Processor — control daemon (M4).
 // Exposes the pipeline control as gRPC (SparkControl) AND HTTP/JSON + static web (libmicrohttpd) so
 // the vanilla web dashboard can drive it with fetch() — no gRPC-web proxy. Manages the
-// st2110_pipeline process (env from config) and parses its final stats. No DPDK/Holoscan deps.
+// st2110_pipeline process (env from config) and parses its final stats. No DPDK/CUDA deps.
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <microhttpd.h>

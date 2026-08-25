@@ -15,7 +15,7 @@ std::array<uint8_t, 6> parse_mac(const std::string& s) {
 }
 }  // namespace
 
-void AudioTxOp::setup(holoscan::OperatorSpec& spec) {
+void AudioTxOp::setup(spark::rt::OperatorSpec& spec) {
   spec.input<spark::st2110::AudioBlock>("audio");
   spec.param(pci_addr_, "pci_addr", "TX PCI", "CX-7 TX port BDF", std::string("0002:01:00.0"));
   spec.param(dst_mac_, "dst_mac", "Dest MAC", "egress MAC; 00:..:00 -> derive from multicast group",
@@ -46,11 +46,11 @@ void AudioTxOp::start() {
   cfg.file_prefix = "spark_audio_tx";
   cfg.eal_core_list = "0,1";
   backend_->init(cfg);
-  HOLOSCAN_LOG_INFO("audio_tx started: TX {} -> {} pacing={}", cfg.pci_addr, cfg.dst_ip, cfg.pacing);
+  SPARK_LOG_INFO("audio_tx started: TX {} -> {} pacing={}", cfg.pci_addr, cfg.dst_ip, cfg.pacing);
 }
 
-void AudioTxOp::compute(holoscan::InputContext& op_input, holoscan::OutputContext&,
-                        holoscan::ExecutionContext&) {
+void AudioTxOp::compute(spark::rt::InputContext& op_input, spark::rt::OutputContext&,
+                        spark::rt::ExecutionContext&) {
   auto maybe = op_input.receive<spark::st2110::AudioBlock>("audio");
   if (!maybe) return;
   auto& blk = maybe.value();
@@ -80,7 +80,7 @@ void AudioTxOp::compute(holoscan::InputContext& op_input, holoscan::OutputContex
 void AudioTxOp::stop() {
   if (!backend_) return;
   const auto s = backend_->stats();
-  HOLOSCAN_LOG_INFO("audio_tx stopped: packets={} | tx_pp future_err={} past_err={} sync_lost={}",
+  SPARK_LOG_INFO("audio_tx stopped: packets={} | tx_pp future_err={} past_err={} sync_lost={}",
                     packets_sent_, s.future_errors, s.past_errors, s.sync_lost);
   backend_->shutdown();
   backend_.reset();

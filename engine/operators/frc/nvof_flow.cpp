@@ -193,7 +193,7 @@ void NvofFlow::init(uint32_t width, uint32_t height, uint32_t grid_size) {
 
 void NvofFlow::compute(const uint8_t* prevY8, const uint8_t* curY8, void* stream) {
   Impl& im = *p_;
-  // FrcOp::compute() may run on any Holoscan worker thread; make our context current so the NVOF
+  // FrcOp::compute() runs on FrcOp's own operator thread; make our context current so the NVOF
   // driver calls (and the runtime kernels sharing this primary context) target the right device.
   cu_check(cuCtxSetCurrent(im.ctx), "cuCtxSetCurrent");
   const CUstream cs = reinterpret_cast<CUstream>(stream);

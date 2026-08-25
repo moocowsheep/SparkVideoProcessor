@@ -12,7 +12,7 @@
 //      conversion bug (transposed/reordered tensors) fails this hard even though it would still
 //      pass test 1.
 //   3. A generous perf ceiling at 1080p->2160p (real numbers come from resize_smoke).
-// Raw device buffers, no NIC/root/Holoscan.
+// Raw device buffers, no NIC, no root, no runtime.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>

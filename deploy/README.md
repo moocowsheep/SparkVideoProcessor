@@ -1,7 +1,7 @@
 # deploy/ — host provisioning
 
 Reproducible setup for the ST 2110 IO plane the engine needs (M1 open item #5). Dev/build setup
-(Holoscan SDK, protobuf, web UI) is separate — see [`docs/SETUP.md`](../docs/SETUP.md).
+(protobuf, web UI, NVOF headers) is separate — see [`docs/SETUP.md`](../docs/SETUP.md).
 
 ## `provision.sh`
 Idempotent; safe to re-run. Provisions three things found necessary during M0/M1 bring-up:

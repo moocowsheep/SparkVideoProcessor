@@ -15,37 +15,37 @@
 #include <thread>
 #include <vector>
 
-#include <holoscan/holoscan.hpp>
+#include "runtime/runtime.hpp"
 
 #include "../st2110_rx/rx_backend.hpp"
 #include "audio_st2110.hpp"
 
 namespace spark::ops {
 
-class AudioRxOp : public holoscan::Operator {
+class AudioRxOp : public spark::rt::Operator {
  public:
-  HOLOSCAN_OPERATOR_FORWARD_ARGS(AudioRxOp)
+  SPARK_OPERATOR_FORWARD_ARGS(AudioRxOp)
   AudioRxOp() = default;
 
-  void setup(holoscan::OperatorSpec& spec) override;
+  void setup(spark::rt::OperatorSpec& spec) override;
   void start() override;
-  void compute(holoscan::InputContext&, holoscan::OutputContext& op_output,
-               holoscan::ExecutionContext&) override;
+  void compute(spark::rt::InputContext&, spark::rt::OutputContext& op_output,
+               spark::rt::ExecutionContext&) override;
   void stop() override;
 
  private:
   void poll_loop();
   std::shared_ptr<std::vector<uint8_t>> next_buffer();
 
-  holoscan::Parameter<std::string> pci_addr_;
-  holoscan::Parameter<uint32_t> udp_port_;
-  holoscan::Parameter<std::string> mcast_group_;
-  holoscan::Parameter<std::string> src_ip_;
-  holoscan::Parameter<std::string> iface_ip_;
-  holoscan::Parameter<uint32_t> channels_;
-  holoscan::Parameter<uint32_t> bit_depth_;      // 16 or 24
-  holoscan::Parameter<double> packet_time_ms_;
-  holoscan::Parameter<bool> manage_eal_;
+  spark::rt::Parameter<std::string> pci_addr_;
+  spark::rt::Parameter<uint32_t> udp_port_;
+  spark::rt::Parameter<std::string> mcast_group_;
+  spark::rt::Parameter<std::string> src_ip_;
+  spark::rt::Parameter<std::string> iface_ip_;
+  spark::rt::Parameter<uint32_t> channels_;
+  spark::rt::Parameter<uint32_t> bit_depth_;      // 16 or 24
+  spark::rt::Parameter<double> packet_time_ms_;
+  spark::rt::Parameter<bool> manage_eal_;
 
   std::unique_ptr<spark::net::ISt2110RxBackend> backend_;
   std::unique_ptr<spark::st2110::AudioDepacketizer> depkt_;

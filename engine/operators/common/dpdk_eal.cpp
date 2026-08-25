@@ -44,7 +44,7 @@ void DpdkEal::init(const std::string& core_list, const std::string& file_prefix)
   inited_ = true;
 
   // rte_eal_init pins THIS (main) thread to the single main lcore. Threads created afterward
-  // (Holoscan's scheduler workers) inherit that one-core affinity mask, so every busy-spin operator
+  // (the runtime's operator threads) inherit that one-core affinity mask, so every busy-spin operator
   // serializes onto one core -> ~ms preemption when >1 spin (the one-process co-location symptom;
   // standalone smokes have a single hot operator and were unaffected). Widen the mask back to all
   // online CPUs so workers spread across cores.

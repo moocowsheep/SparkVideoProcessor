@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // UniformGrid — the tick/phase math for FRC uniform-grid up-convert (SPARK_FRC=3), kept free of
-// CUDA/Holoscan so it unit-tests standalone (test/test_frc_grid.cpp).
+// CUDA or the runtime, so it unit-tests standalone (test/test_frc_grid.cpp).
 //
 // Classic up-convert (mode 2) emits [mid, cur] per input frame, source-LOCKED: the output timeline
 // inherits every wobble of the source's frame spacing (an erratic source -> visible motion wobble,
