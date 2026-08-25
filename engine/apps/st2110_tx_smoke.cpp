@@ -7,25 +7,30 @@
 // ST 2110-21 slot, self-throttled to the tx_pp window) instead of testpmd's open-loop txonly. Run on
 // the box, as root, with the CX-7 cabled (see docs/M1-gate4-pacing.md):
 //
-//   T=~/holoscan-sdk/install-cu13-aarch64-dgpu
+//   T=$(ls -d ~/holoscan-sdk/install-cu13-$(uname -m)-dgpu ~/holoscan-sdk/install-cu13-$(uname -m) 2>/dev/null | head -1)
 //   sudo -E LD_LIBRARY_PATH="$T/lib" ./engine/build/st2110_tx_smoke
 //
-// Defaults target the gate-4 loopback pair (TX 0002:01:00.0 -> RX MAC 00:00:5e:00:53:30). On the RX
-// port, count packets with the spike's rxonly testpmd (or, later, st2110_rx). Success = sustained pps
-// == target with future_err/past_err ~0 and tx_pp jitter in the tens of ns — the proof testpmd could
-// not give.
+// Ports are DISCOVERED, not hardcoded (operators/common/nic_ports.hpp): TX defaults to the first
+// linked-up ConnectX port and the destination MAC to its sibling port on the same card — the
+// loopback pair on the DGX Spark (0002:01:00.x) and on an x86_64 box (e.g. 0000:82:00.x) alike.
+// Override either with SPARK_TX_PCI / SPARK_DST_MAC. On the RX port, count packets with the spike's
+// rxonly testpmd (or st2110_rx_smoke). Success = sustained pps == target with future_err/past_err ~0
+// and tx_pp jitter in the tens of ns — the proof testpmd could not give.
 #include <cstdlib>
+#include <stdexcept>
+#include <string>
 
 #include <holoscan/holoscan.hpp>
 
+#include "operators/common/nic_ports.hpp"
 #include "operators/st2110_tx/st2110_tx.hpp"
 #include "operators/test_pattern/test_pattern.hpp"
 
 namespace spark {
 
 // Env overrides (via the SETENV allowlist): SPARK_PROFILE=1080p|2160p, SPARK_FRAMES=<n>,
-// SPARK_TX_PCI=<bdf>, SPARK_DST_MAC=<mac>, SPARK_WARMUP_MS=<ms>. Defaults target the gate-4 pair
-// (TX 0002:01:00.0 -> RX MAC 00:00:5e:00:53:30), 1080p, 300 frames.
+// SPARK_TX_PCI=<bdf>, SPARK_DST_MAC=<mac>, SPARK_WARMUP_MS=<ms>. Unset ports/MAC are discovered
+// (see above); profile 1080p, 300 frames.
 class St2110TxSmoke : public holoscan::Application {
  public:
   void compose() override {
@@ -35,11 +40,28 @@ class St2110TxSmoke : public holoscan::Application {
     const int64_t frames = std::atoll(env("SPARK_FRAMES", "300").c_str());
     const uint32_t warmup = static_cast<uint32_t>(std::atoll(env("SPARK_WARMUP_MS", "0").c_str()));
 
+    // Discover the local ConnectX pair, then let the env override either half. An explicit
+    // SPARK_TX_PCI re-anchors the pair, so the derived dst MAC is that card's sibling port.
+    const auto ports = net::connectx_ports();
+    auto tx_port = net::default_tx_port(ports);
+    const std::string tx_pci = env("SPARK_TX_PCI", tx_port.bdf.c_str());
+    for (const auto& p : ports)
+      if (p.bdf == tx_pci) tx_port = p;
+    const auto rx_port = net::default_rx_port(ports, tx_port);
+    const std::string dst_mac = env("SPARK_DST_MAC", rx_port.mac.c_str());
+    if (tx_pci.empty())
+      throw std::runtime_error("no ConnectX (15b3) port found — cable the NIC or set SPARK_TX_PCI");
+    if (dst_mac.empty())
+      throw std::runtime_error("no second ConnectX port to send to — set SPARK_DST_MAC explicitly");
+    const bool derived_mac = !rx_port.mac.empty() && dst_mac == rx_port.mac;
+    HOLOSCAN_LOG_INFO("TX {} ({}) -> dst MAC {} ({})", tx_pci, tx_port.iface, dst_mac,
+                      derived_mac ? (rx_port.bdf + (rx_port.carrier ? "" : ", LINK DOWN"))
+                                  : std::string("explicit"));
+
     auto src = make_operator<ops::TestPatternOp>("test_pattern", Arg("profile", profile),
                                                  make_condition<CountCondition>(frames));
     auto tx = make_operator<ops::St2110TxOp>(
-        "st2110_tx", Arg("pci_addr", env("SPARK_TX_PCI", "0002:01:00.0")),
-        Arg("dst_mac", env("SPARK_DST_MAC", "00:00:5e:00:53:30")), Arg("warmup_ms", warmup));
+        "st2110_tx", Arg("pci_addr", tx_pci), Arg("dst_mac", dst_mac), Arg("warmup_ms", warmup));
     add_flow(src, tx);
   }
 };

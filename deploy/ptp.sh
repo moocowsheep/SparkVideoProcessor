@@ -2,7 +2,7 @@
 # Copyright 2026 Devin Block
 # SPDX-License-Identifier: Apache-2.0
 
-# Spark Video Processor — PTP discipline for the ConnectX-7 (M1 open item #3).
+# Spark Video Processor — PTP discipline for the ConnectX (CX-7 on the Spark, CX-6 Lx on x86_64; M1 open item #3).
 #
 # Disciplines the shared real-time PHC (ptp0) with ptp4l + phc2sys so the engine's RTP timestamps and
 # tx_pp pacing track a reference clock (ST 2110-10 / ST 2059). The engine reads the same PHC, so this
@@ -18,6 +18,12 @@
 #   --master         run this box AS the time source (no external GM) + phc2sys pushes system->PHC
 #   --test           --master for ~15s, confirm ptp4l + HW timestamping work, then exit
 # Interface: arg $2 or $IFACE; otherwise the first up ConnectX-7 port is auto-detected.
+#
+# If the host already runs ptp4l itself (e.g. a systemd ptp4l-smpte.service slaved to a facility
+# grandmaster — the x86_64 host does), that daemon owns the PHC and this script must stay out of its
+# way: a second ptp4l on the same interface fights it, and --master/--test omit slaveOnly, so they
+# could win BMCA against the real GM. The running modes therefore refuse to start on top of an
+# externally-managed ptp4l; FORCE=1 overrides. --check and status are always safe.
 set -u
 
 MODE="${1:-slave}"
@@ -42,6 +48,51 @@ detect_iface() {
 
 IFACE_RESOLVED="$(detect_iface "$@")"
 
+# PIDs of any ptp4l we did NOT start via this script's `start` (i.e. systemd- or hand-managed).
+external_ptp4l_pids() {
+  local ours=""
+  [ -f "$PIDFILE" ] && ours="$(cat "$PIDFILE" 2>/dev/null)"
+  for pid in $(pgrep -x ptp4l 2>/dev/null); do
+    [ -n "$ours" ] && [ "$pid" = "$ours" ] && continue
+    # a `start` execs ptp4l in the pidfile's process group; skip anything in that group
+    [ -n "$ours" ] && [ "$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$ours" ] && continue
+    echo "$pid"
+  done
+}
+
+# Systemd unit owning a pid, if any (empty when not systemd-managed).
+unit_of_pid() {
+  command -v systemctl >/dev/null || return 0
+  systemctl status "$1" 2>/dev/null | awk 'NR==1 && $2 ~ /\.service$/ {print $2; exit}'
+}
+
+report_external_ptp4l() {
+  local pids; pids="$(external_ptp4l_pids)"
+  [ -z "$pids" ] && return 1
+  for pid in $pids; do
+    local unit; unit="$(unit_of_pid "$pid")"
+    info "host-managed ptp4l already running (pid $pid${unit:+, $unit}): $(tr '\0' ' ' </proc/$pid/cmdline 2>/dev/null)"
+    if [ -n "$unit" ]; then
+      journalctl -u "$unit" -n 3 --no-pager 2>/dev/null | sed 's/^/         /'
+    fi
+  done
+  return 0
+}
+
+# Guard the modes that would put a second ptp4l on the wire.
+refuse_if_external() {
+  external_ptp4l_pids | grep -q . || return 0
+  report_external_ptp4l
+  if [ "${FORCE:-0}" = "1" ]; then
+    warn "FORCE=1 — starting a SECOND ptp4l anyway; expect the two to fight over the PHC"
+    return 0
+  fi
+  fail "refusing '$MODE': this host already disciplines the PHC itself (see above)."
+  info "the engine reads that same PHC, so nothing more is needed — verify with: bash $0 --check"
+  info "to override anyway: FORCE=1 sudo bash $0 $MODE"
+  exit 1
+}
+
 need_root() {
   [ "$(id -u)" = 0 ] || { fail "must run as root for $MODE (use --check for read-only)"; exit 1; }
 }
@@ -55,7 +106,7 @@ case "$MODE" in
     ls /dev/ptp* >/dev/null 2>&1 && ok "PHC device(s): $(ls /dev/ptp* | tr '\n' ' ')" \
                                  || warn "no /dev/ptp* (REAL_TIME_CLOCK_ENABLE set? see deploy/provision.sh)"
     if [ -n "$IFACE_RESOLVED" ]; then
-      ok "CX-7 iface: $IFACE_RESOLVED"
+      ok "ConnectX iface: $IFACE_RESOLVED"
       if command -v ethtool >/dev/null; then
         if ethtool -T "$IFACE_RESOLVED" 2>/dev/null | grep -q 'hardware-transmit'; then
           ok "$IFACE_RESOLVED: HW TX/RX timestamping (PTP-capable)"
@@ -65,7 +116,12 @@ case "$MODE" in
         ethtool -T "$IFACE_RESOLVED" 2>/dev/null | grep -iE 'PTP Hardware Clock' | sed 's/^/  [info] /'
       fi
     else
-      warn "no up ConnectX-7 port found (cable it; the card is hot-plug)"
+      warn "no up ConnectX port found (cable it; on the DGX Spark the card is hot-plug)"
+    fi
+    if report_external_ptp4l; then
+      ok "PHC is disciplined by the host — do NOT run '$0 slave|start|--master' on top of it"
+    else
+      info "no host-managed ptp4l — use '$0 start' to discipline the PHC from here"
     fi
     # NTP clients fight phc2sys for CLOCK_REALTIME in slave mode (PHC/ptp4l unaffected, but the OS
     # wall-clock sawtooths). deploy/provision.sh disables them; warn here if any are active.
@@ -83,7 +139,8 @@ case "$MODE" in
 
   --master)
     need_root
-    [ -n "$IFACE_RESOLVED" ] || { fail "no CX-7 iface"; exit 1; }
+    refuse_if_external
+    [ -n "$IFACE_RESOLVED" ] || { fail "no ConnectX iface"; exit 1; }
     info "ptp4l MASTER on $IFACE_RESOLVED (this box is the time source); Ctrl-C to stop"
     phc2sys -s CLOCK_REALTIME -c "$IFACE_RESOLVED" -O 0 -w -m >/tmp/spark_phc2sys.log 2>&1 &
     exec ptp4l -f "$CONF" -i "$IFACE_RESOLVED" -m
@@ -91,7 +148,8 @@ case "$MODE" in
 
   --test)
     need_root
-    [ -n "$IFACE_RESOLVED" ] || { fail "no CX-7 iface"; exit 1; }
+    refuse_if_external
+    [ -n "$IFACE_RESOLVED" ] || { fail "no ConnectX iface"; exit 1; }
     info "ptp4l master-mode self-test on $IFACE_RESOLVED for 15s ..."
     LOG="$(mktemp)"
     timeout 15 ptp4l -f "$CONF" -i "$IFACE_RESOLVED" -m >"$LOG" 2>&1
@@ -105,7 +163,8 @@ case "$MODE" in
 
   slave|"")
     need_root
-    [ -n "$IFACE_RESOLVED" ] || { fail "no CX-7 iface"; exit 1; }
+    refuse_if_external
+    [ -n "$IFACE_RESOLVED" ] || { fail "no ConnectX iface"; exit 1; }
     info "ptp4l SLAVE (slaveOnly) on $IFACE_RESOLVED (disciplines PHC to network grandmaster); Ctrl-C to stop"
     # phc2sys -a follows ptp4l over its UDS management socket, which is domain-scoped — it MUST use the
     # same domainNumber as ptp4l or it hangs forever at "Waiting for ptp4l..." and never syncs the
@@ -119,7 +178,8 @@ case "$MODE" in
 
   start)
     need_root
-    [ -n "$IFACE_RESOLVED" ] || { fail "no CX-7 iface"; exit 1; }
+    refuse_if_external
+    [ -n "$IFACE_RESOLVED" ] || { fail "no ConnectX iface"; exit 1; }
     if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
       info "already running (pid $(cat "$PIDFILE"))"; exit 0
     fi
@@ -147,8 +207,9 @@ case "$MODE" in
   status)
     if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
       ok "ptp4l running (pid $(cat "$PIDFILE"))"
-    elif pgrep -x ptp4l >/dev/null; then
-      warn "ptp4l running but not started via '$0 start' (pid $(pgrep -x ptp4l | tr '\n' ' '))"
+    elif report_external_ptp4l; then
+      ok "PHC disciplined by a host-managed ptp4l (not by '$0 start') — that is the expected setup
+         on a box with its own PTP service"
     else
       fail "ptp4l not running"
     fi
