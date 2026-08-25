@@ -1,8 +1,8 @@
 # Spark Video Processor — engine (C++/CUDA Holoscan pipeline).
 # Build against the source-built Holoscan SDK install tree (see docs/SETUP.md step 3). The install
 # tree name carries the arch, so glob it rather than hardcoding aarch64 (x86_64 hosts get
-# install-cu13-x86_64-dgpu):
-#   T=$(echo ~/holoscan-sdk/install-cu13-*-dgpu)
+# install-cu13-x86_64 — no -dgpu suffix on x86):
+#   T=$(ls -d ~/holoscan-sdk/install-cu13-$(uname -m)-dgpu ~/holoscan-sdk/install-cu13-$(uname -m) 2>/dev/null | head -1)
 #   cmake -G Ninja -S engine -B engine/build -DCMAKE_PREFIX_PATH="$T"
 #   cmake --build engine/build
 #   ctest --test-dir engine/build                          # framing unit test (no NIC/root)

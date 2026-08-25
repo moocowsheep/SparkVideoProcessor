@@ -40,25 +40,66 @@ sudo usermod -aG docker "$USER"
 docker ps        # should work without sudo afterwards
 ```
 
-## 3. Build Holoscan SDK v4.3.0 from source (native install tree)
-Produces a self-contained `install-cu13-<arch>-dgpu/` we consume natively from `engine/`. The
+## 3. Build Holoscan SDK v4.5.0 from source (native install tree)
+Produces a self-contained install tree we consume natively from `engine/`. The
 invocation is identical on both hosts — `--gpu dgpu` is correct for each, and `./run` picks the
 arch up from the machine it runs on:
 ```bash
-git clone --depth 1 --branch v4.3.0 \
+git clone --depth 1 --branch v4.5.0 \
   https://github.com/nvidia-holoscan/holoscan-sdk.git ~/holoscan-sdk
 cd ~/holoscan-sdk
 ./run build --gpu dgpu --cuda 13    # DGX Spark is sbsa/dgpu, NOT igpu (igpu has no CUDA-13 base)
 # result: ~/holoscan-sdk/install-cu13-aarch64-dgpu   (DGX Spark)
-#      or ~/holoscan-sdk/install-cu13-x86_64-dgpu    (x86_64 host)
+#      or ~/holoscan-sdk/install-cu13-x86_64          (x86_64 host — note: NO -dgpu suffix;
+#         holoscan's ./run only appends the gpu flavor on aarch64, where igpu/dgpu both exist)
 ```
 x86_64 dGPU is Holoscan's *primary* target, so this is the well-trodden path there — the aarch64
 `dgpu`-not-`igpu` subtlety recorded in `docs/M0-feasibility-findings.md` is Spark-specific.
 
+**Why v4.5.0 and not the v4.3.0 the M0 spike used** (`engine/CMakeLists.txt` pins no version —
+`find_package(holoscan REQUIRED CONFIG)` — and the engine only uses stable public core API, so the
+bump is a no-op for our code):
+* **v4.4.0 fixed the RAPIDS-CMake bootstrap for source builds** ("resolved failures caused by an
+  upstream API change in the RAPIDS CMake bootstrap URL"). Our build goes through rapids-cmake/CPM,
+  so a *fresh* v4.3.0 source build can now fail on that; 4.4+ carries the fix.
+* **v4.5.0 reclassifies `MultiThreadScheduler` as legacy** and recommends `EventBasedScheduler`: no
+  polling-thread CPU overhead, plus CPU thread pinning and Linux real-time scheduling policies —
+  directly relevant to a paced ST 2110 pipeline. It is a recommendation, not a removal, so the
+  engine's existing `MultiThreadScheduler` uses keep working.
+* Breaking changes between 4.3.0 and 4.5.0: only v4.4.0's `[[nodiscard]]` on `PoseTree` methods,
+  which the engine does not use. v4.5.0 ships none.
+
+`docs/M0-feasibility-findings.md` records v4.3.0 because that is what the M0 spike actually
+validated on the Spark; it is a historical record, not the version to install.
+
+### Known x86_64 wrinkle: the build container is Ubuntu 22.04, the host is 24.04
+Holoscan's `Dockerfile` hardcodes a different base per arch, and `./run` only selects among them
+(there is no `--base-img` flag):
+```
+FROM nvcr.io/nvidia/cuda:13.0.0-base-ubuntu22.04 AS amd64-dgpu_cu13_base   # x86_64
+FROM nvcr.io/nvidia/cuda:13.0.0-base-ubuntu24.04 AS arm64-dgpu_cu13_base   # DGX Spark
+```
+So on the x86_64 host the SDK is compiled in **22.04** (glibc 2.35, libstdc++ from GCC 11) and then
+consumed **natively on 24.04** (glibc 2.39, GCC 13.3). On the Spark, container and host OS match, so
+this is x86-only — the M0 native-consumption finding was never tested across an OS gap.
+
+It is expected to work, because the skew runs in the compatible direction: libraries built against
+an *older* glibc/libstdc++ load on a newer system (the reverse does not), the host's newer libstdc++
+satisfies both sides at runtime, and `_GLIBCXX_USE_CXX11_ABI` defaults to 1 on both. This is also the
+configuration NVIDIA ships and tests for x86_64 dGPU, so the bundled TensorRT / ONNX Runtime / GXF
+binaries in the install tree are built for exactly it.
+
+If it *does* bite — undefined `GLIBC_2.3x` symbols, or an ABI mismatch at link or load time — two
+fixes, in order of preference:
+1. Point the x86 stage at 24.04 (`FROM nvcr.io/nvidia/cuda:13.0.0-base-ubuntu24.04 AS
+   amd64-dgpu_cu13_base`) in `~/holoscan-sdk/Dockerfile` and re-run `./run build`.
+2. Build `engine/` inside the Holoscan dev container instead of natively, giving up the native
+   toolchain but removing the gap entirely.
+
 Then build the engine against it. Glob the install tree so the same command works on either arch:
 ```bash
 cd ~/SparkVideoProcessor
-T=$(echo ~/holoscan-sdk/install-cu13-*-dgpu)
+T=$(ls -d ~/holoscan-sdk/install-cu13-$(uname -m)-dgpu ~/holoscan-sdk/install-cu13-$(uname -m) 2>/dev/null | head -1)
 cmake -G Ninja -S engine -B engine/build -DCMAKE_PREFIX_PATH="$T"
 cmake --build engine/build
 ctest --test-dir engine/build    # 8 unit tests; no NIC or root needed
@@ -82,6 +123,9 @@ sudo apt install -y dpdk dpdk-dev          # only if NOT using holohub's bundled
 bash spike/dpdk_pacing_probe.sh            # checks DPDK+mlx5, ConnectX bind, and tx_pp HW pacing
 ```
 - No NVIDIA account / license needed. DOCA GPUNetIO is the reserve GPUDirect path for later.
+- `tx_pp` is **not** a CX-7-only feature: it is confirmed on the Spark's ConnectX-7 (100G) and on the
+  x86_64 host's dual-port **ConnectX-6 Lx** (25G, `15b3:101f`) — see `docs/M1-gate4-pacing.md`.
+  ConnectX-6 Dx / Lx and later carry it; older cards do not.
 
 `tx_pp` requires the NIC to advertise DPDK's `SEND_ON_TIMESTAMP` Tx offload, which in turn requires
 `REAL_TIME_CLOCK_ENABLE=1` in firmware **plus a cold reboot** (a warm `reboot` does not apply it).
@@ -104,11 +148,25 @@ rdma link show                        # expect an mlx5 device
 ls /sys/class/net                     # expect new high-speed interface(s)
 ethtool -T <new_iface>                # expect a PTP Hardware Clock + HW timestamp modes
 ```
-Then PTP (loopback: run a software master on one port, slave on the other; note both ports usually
-share one PHC so lock is trivially perfect — validates the mechanism):
+Then PTP. **First check whether the host already disciplines the PHC itself** — a box with its own
+`ptp4l` systemd unit (the validated x86_64 host runs `ptp4l-smpte.service` + `phc2sys-smpte.service`,
+ST 2059-2 domain 127, slaved to a facility grandmaster) needs nothing further: the engine reads the
+same PHC, so it inherits that discipline.
 ```bash
-sudo ptp4l -i <iface> -m            # add -2 (L2) or default UDP per your config
+bash deploy/ptp.sh --check          # read-only; reports a host-managed ptp4l + its lock offsets
 ```
+If `--check` reports a host-managed `ptp4l`, do **not** start another one — `deploy/ptp.sh`'s running
+modes refuse to (`FORCE=1` overrides), because a second `ptp4l` on the same interface fights the first
+and `--master`/`--test` omit `slaveOnly`, so they could win BMCA against the real grandmaster.
+
+Otherwise bring PTP up from here (loopback: software master on one port, slave on the other; both
+ports usually share one PHC so lock is trivially perfect — validates the mechanism):
+```bash
+sudo bash deploy/ptp.sh start       # ptp4l slave + phc2sys; 'status' / 'stop' to manage
+sudo ptp4l -i <iface> -m            # or drive ptp4l directly
+```
+Note the PHC index is **not** always `ptp0` — read it off the port (`ethtool -T <iface>` reports e.g.
+`PTP Hardware Clock: 2` on the x86_64 host, vs `ptp0` on the Spark).
 
 ---
 

@@ -129,16 +129,110 @@ Read `tx_pp_jitter` / `tx_pp_wander` / `tx_pp_sync_lost` for precision (the gate
 
 The `st2110_tx` operator (Result 3) — a real media generator, not the probe:
 ```bash
-cmake -S engine -B engine/build -DCMAKE_PREFIX_PATH=~/holoscan-sdk/install-cu13-aarch64-dgpu
+T=$(ls -d ~/holoscan-sdk/install-cu13-$(uname -m)-dgpu ~/holoscan-sdk/install-cu13-$(uname -m) 2>/dev/null | head -1)
+cmake -S engine -B engine/build -DCMAKE_PREFIX_PATH="$T"
 cmake --build engine/build
-sudo -n SPARK_PROFILE=2160p ./engine/build/st2110_tx_smoke   # SPARK_PROFILE=1080p|2160p, SPARK_FRAMES=n
+sudo -n SPARK_PROFILE=2160p SPARK_TX_PCI=0002:01:00.0 SPARK_DST_MAC=00:00:5e:00:53:30 \
+     ./engine/build/st2110_tx_smoke   # SPARK_PROFILE=1080p|2160p, SPARK_FRAMES=n
 ```
 Full loopback (RX first, then TX — two processes, mirrors gate-4; RX prints loss + ingest latency):
 ```bash
-sudo -n SPARK_PROFILE=2160p SPARK_SECONDS=10 ./engine/build/st2110_rx_smoke &   # 0002:01:00.1
-sudo -n SPARK_PROFILE=2160p SPARK_FRAMES=300 ./engine/build/st2110_tx_smoke      # 0002:01:00.0
+# The smokes now DISCOVER their ports (first linked-up ConnectX + its sibling). Pass the BDFs
+# explicitly to reproduce the Spark runs above exactly — that box has four ports in one L2 domain,
+# so discovery would pick the 0000:01:00.x pair, not the 0002:01:00.x pair used here.
+sudo -n SPARK_PROFILE=2160p SPARK_SECONDS=10 SPARK_RX_PCI=0002:01:00.1 ./engine/build/st2110_rx_smoke &
+sudo -n SPARK_PROFILE=2160p SPARK_FRAMES=300 SPARK_TX_PCI=0002:01:00.0 \
+        SPARK_DST_MAC=00:00:5e:00:53:30 ./engine/build/st2110_tx_smoke
 ```
 
 ## Provisioning (M1 open item #5) — DONE
 `REAL_TIME_CLOCK_ENABLE=1` (both CX-7 devices) + hugepages are now provisioned reproducibly by
 `deploy/provision.sh` (idempotent; `--check` for read-only state). See `deploy/README.md`.
+
+---
+
+# x86_64 second host — pacing re-validation (in progress, 2026-08-25)
+
+Gate 4 above was closed on the DGX Spark. `feat/x86-cross-platform` adds a second supported host, so
+the pacing mechanism has to be re-proven there: the NIC is a **different generation and a different
+link rate**, and `tx_pp` is a per-device capability, not a property of the DPDK stack.
+
+| | DGX Spark (gate-4 host) | x86_64 host (`saturnrack`) |
+|---|---|---|
+| CPU | GB10 Grace Blackwell, aarch64 | AMD EPYC 7443P, 24C, **single NUMA node** |
+| GPU | GB10 integrated | RTX PRO 6000 Blackwell Server Edition (driver 610.57.04) |
+| NIC | 2× dual-port **ConnectX-7**, 4× 100G | 1× dual-port **ConnectX-6 Lx** (`15b3:101f`, MCX631432AS), 2× 25G, fw 26.30.1004 |
+| ports | `0000:01:00.x`, `0002:01:00.x` | `0000:82:00.0` (up, 25G), `0000:82:00.1` (**link down — not cabled**) |
+| PHC | `ptp0` (shared by all four ports) | `ptp2` (`ethtool -T enp130s0f0np0`) |
+| kernel | 6.17 | 7.0.0-30-generic |
+
+## Step 1 — `tx_pp` capability probe: PASS
+`spike/dpdk_pacing_probe.sh` step 4 reports packet pacing **supported** on the CX-6 Lx. So
+`REAL_TIME_CLOCK_ENABLE=1` took effect through the cold reboot, the port advertises DPDK's
+`SEND_ON_TIMESTAMP` Tx offload, and `dpdk_tx_backend.cpp` will take its paced path rather than the
+unpaced development fallback. ST 2110-21 compliant TX is available on this host.
+
+This is the M0 gate-2 mechanism question answered for a *second* NIC generation — pacing is not a
+CX-7-only capability (it is CX-6 Dx / Lx and later).
+
+## Step 2 — PTP: already disciplined by the host, not by `deploy/ptp.sh`
+This box runs linuxptp under systemd from boot, slaved to a facility grandmaster:
+
+| unit | what it does |
+|---|---|
+| `ptp4l-smpte.service` | `ptp4l -f /etc/linuxptp/ptp4l-smpte.conf` — `clientOnly 1`, **domain 127**, ST 2059-2, hardware timestamping, on `enp130s0f0np0` |
+| `phc2sys-smpte.service` | `phc2sys -a -r -n 127` — PHC → `CLOCK_REALTIME` |
+
+Measured lock (`journalctl -u ptp4l-smpte`): **rms ~20–23 ns, max ~58 ns** to the GM, path delay
+~3.57 µs, stable; `phc2sys` holds `CLOCK_REALTIME` at rms ~12–16 ns. That is orders of magnitude
+inside the ST 2110-21 budget, and it is the *production* case the Spark runs never exercised — those
+were a trivially-locked single-box loopback (`sync_lost=0` came free because all four ports shared
+one PHC).
+
+The host config and `deploy/ptp4l.conf` agree on domain 127 / ST 2059-2 / E2E / hardware timestamping,
+so the engine needs no change: `st2110_tx`/`st2110_rx` read the same PHC the daemon disciplines.
+
+> **Do not run `deploy/ptp.sh` (`slave`/`start`/`--master`/`--test`) on this host.** A second `ptp4l`
+> on the same interface fights the systemd one, and `--master`/`--test` deliberately omit
+> `slaveOnly`, so they could try to win BMCA against the facility grandmaster. `deploy/ptp.sh` now
+> detects an externally-managed `ptp4l` and refuses to start on top of it (`FORCE=1` overrides).
+> `bash deploy/ptp.sh --check` and `status` stay safe and report the systemd units.
+
+## Blocked on cabling — the loopback pair does not exist yet
+Only `0000:82:00.0` is cabled; `0000:82:00.1` reports `carrier=0`. The at-rate proofs (Results 1–4
+above) are a **TX port → RX port** test, so they cannot run on one port. Unblock either by:
+* connecting the second SFP28 port (DAC to the same switch, or a direct loopback), which gives the
+  same topology as the Spark run; or
+* pointing TX at a real ST 2110 receiver / RX at a real sender on the fabric (`SPARK_DST_MAC`,
+  `SPARK_RX_MCAST`) — proves interop but not loss-free self-test.
+
+The smoke apps log `LINK DOWN` when the discovered port has no carrier, so this failure mode is
+visible at startup rather than as a silent zero-packet run.
+
+## Pending — the numbers to fill in here
+Once the second port is cabled, re-run the gate-4 sequence and record it in this section. Ports are
+now discovered (`engine/operators/common/nic_ports.hpp` — first linked-up ConnectX + its sibling), so
+no BDFs are needed on this host:
+
+```bash
+sudo python3 spike/detect_loopback.py                      # confirm the pair sees each other
+sudo -E PROFILE=2160p bash spike/st2110_loopback_gate4.sh   # tx_pp_jitter / wander / sync_lost
+sudo -n SPARK_PROFILE=2160p SPARK_SECONDS=10 ./engine/build/st2110_rx_smoke &
+sudo -n SPARK_PROFILE=2160p SPARK_FRAMES=300 ./engine/build/st2110_tx_smoke
+```
+
+Targets, to match the Spark: `tx_pp_sync_lost=0`, `wander=0`, jitter in the tens of ns,
+`future_err=0`, `lost=0`, ingest latency ~2–3 µs.
+
+Two things to watch that the Spark run could not surface:
+1. **25G, not 100G.** 2160p59.94 (~11.9 Gbps) is ~48 % of a 25G port, versus ~12 % of the Spark's
+   100G. Pacing precision under high *relative* Tx load is exactly the risk M0 flagged, so a clean
+   12G result here is a stronger result than the Spark's, not a weaker one — and 25G is a hard
+   ceiling for anything beyond a single UHD flow on this card.
+2. **A real grandmaster in the loop.** `sync_lost` and `wander` now measure the NIC pacing clock
+   against a GM-disciplined PHC rather than a free-running one; a non-zero `wander` here would be a
+   genuine finding, not the no-op it was on the Spark.
+
+NUMA, flagged as a risk for a discrete PCIe NIC, is a **non-issue on this box**: single socket, one
+NUMA node (`/sys/bus/pci/devices/0000:82:00.0/numa_node` = -1), so the default `TX_CORES=0,1` /
+`RX_CORES=2,3` cannot land cross-socket.
