@@ -129,8 +129,7 @@ Read `tx_pp_jitter` / `tx_pp_wander` / `tx_pp_sync_lost` for precision (the gate
 
 The `st2110_tx` operator (Result 3) — a real media generator, not the probe:
 ```bash
-T=$(ls -d ~/holoscan-sdk/install-cu13-$(uname -m)-dgpu ~/holoscan-sdk/install-cu13-$(uname -m) 2>/dev/null | head -1)
-cmake -S engine -B engine/build -DCMAKE_PREFIX_PATH="$T"
+cmake -G Ninja -S engine -B engine/build     # no SDK to point at — see docs/M11-runtime.md
 cmake --build engine/build
 sudo -n SPARK_PROFILE=2160p SPARK_TX_PCI=0002:01:00.0 SPARK_DST_MAC=00:00:5e:00:53:30 \
      ./engine/build/st2110_tx_smoke   # SPARK_PROFILE=1080p|2160p, SPARK_FRAMES=n
