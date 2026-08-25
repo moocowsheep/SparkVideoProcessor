@@ -162,7 +162,7 @@ link rate**, and `tx_pp` is a per-device capability, not a property of the DPDK 
 | GPU | GB10 integrated | RTX PRO 6000 Blackwell Server Edition (driver 610.57.04) |
 | NIC | 2× dual-port **ConnectX-7**, 4× 100G | 1× dual-port **ConnectX-6 Lx** (`15b3:101f`, MCX631432AS), 2× 25G, fw 26.30.1004 |
 | ports | `0000:01:00.x`, `0002:01:00.x` | `0000:82:00.0` (up, 25G), `0000:82:00.1` (**link down — not cabled**) |
-| PHC | `ptp0` (shared by all four ports) | `ptp2` (`ethtool -T enp130s0f0np0`) |
+| PHC | `ptp0` (shared by all four ports) | `ptp2` (port 0) + `ptp3` (port 1) — **one per port**, see below |
 | kernel | 6.17 | 7.0.0-30-generic |
 
 ## Step 1 — `tx_pp` capability probe: PASS
@@ -196,6 +196,23 @@ so the engine needs no change: `st2110_tx`/`st2110_rx` read the same PHC the dae
 > `slaveOnly`, so they could try to win BMCA against the facility grandmaster. `deploy/ptp.sh` now
 > detects an externally-managed `ptp4l` and refuses to start on top of it (`FORCE=1` overrides).
 > `bash deploy/ptp.sh --check` and `status` stay safe and report the systemd units.
+
+## The two ports do NOT share a PHC (unlike the Spark)
+`ethtool -T` reports **`enp130s0f0np0` → PHC 2** and **`enp130s0f1np1` → PHC 3**: this CX-6 Lx gives
+each port its own clock, where the Spark's CX-7s put all four ports on `ptp0`. `ptp4l-smpte`
+disciplines only `ptp2` (it runs on port 0). Consequences for the loopback:
+
+* **TX pacing is fine** on port 0 — `tx_pp` schedules against that port's own clock, the disciplined one.
+* **Ingest latency is not**, as measured on the Spark. Result 4's ~2–3 µs figure differenced an RX
+  hardware timestamp against a TX-side send time on a *shared* `ptp0`. Here those stamps come from two
+  independent clocks, so the difference is dominated by their offset, not by latency. Slave the RX
+  port's clock to the TX port's before quoting any cross-port number:
+  ```bash
+  sudo phc2sys -s /dev/ptp2 -c /dev/ptp3 -O 0 -m     # port0 clock -> port1 clock
+  ```
+  (`-O 0`: both are PHCs, no TAI/UTC offset between them.)
+* Loss, `future_err`/`past_err`, `tx_pp_jitter`/`wander`/`sync_lost` are all single-clock quantities
+  and need none of this.
 
 ## Blocked on cabling — the loopback pair does not exist yet
 Only `0000:82:00.0` is cabled; `0000:82:00.1` reports `carrier=0`. The at-rate proofs (Results 1–4
