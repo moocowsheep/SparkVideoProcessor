@@ -4,10 +4,13 @@
 
 # Spark Video Processor — host provisioning for the ST 2110 IO plane (M1 open item #5).
 #
-# Makes a fresh DGX Spark reproduce the runtime the engine needs, idempotently:
+# Makes a fresh host reproduce the runtime the engine needs, idempotently. Arch-agnostic: the DGX
+# Spark's integrated CX-7 and a ConnectX card in an x86 box are both found by PCI vendor, and the
+# packages are the same on arm64 and amd64.
 #   1. packages   — mft (mlxconfig), DPDK runtime+dev (mlx5 PMD), linuxptp
-#   2. NIC firmware — REAL_TIME_CLOCK_ENABLE=1 on every ConnectX-7 (the tx_pp prerequisite; without
-#                     it mlx5 reports "Packet pacing is not supported"). Needs a COLD REBOOT to apply.
+#   2. NIC firmware — REAL_TIME_CLOCK_ENABLE=1 on every ConnectX found by PCI vendor 15b3 (the tx_pp
+#                     prerequisite; without it mlx5 reports "Packet pacing is not supported"). Needs
+#                     a COLD REBOOT to apply — a warm `reboot` does not re-read firmware config.
 #   3. hugepages  — runtime alloc + persistent (sysctl.d) + /dev/hugepages mount, for DPDK/EAL.
 #
 # Usage:
@@ -38,7 +41,8 @@ need_root() {
   fi
 }
 
-# ConnectX-7 management BDFs = function-0 of each 15b3 card (mlxconfig is per-card).
+# ConnectX management BDFs = function-0 of each 15b3 card (mlxconfig is per-card).
+# Vendor-based, so this covers the Spark's CX-7 and any ConnectX in an x86 host alike.
 detect_cx7() { lspci -D -d 15b3: 2>/dev/null | awk '{print $1}' | grep '\.0$'; }
 
 # --- 1. packages ----------------------------------------------------------------------------------
@@ -74,7 +78,7 @@ provision_firmware() {
   local devs
   devs="$(detect_cx7)"
   if [ -z "$devs" ]; then
-    warn "no ConnectX-7 (15b3) devices on the bus — cable the CX-7, then re-run"
+    warn "no ConnectX (15b3) devices on the bus — cable/seat the NIC, then re-run"
     return
   fi
   for d in $devs; do

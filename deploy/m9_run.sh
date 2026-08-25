@@ -35,7 +35,12 @@ case "$V" in
   *) echo "unknown variant: $V" >&2; exit 1 ;;
 esac
 
-nvidia-smi -lgc 3003 >/dev/null 2>&1 || true
+# Lock the SM clock to this GPU's rated max (the GB10's DVFS governor never boosts under CUDA
+# load — docs/M9-filters.md — and locked clocks are what a media box wants anyway). Query the
+# max rather than hardcoding 3003 (GB10): an RTX PRO 6000 Blackwell rates 2430, and -lgc with
+# an out-of-range value is rejected. Best-effort; the run still works unlocked, just slower.
+MAXSM=$(nvidia-smi --query-gpu=clocks.max.sm --format=csv,noheader,nounits 2>/dev/null | head -1)
+[ -n "${MAXSM:-}" ] && nvidia-smi -lgc "$MAXSM" >/dev/null 2>&1 || true
 P=$(pidof st2110_pipeline || true)
 if [ -n "$P" ]; then kill -INT $P; sleep 3; fi
 LOG="/tmp/spark_m9_${V}.log"

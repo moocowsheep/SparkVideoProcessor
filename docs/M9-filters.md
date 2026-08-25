@@ -70,11 +70,17 @@ utilization, so fsrcnn/espcn only hit 59.94 fps with locked clocks. **The daemon
 clock to its rated max at every pipeline start** (`lock_gpu_clocks()` in control/daemon.cpp —
 root, idempotent, self-heals a manual `-rgc`; opt out with `SPARK_LOCK_GPU_CLOCKS=0` in the
 daemon's env). Standalone runs (`resize_smoke`, `test_sr_net`) don't go through the daemon —
-lock by hand first: `sudo nvidia-smi -lgc 3003` (undo: `sudo nvidia-smi -rgc`).
+lock by hand first — query the max rather than hardcoding it, since it is GPU-specific (3003 on
+GB10, 2430 on an RTX PRO 6000 Blackwell) and `-lgc` rejects out-of-range values:
+`sudo nvidia-smi -lgc $(nvidia-smi --query-gpu=clocks.max.sm --format=csv,noheader,nounits | head -1)`
+(undo: `sudo nvidia-smi -rgc`). On a discrete Blackwell card the DVFS governor boosts normally under
+CUDA load, so the lock matters far less there than it does on GB10 — the table below is GB10 data;
+measured on an RTX PRO 6000 Blackwell (unlocked) the same nets run fsrcnn 1.33 / fsrcnn-s 0.26 /
+espcn 2.89 ms per frame.
 
-Implementation (`engine/operators/resize/sr_net.cu`): hand-rolled fused CUDA — no
-TensorRT/cuDNN exists for this aarch64 box, and the nets are tiny enough that fused direct
-kernels win anyway. fp16 activations / fp32 accumulation; weights staged in shared memory;
+Implementation (`engine/operators/resize/sr_net.cu`): hand-rolled fused CUDA — no TensorRT/cuDNN
+was available for the aarch64 DGX Spark, and the nets are tiny enough that fused direct kernels win
+anyway, so the same hand-rolled path is kept on x86 rather than forking the implementation. fp16 activations / fp32 accumulation; weights staged in shared memory;
 middle/tail convs register-tile 2–4 pixels per thread; 1×1 convs never touch DRAM (fused into
 the 5×5 head / the shuffle tail); zero-pad borders match the TF training graphs. 10-bit video
 range maps (Y−64)/876 ↔ [0,1] with no input clamp (sub-black/super-white ride through; espcn's

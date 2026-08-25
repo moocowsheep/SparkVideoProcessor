@@ -1,6 +1,6 @@
 Package: spark-video-processor
 Version: @VERSION@
-Architecture: arm64
+Architecture: @ARCH@
 Maintainer: Devin Block <devin@devinblock.com>
 Installed-Size: @SIZE@
 Section: video
@@ -8,7 +8,7 @@ Priority: optional
 Homepage: https://github.com/moocowsheep/SparkVideoProcessor
 Depends: @DEPENDS@
 Recommends: python3, avahi-daemon
-Description: Real-time ST 2110 video processor for NVIDIA DGX Spark (GB10)
+Description: Real-time ST 2110 video processor on NVIDIA Blackwell GPUs
  DPDK-based SMPTE ST 2110-20/-30 receive/transmit with hardware-paced TX,
  PTP (ST 2059-2) genlock, fixed end-to-end latency with an ST 2110-30 audio
  relay, Blackmagic IP10 (10:8) codec for 2160p59.94/60 over 10G, optical-flow
@@ -19,6 +19,9 @@ Description: Real-time ST 2110 video processor for NVIDIA DGX Spark (GB10)
  (spark_controld, systemd unit spark-video-processor.service) and an NMOS
  IS-04/IS-05 node (spark_nmos_node, unit spark-nmos-node.service).
  .
- Requires the NVIDIA driver (libcuda, libnvidia-opticalflow) on a GB10 /
- DGX Spark class system. Holoscan, GXF, UCX, RMM and CUDA runtime libraries
- are bundled under /usr/lib/spark-video-processor/lib.
+ Requires the NVIDIA driver (libcuda, libnvidia-opticalflow) and a Blackwell
+ GPU with an optical-flow engine: DGX Spark / GB10 (arm64) and RTX PRO 6000
+ Blackwell / GB20x (amd64) are the validated targets. Hardware-paced TX
+ additionally needs a ConnectX NIC with REAL_TIME_CLOCK_ENABLE=1; without it
+ the pipeline still runs, unpaced. Holoscan, GXF, UCX, RMM and CUDA runtime
+ libraries are bundled under /usr/lib/spark-video-processor/lib.

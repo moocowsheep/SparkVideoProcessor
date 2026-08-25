@@ -1,7 +1,8 @@
 // Copyright 2026 Devin Block
 // SPDX-License-Identifier: Apache-2.0
 
-// M0 gate 3 probe: confirm the NVIDIA Optical Flow Accelerator (NVOFA) works on GB10 (aarch64).
+// M0 gate 3 probe: confirm the NVIDIA Optical Flow Accelerator (NVOFA) works on this host.
+// Validated on both targets: DGX Spark GB10 (aarch64) and RTX PRO 6000 Blackwell (x86_64).
 // Runs HW optical flow (NV_OF_MODE_OPTICALFLOW) between two synthetic frames using the CUDA driver
 // API + the on-system libnvidia-opticalflow.so. Success here confirms the v1 motion-comp FRC path.
 //
@@ -117,6 +118,6 @@ int main() {
     fl.nvOFDestroyGPUBufferCuda(bIn); fl.nvOFDestroyGPUBufferCuda(bRef); fl.nvOFDestroyGPUBufferCuda(bOut);
     fl.nvOFDestroy(hOF);
     cuCtxDestroy(ctx);
-    printf("[nvof] PASS — NVOFA hardware optical flow works on this GB10.\n");
+    printf("[nvof] PASS — NVOFA hardware optical flow works on this GPU.\n");
     return 0;
 }

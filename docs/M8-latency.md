@@ -63,6 +63,13 @@ would land at ~1–3 ms, but it is a milestone of its own, not a tuning pass.
    until the kernel completes — the RX reuses slots on `use_count==1`), pack writes straight into
    the TX host buffer. Removes ~2 ms/frame of copies plus host-thread blocking.
 
+   **On a discrete GPU** (x86 host, RTX PRO 6000 Blackwell) `pageableMemoryAccess` is 0, so the
+   auto-detect selects the H2D+kernel+D2H staging path instead. That is correct, not a fallback
+   bug — host and device memory are genuinely separate there — but it means the ~2 ms saving above
+   is a GB10-only win, and the discrete-GPU latency budget carries one PCIe round trip per frame
+   (2 × 16.6 MB at 2160p) that the Spark does not. The numbers in this doc are GB10 measurements;
+   re-measure `tx_e2e_us` before quoting a budget on an x86 box.
+
 6. **FRC up-convert scheduled both frames of each pair at the same instant.** The interpolated mid
    carried `cur`'s `capture_ts`, so under genlock the pair (mid, real) got the SAME send base and
    the second frame past-stamped into an unpaced burst. → Mid is now stamped at the temporal
@@ -76,7 +83,7 @@ would land at ~1–3 ms, but it is a milestone of its own, not a tuning pass.
 | `SPARK_TX_LEAD_NS` | 8000000 | genlock lead target = TX-side latency + jitter margin. Lower stepwise (6→4→3 ms) while `tx_past_err` stays 0 and no dips. Every ns here is a ns of latency. |
 | `SPARK_TX_TRIM_NS` | 5000 | max ns/frame the base+media clock slew toward target. 0 = exact legacy timing (no trim, no slew). Raise to converge faster (more receiver rate offset while trimming). |
 | `SPARK_SCHED` | event | `event` = EventBasedScheduler (low latency); `mts` = legacy MultiThreadScheduler. |
-| `SPARK_ZEROCOPY` | auto | host zero-copy in unpack/pack; auto-detects `pageableMemoryAccess` (GB10: on). |
+| `SPARK_ZEROCOPY` | auto | host zero-copy in unpack/pack; auto-detects `pageableMemoryAccess` (GB10 unified: on; discrete GPU: off → staging copies). |
 | `SPARK_FRC` | 1 | **set 0 for lowest latency**: skips NVOF entirely AND removes retime's half-frame content age. 2 (up-convert) inherently needs the next frame. |
 | (automatic) | — | identity resize passthrough when in==out geometry. |
 

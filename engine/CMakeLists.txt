@@ -1,21 +1,30 @@
 # Spark Video Processor — engine (C++/CUDA Holoscan pipeline).
-# Build against the source-built Holoscan SDK install tree (see docs/SETUP.md step 3):
-#   T=~/holoscan-sdk/install-cu13-aarch64-dgpu
+# Build against the source-built Holoscan SDK install tree (see docs/SETUP.md step 3). The install
+# tree name carries the arch, so glob it rather than hardcoding aarch64 (x86_64 hosts get
+# install-cu13-x86_64-dgpu):
+#   T=$(echo ~/holoscan-sdk/install-cu13-*-dgpu)
 #   cmake -G Ninja -S engine -B engine/build -DCMAKE_PREFIX_PATH="$T"
 #   cmake --build engine/build
 #   ctest --test-dir engine/build                          # framing unit test (no NIC/root)
 #   LD_LIBRARY_PATH="$T/lib" ./engine/build/spark_engine    # placeholder ping graph
-#   sudo -E LD_LIBRARY_PATH="$T/lib" ./engine/build/st2110_tx_smoke   # gate-4 follow-on (needs CX-7)
+#   sudo -E LD_LIBRARY_PATH="$T/lib" ./engine/build/st2110_tx_smoke   # gate-4 follow-on (needs a ConnectX)
 cmake_minimum_required(VERSION 3.24)  # CMAKE_CUDA_ARCHITECTURES native
 project(spark_engine LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
-# GB10 (Grace Blackwell) is compute capability 12.1 = sm_121. Set explicitly: enabling the CUDA
-# language pre-defines CMAKE_CUDA_ARCHITECTURES to a conservative default (sm_75 here), whose PTX
-# won't run on Blackwell ("unsupported toolchain"). Override the cache var for the build.
-set(CMAKE_CUDA_ARCHITECTURES 121 CACHE STRING "CUDA archs (GB10 = 121)" FORCE)
+# CUDA archs. Enabling the CUDA language pre-defines CMAKE_CUDA_ARCHITECTURES to a conservative
+# default (sm_75), whose PTX won't run on Blackwell ("unsupported toolchain"), so we must override
+# it. The two validated targets are both Blackwell but NOT the same SM:
+#   * DGX Spark GB10 (aarch64)             = compute capability 12.1 -> sm_121
+#   * RTX PRO 6000 Blackwell / GB20x (x86) = compute capability 12.0 -> sm_120
+# Default to a fat binary covering both so one build tree runs on either box. Override for a
+# leaner/faster build: -DSPARK_CUDA_ARCHS=120 (or =native to match the local GPU exactly).
+set(SPARK_CUDA_ARCHS "120;121" CACHE STRING
+    "CUDA architectures (120=GB20x/RTX PRO Blackwell, 121=GB10/DGX Spark, or 'native')")
+set(CMAKE_CUDA_ARCHITECTURES ${SPARK_CUDA_ARCHS} CACHE STRING "CUDA archs" FORCE)
+message(STATUS "spark_engine: CUDA architectures = ${CMAKE_CUDA_ARCHITECTURES}")
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -88,8 +97,26 @@ target_link_libraries(spark_filters PUBLIC holoscan::core spark_resize CUDA::cud
 
 # --- FRC: NVOF optical flow + motion-compensated interpolation (CUDA) -----------------------------
 # Raw NVOF (libnvidia-opticalflow, driver API) — NvOFFRUC isn't available on aarch64, so FRC is
-# hand-rolled on the flow field. SDK headers are vendored under spike/third_party (M0).
-find_library(NVOF_LIB nvidia-opticalflow PATHS /usr/lib/aarch64-linux-gnu /lib/aarch64-linux-gnu REQUIRED)
+# hand-rolled on the flow field (and we keep the same hand-rolled path on x86 so both targets run
+# identical code). SDK headers are vendored under spike/third_party — run `bash spike/fetch_nvof_sdk.sh`.
+# The driver ships the .so under the multiarch triplet dir, which differs per platform
+# (aarch64-linux-gnu vs x86_64-linux-gnu), so search by CMAKE_LIBRARY_ARCHITECTURE rather than a
+# hardcoded aarch64 path. Only libnvidia-opticalflow.so.1 (no .so symlink) exists on some driver
+# installs, hence the explicit NAMES list.
+find_library(NVOF_LIB
+  NAMES nvidia-opticalflow libnvidia-opticalflow.so.1
+  PATHS /usr/lib/${CMAKE_LIBRARY_ARCHITECTURE} /lib/${CMAKE_LIBRARY_ARCHITECTURE}
+        /usr/lib/aarch64-linux-gnu /lib/aarch64-linux-gnu
+        /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu
+  REQUIRED)
+message(STATUS "spark_engine: NVOF library = ${NVOF_LIB}")
+
+set(NVOF_SDK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../spike/third_party/NVIDIAOpticalFlowSDK)
+if(NOT EXISTS ${NVOF_SDK_DIR}/nvOpticalFlowCuda.h)
+  message(FATAL_ERROR
+    "NVIDIA Optical Flow SDK headers missing at ${NVOF_SDK_DIR}.\n"
+    "  Run: bash spike/fetch_nvof_sdk.sh")
+endif()
 add_library(spark_frc STATIC
   operators/frc/nvof_flow.cpp
   operators/frc/frc_kernels.cu
@@ -97,7 +124,7 @@ add_library(spark_frc STATIC
 )
 target_include_directories(spark_frc
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../spike/third_party/NVIDIAOpticalFlowSDK)
+  PRIVATE ${NVOF_SDK_DIR})
 target_link_libraries(spark_frc PUBLIC holoscan::core spark_resize CUDA::cudart CUDA::cuda_driver ${NVOF_LIB})
 
 # --- Holoscan operators ---------------------------------------------------------------------------

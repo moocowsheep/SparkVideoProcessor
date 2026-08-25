@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # deploy/make_deb.sh — build the spark-video-processor Debian package for
-# DGX Spark (arm64). Run from anywhere inside the repo; needs built trees
+# the host architecture (arm64 on the DGX Spark, amd64 on an x86 host; the
+# package is native, so it is built where it will run). Run from anywhere
+# inside the repo; needs built trees
 # (engine/build, control/build incl. spark_nmos_node) and dpkg-deb.
 #
 #   bash deploy/make_deb.sh [VERSION] [OUTDIR]
@@ -25,6 +27,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:-0.8.0~beta}"
 OUTDIR="${2:-$ROOT}"
 PKG=spark-video-processor
+# Native package: build arch = host arch (arm64 on the DGX Spark, amd64 on x86_64).
+DEB_ARCH="$(dpkg --print-architecture)"
 BINS=(
   "$ROOT/engine/build/st2110_pipeline"
   "$ROOT/control/build/spark_controld"
@@ -75,6 +79,7 @@ cp "$ROOT/deploy/debian/default-spark-nmos-node" "$STAGE/etc/default/spark-nmos-
 
 SIZE=$(du -sk --exclude=DEBIAN "$STAGE" | cut -f1)
 sed -e "s/@VERSION@/$VERSION/" -e "s/@SIZE@/$SIZE/" -e "s/@DEPENDS@/$DEPENDS/" \
+    -e "s/@ARCH@/$DEB_ARCH/" \
     "$ROOT/deploy/debian/control.in" > "$STAGE/DEBIAN/control"
 install -m755 "$ROOT/deploy/debian/postinst" "$ROOT/deploy/debian/prerm" \
               "$ROOT/deploy/debian/postrm" "$STAGE/DEBIAN/"
@@ -87,6 +92,6 @@ BAD=$(LD_LIBRARY_PATH="$LIBDIR/lib" ldd "$LIBDIR/st2110_pipeline" \
 [ "$BAD" -eq 0 ] || { echo "bundled closure incomplete:" >&2
   LD_LIBRARY_PATH="$LIBDIR/lib" ldd "$LIBDIR/st2110_pipeline" | grep 'not found\|/home/' >&2; exit 1; }
 
-DEB="$OUTDIR/${PKG}_${VERSION}_arm64.deb"
+DEB="$OUTDIR/${PKG}_${VERSION}_${DEB_ARCH}.deb"
 dpkg-deb --build --root-owner-group "$STAGE" "$DEB"
 echo "built: $DEB"
